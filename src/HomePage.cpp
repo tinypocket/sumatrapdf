@@ -243,7 +243,11 @@ void SetPromoString(Str s) {
 
 static TempStr GetAppVersionTemp() {
     TempStr s = str::DupTemp("v" CURR_VERSION_STRA);
-    if (IsProcess64()) {
+    // name the architecture: an ARM64 build otherwise also reported "64-bit",
+    // so there was no way to tell which one was installed on an ARM machine
+    if (IsArmBuild()) {
+        s = str::JoinTemp(s, StrL(" ARM64"));
+    } else if (IsProcess64()) {
         s = str::JoinTemp(s, StrL(" 64-bit"));
     } else {
         s = str::JoinTemp(s, StrL(" 32-bit"));

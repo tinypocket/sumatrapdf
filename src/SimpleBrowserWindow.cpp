@@ -507,6 +507,17 @@ static LRESULT CALLBACK TbUrlEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         }
         return 0;
     }
+    // A plain Win32 EDIT has no built-in Ctrl+A, and the frame's accelerators
+    // would otherwise swallow it, so select-all has to be implemented here.
+    if (msg == WM_KEYDOWN && wp == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+        SendMessageW(hwnd, EM_SETSEL, 0, -1);
+        return 0;
+    }
+    // ...and Ctrl+A still reaches the edit as a control character, which the
+    // default handler would insert as a literal glyph
+    if (msg == WM_CHAR && wp == 1) {
+        return 0;
+    }
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
@@ -589,7 +600,7 @@ static TouchBrowser* CreateTouchBrowser(MainWindow* win) {
     tb->btnForward = TbMakeButton(frame, tb->hFont, StrL("Fwd"), MkFunc0<TouchBrowser>(TbOnForward, tb));
     tb->btnForward->SetIsEnabled(false);
     tb->btnHome = TbMakeButton(frame, tb->hFont, StrL("Home"), MkFunc0<TouchBrowser>(TbOnHome, tb));
-    tb->btnStar = TbMakeButton(frame, tb->hFont, StrL("Bookmark"), MkFunc0<TouchBrowser>(TbOnStar, tb));
+    tb->btnStar = TbMakeButton(frame, tb->hFont, StrL("Favorite"), MkFunc0<TouchBrowser>(TbOnStar, tb));
 
     HINSTANCE inst = GetInstance();
     tb->hwndUrl = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0,
@@ -648,6 +659,25 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
         if (show && tb->webView->hwnd) {
             SetWindowPos(tb->webView->hwnd, HWND_TOP, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+    if (show) {
+        // ...but then the nav row and the favorites chips must go above the
+        // webview, or WebView2 (which is topmost and briefly covers the whole
+        // content area before the first layout) eats clicks meant for them -
+        // that is what made the buttons "sometimes stop working".
+        auto raise = [](HWND h) {
+            if (h) {
+                SetWindowPos(h, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        };
+        raise(tb->btnBack ? tb->btnBack->hwnd : nullptr);
+        raise(tb->btnForward ? tb->btnForward->hwnd : nullptr);
+        raise(tb->btnHome ? tb->btnHome->hwnd : nullptr);
+        raise(tb->btnStar ? tb->btnStar->hwnd : nullptr);
+        raise(tb->hwndUrl);
+        for (TbChip* c : tb->bmChips) {
+            raise(c->btn ? c->btn->hwnd : nullptr);
         }
     }
 }

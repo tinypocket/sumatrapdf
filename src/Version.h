@@ -5,11 +5,15 @@
 #include "BuildConfig.h"
 
 // CURR_VERSION can be over-written externally
+// SumatraPDF+ fork: the third component is the fork's own release number, so
+// successive fork builds compare as newer (CompareProgramVersion treats a
+// missing component as 0, so 3.7.1 > 3.7). Bump it for every release, or the
+// update check sees the same version and reports "You have the latest version".
 #ifndef CURR_VERSION
-#define CURR_VERSION 3.7
+#define CURR_VERSION 3.7.1
 #endif
 #ifndef CURR_VERSION_COMMA
-#define CURR_VERSION_COMMA 3, 7, 0
+#define CURR_VERSION_COMMA 3, 7, 1
 #endif
 
 // this is sth. like "3.5"
