@@ -1332,6 +1332,13 @@ const globalPrefs: Field[] = [
     "https://github.com/tinypocket/sumatrapdf/releases/latest/download/update-check.txt",
     "private update manifest URL; when set, it replaces the public update feed and update installers must use the same URL origin. SumatraPDF+ defaults it to this fork's GitHub releases so update checks are self-hosted",
   ).ver("3.8"),
+  field(
+    "BrowserHomePage",
+    Str,
+    "https://www.google.com",
+    "home page for the in-product web browser (the rail's globe view)",
+  ).ver("3.8"),
+  compactArray("BrowserBookmarks", Str, null, "bookmarked URLs shown in the in-product web browser").ver("3.8"),
   // saved & honored, but hidden from the advanced settings dialog (edited via
   // the "Automatically check for updates" checkbox in Options instead)
   field("CheckForUpdates", Bool, true, "if true, check at startup whether an update is available").internal(),

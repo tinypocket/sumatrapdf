@@ -1160,11 +1160,21 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
     ICoreWebView2Settings* settings = nullptr;
     HRESULT hr = webview->get_Settings(&settings);
     if (hr == S_OK && settings) {
-        settings->put_AreDefaultContextMenusEnabled(FALSE);
+        settings->put_AreDefaultContextMenusEnabled(enableBrowserChrome ? TRUE : FALSE);
         settings->put_AreDevToolsEnabled(FALSE);
-        settings->put_AreDefaultScriptDialogsEnabled(FALSE);
+        settings->put_AreDefaultScriptDialogsEnabled(enableBrowserChrome ? TRUE : FALSE);
         settings->put_IsStatusBarEnabled(FALSE);
-        settings->put_IsZoomControlEnabled(FALSE);
+        settings->put_IsZoomControlEnabled(enableBrowserChrome ? TRUE : FALSE);
+        // WebView2's own password autosave + general autofill (ICoreWebView2Settings4).
+        // Stored in this control's dataDir, not the user's Edge profile.
+        if (enableAutofill) {
+            ICoreWebView2Settings4* settings4 = nullptr;
+            if (SUCCEEDED(settings->QueryInterface(IID_PPV_ARGS(&settings4))) && settings4) {
+                settings4->put_IsGeneralAutofillEnabled(TRUE);
+                settings4->put_IsPasswordAutosaveEnabled(TRUE);
+                settings4->Release();
+            }
+        }
         settings->Release();
     }
 

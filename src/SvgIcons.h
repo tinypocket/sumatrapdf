@@ -44,6 +44,7 @@ enum class TbIcon {
     Recent,
     Folder,
     Document,
+    Web,
     kMax
 };
 

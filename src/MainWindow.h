@@ -15,6 +15,7 @@ struct Tooltip;
 struct TreeView;
 struct SelectionToolbar;
 struct RailWnd;
+struct TouchBrowser;
 struct TopBarWnd;
 struct ILayout;
 struct Spacer;
@@ -138,6 +139,7 @@ enum class TouchView {
     Doc = 0,
     Home,
     Library,
+    Web,
 };
 
 /* Describes position, the target (URL or file path) and infotip of a "hyperlink" */
@@ -204,6 +206,9 @@ struct MainWindow {
     TouchPanelMode touchPanelMode = TouchPanelMode::Bookmarks;
     bool touchSidebarCollapsed = false;
     HWND hwndTouchSidebarCollapse = nullptr;
+
+    // the in-product web browser shown for TouchView::Web (see SimpleBrowserWindow.cpp)
+    TouchBrowser* touchBrowser = nullptr;
 
     // custom-drawn top bar; replaces the rebar toolbar with the rail chrome
     TopBarWnd* topBarWnd = nullptr;

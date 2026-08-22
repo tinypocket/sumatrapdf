@@ -17,3 +17,10 @@ void SetTouchPanelMode(MainWindow*, TouchPanelMode);
 void SetTouchView(MainWindow*, TouchView);
 void SetTouchSidebarCollapsed(MainWindow*, bool collapsed);
 void SetTouchDocumentTab(MainWindow*, int tabIndex);
+
+// in-product web browser shown for TouchView::Web (defined in SimpleBrowserWindow.cpp)
+void ShowTouchWebView(MainWindow* win, bool show);
+void LayoutTouchWebView(MainWindow* win, Rect contentRc);
+void DestroyTouchWebView(MainWindow* win);
+void TouchWebGoHome(MainWindow* win);
+void TouchWebToggleBookmark(MainWindow* win);

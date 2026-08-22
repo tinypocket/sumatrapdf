@@ -221,6 +221,7 @@ MainWindow::~MainWindow() {
     delete favSplitter;
     DestroyRail(this);
     DestroyTopBar(this);
+    DestroyTouchWebView(this);
 }
 
 void ClearMouseState(MainWindow* win) {

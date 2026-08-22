@@ -342,6 +342,16 @@ static const char* gIconDocument =
   <path d="M9 12h6m-6 3h6m-6 3h4" />
 </svg>)";
 
+static const char* gIconWeb =
+    R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="1.7" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="0" y="0" width="24" height="24" stroke="none"></rect>
+  <circle cx="12" cy="12" r="9" />
+  <path d="M3.6 9h16.8" />
+  <path d="M3.6 15h16.8" />
+  <path d="M11.5 3a17 17 0 0 0 0 18" />
+  <path d="M12.5 3a17 17 0 0 1 0 18" />
+</svg>)";
+
 // must match order in enum class TbIcon
 // clang-format off
 static const char* gIcons[] = {
@@ -384,6 +394,7 @@ static const char* gIcons[] = {
     gIconRecent,
     gIconFolder,
     gIconDocument,
+    gIconWeb,
 };
 // clang-format on
 

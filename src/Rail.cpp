@@ -58,6 +58,7 @@ static RailItem gRailItems[] = {
     {TbIcon::WindowStack, TouchPanelMode::Bookmarks, TouchView::Doc, kRailDocumentPreview, true, false, true},
     {TbIcon::Recent, TouchPanelMode::Bookmarks, TouchView::Home, 0, true, false},
     {TbIcon::Library, TouchPanelMode::Bookmarks, TouchView::Library, 0, true, false},
+    {TbIcon::Web, TouchPanelMode::Bookmarks, TouchView::Web, 0, true, false},
 };
 
 constexpr int kRailItemsCount = (int)dimof(gRailItems);
@@ -187,7 +188,12 @@ void SetTouchSidebarCollapsed(MainWindow* win, bool collapsed) {
 }
 
 static void SetTouchHomeTabLabel(MainWindow* win, TouchView view) {
-    Str label = view == TouchView::Library ? StrL("Library") : StrL("Home");
+    Str label = StrL("Home");
+    if (view == TouchView::Library) {
+        label = StrL("Library");
+    } else if (view == TouchView::Web) {
+        label = StrL("Web");
+    }
     for (int i = 0; i < win->TabCount(); i++) {
         WindowTab* tab = win->GetTab(i);
         if (tab && tab->IsAboutTab()) {
@@ -205,6 +211,9 @@ void SetTouchView(MainWindow* win, TouchView view) {
     TouchView oldView = win->touchView;
     if (oldView != view && (oldView == TouchView::Home || oldView == TouchView::Library)) {
         HomePageDestroySearch(win);
+    }
+    if (oldView != view && oldView == TouchView::Web) {
+        ShowTouchWebView(win, false);
     }
     if (view == TouchView::Doc) {
         TouchView previous = win->touchView;
@@ -224,8 +233,11 @@ void SetTouchView(MainWindow* win, TouchView view) {
         win->uiState.favVisible = false;
     }
     win->touchView = view;
-    if (view == TouchView::Home || view == TouchView::Library) {
+    if (view == TouchView::Home || view == TouchView::Library || view == TouchView::Web) {
         SetTouchHomeTabLabel(win, view);
+    }
+    if (view == TouchView::Web) {
+        ShowTouchWebView(win, true);
     }
     UpdateRailForWindow(win);
     ScheduleUiUpdate(win, kUiForceRelayout | kUiSidebarDirty | kUiToolbarDirty);

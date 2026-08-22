@@ -10,11 +10,22 @@
 #include "wingui/WinGui.h"
 #include "wingui/WebView.h"
 
+#include "base/File.h"
+#include "base/GuessFileType.h"
+#include "base/Http.h"
+#include "base/UITask.h"
+
 #include "Settings.h"
+#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "AppTools.h"
 #include "Commands.h"
 #include "SumatraConfig.h"
+#include "EngineBase.h"
+#include "EngineAll.h"
+#include "MainWindow.h"
 #include "SumatraPDF.h"
+#include "Rail.h"
 #include "Translations.h"
 
 #include "SimpleBrowserWindow.h"
@@ -106,7 +117,7 @@ static void OnForward(SimpleBrowserWindow* w) {
 // an absolute http(s)/mailto URL is "non-internal": it points outside the
 // content we serve from our virtual host (UrlForWebViewEvent strips the host
 // prefix off internal pages, so those arrive as a bare path without a scheme)
-static bool IsExternalUrl(Str url) {
+static bool IsExternalWebUrl(Str url) {
     return str::StartsWithI(url, StrL("http://")) || str::StartsWithI(url, StrL("https://")) ||
            str::StartsWithI(url, StrL("mailto:"));
 }
@@ -122,7 +133,7 @@ static bool NavigationStarting(void* ctx, Str url, bool newWindow) {
     // the user's default browser instead of the in-app webview. A plain browser
     // window (no virtual host) keeps normal in-window navigation.
     bool servesInternalContent = w->webView && len(w->webView->resourceUriPrefix) > 0;
-    if (newWindow || (servesInternalContent && IsExternalUrl(url))) {
+    if (newWindow || (servesInternalContent && IsExternalWebUrl(url))) {
         SumatraLaunchBrowser(url);
         return false;
     }
@@ -312,4 +323,445 @@ SimpleBrowserWindow* SimpleBrowserWindowCreate(const SimpleBrowserCreateArgs& ar
         return nullptr;
     }
     return res;
+}
+
+// ---------------------------------------------------------------------------
+// In-product embedded web browser (TouchView::Web, the rail's globe icon).
+// Reuses the WebView2 plumbing above but lives inside the frame's content area
+// (children of hwndFrame drawn over the canvas) instead of its own window.
+// ---------------------------------------------------------------------------
+
+constexpr int kTbNavDy = 40; // navigation row height (logical px)
+constexpr int kTbBmDy = 34;  // bookmarks row height
+constexpr int kTbPad = 6;
+constexpr int kTbGap = 4;
+constexpr int kTbBtnDx = 64;
+
+struct TouchBrowser;
+
+struct TbChip {
+    TouchBrowser* tb = nullptr;
+    int idx = 0;
+    Button* btn = nullptr;
+};
+
+struct TouchBrowser {
+    MainWindow* win = nullptr;
+    WebviewWnd* webView = nullptr;
+    Button* btnBack = nullptr;
+    Button* btnForward = nullptr;
+    Button* btnHome = nullptr;
+    Button* btnStar = nullptr;
+    HWND hwndUrl = nullptr;
+    HFONT hFont = nullptr;
+    Str currentUrl;
+    Vec<TbChip*> bmChips;
+    bool bmDirty = true;
+};
+
+static Str TouchBrowserHomeUrl() {
+    Str url = gGlobalPrefs->browserHomePage;
+    if (!url) {
+        url = StrL("https://www.google.com");
+    }
+    return url;
+}
+
+// a URL points at a document we can open when its path has a supported
+// extension (query string / fragment stripped first)
+static bool TouchBrowserUrlIsDoc(Str url, Str* extOut) {
+    if (!url) {
+        return false;
+    }
+    Str s = url;
+    int cut = str::IndexOfChar(s, '?');
+    if (cut >= 0) {
+        s = Str(s.s, cut);
+    }
+    cut = str::IndexOfChar(s, '#');
+    if (cut >= 0) {
+        s = Str(s.s, cut);
+    }
+    FileType ft = GuessFileTypeFromName(s);
+    if (!IsSupportedFileType(ft, true)) {
+        return false;
+    }
+    if (extOut) {
+        int dot = str::LastIndexOfChar(s, '.');
+        *extOut = (dot >= 0) ? str::DupTemp(Str(s.s + dot, s.len - dot)) : StrL(".dat");
+    }
+    return true;
+}
+
+struct TbDocDownload {
+    Str url;
+    Str destPath;
+    MainWindow* win = nullptr;
+};
+
+static void TbDocDownloadFinish(TbDocDownload* d) {
+    if (IsMainWindowValid(d->win) && file::Exists(d->destPath)) {
+        LoadArgs args(d->destPath, d->win);
+        LoadDocument(&args);
+        SetTouchView(d->win, TouchView::Doc);
+    }
+    str::Free(d->url);
+    str::Free(d->destPath);
+    delete d;
+}
+
+static void TbDocDownloadAsync(TbDocDownload* d) {
+    constexpr i64 kMaxWebDocSize = 256LL * 1024 * 1024;
+    HttpGetToFile(d->url, d->destPath, {}, kMaxWebDocSize);
+    uitask::Post(MkFunc0<TbDocDownload>(TbDocDownloadFinish, d), "TbDocDownloadFinish");
+}
+
+// navigationStarting: intercept links to documents so they open as tabs in
+// SumatraPDF+ instead of navigating the webview; everything else proceeds.
+static bool TbNavigationStarting(void* ctx, Str url, bool /*newWindow*/) {
+    auto* tb = (TouchBrowser*)ctx;
+    Str ext;
+    if (TouchBrowserUrlIsDoc(url, &ext)) {
+        auto* d = new TbDocDownload();
+        d->win = tb->win;
+        d->url = str::Dup(url);
+        TempStr base = GetTempFilePathTemp("sumatra-web");
+        d->destPath = str::Dup(str::JoinTemp(base, ext));
+        RunAsync(MkFunc0<TbDocDownload>(TbDocDownloadAsync, d), "TbDocDownloadAsync");
+        return false; // cancel the webview navigation
+    }
+    return true;
+}
+
+static void TbSetUrl(TouchBrowser* tb, Str url) {
+    str::ReplaceWithCopy(&tb->currentUrl, url);
+    if (tb->hwndUrl) {
+        HwndSetText(tb->hwndUrl, url);
+    }
+}
+
+static void TbUpdateNavButtons(TouchBrowser* tb) {
+    if (tb->btnBack && tb->webView) {
+        tb->btnBack->SetIsEnabled(tb->webView->CanGoBack());
+    }
+    if (tb->btnForward && tb->webView) {
+        tb->btnForward->SetIsEnabled(tb->webView->CanGoForward());
+    }
+}
+
+static void TbNavigationCompleted(void* ctx, Str url, bool /*success*/) {
+    auto* tb = (TouchBrowser*)ctx;
+    TbSetUrl(tb, url);
+    TbUpdateNavButtons(tb);
+}
+
+static void TbHistoryChanged(void* ctx, bool canBack, bool canFwd) {
+    auto* tb = (TouchBrowser*)ctx;
+    if (tb->btnBack) {
+        tb->btnBack->SetIsEnabled(canBack);
+    }
+    if (tb->btnForward) {
+        tb->btnForward->SetIsEnabled(canFwd);
+    }
+}
+
+// Enter in the URL field navigates (prefixing https:// when no scheme is typed)
+static LRESULT CALLBACK TbUrlEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
+    auto* tb = (TouchBrowser*)ref;
+    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
+        TempStr txt = HwndGetTextTemp(hwnd);
+        if (tb && tb->webView && !str::IsEmptyOrWhiteSpace(txt)) {
+            Str url = txt;
+            if (!str::StartsWithI(url, StrL("http://")) && !str::StartsWithI(url, StrL("https://"))) {
+                url = str::JoinTemp(StrL("https://"), txt);
+            }
+            tb->webView->Navigate(url);
+        }
+        return 0;
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+static void TbOnBack(TouchBrowser* tb) {
+    if (tb->webView) {
+        tb->webView->GoBack();
+    }
+}
+static void TbOnForward(TouchBrowser* tb) {
+    if (tb->webView) {
+        tb->webView->GoForward();
+    }
+}
+static void TbOnHome(TouchBrowser* tb) {
+    if (tb->webView) {
+        tb->webView->Navigate(TouchBrowserHomeUrl());
+    }
+}
+static void TbOnStar(TouchBrowser* tb) {
+    TouchWebToggleBookmark(tb->win);
+}
+static void TbOnChipClick(TbChip* c) {
+    Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
+    if (c->tb->webView && bm && c->idx >= 0 && c->idx < len(*bm)) {
+        c->tb->webView->Navigate((*bm)[c->idx]);
+    }
+}
+
+static TempStr TbChipLabel(Str url) {
+    // show the host (strip scheme + path) so chips stay short
+    Str s = url;
+    if (str::StartsWithI(s, StrL("https://"))) {
+        s = Str(s.s + 8, s.len - 8);
+    } else if (str::StartsWithI(s, StrL("http://"))) {
+        s = Str(s.s + 7, s.len - 7);
+    }
+    int slash = str::IndexOfChar(s, '/');
+    if (slash >= 0) {
+        s = Str(s.s, slash);
+    }
+    if (str::StartsWithI(s, StrL("www."))) {
+        s = Str(s.s + 4, s.len - 4);
+    }
+    return str::DupTemp(s);
+}
+
+static void TbDestroyChips(TouchBrowser* tb) {
+    for (TbChip* c : tb->bmChips) {
+        delete c->btn;
+        delete c;
+    }
+    tb->bmChips.Reset();
+}
+
+static void TbRebuildChips(TouchBrowser* tb) {
+    TbDestroyChips(tb);
+    Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
+    if (bm) {
+        for (int i = 0; i < len(*bm); i++) {
+            auto* c = new TbChip();
+            c->tb = tb;
+            c->idx = i;
+            Button::CreateArgs ba;
+            ba.parent = tb->win->hwndFrame;
+            ba.font = tb->hFont;
+            ba.text = TbChipLabel((*bm)[i]);
+            c->btn = new Button();
+            c->btn->Create(ba);
+            c->btn->onClick = MkFunc0<TbChip>(TbOnChipClick, c);
+            tb->bmChips.Append(c);
+        }
+    }
+    tb->bmDirty = false;
+}
+
+static Button* TbMakeButton(HWND frame, HFONT font, Str text, const Func0& onClick) {
+    Button::CreateArgs ba;
+    ba.parent = frame;
+    ba.font = font;
+    ba.text = text;
+    auto* b = new Button();
+    b->Create(ba);
+    b->onClick = onClick;
+    return b;
+}
+
+static TouchBrowser* CreateTouchBrowser(MainWindow* win) {
+    if (!HasWebView()) {
+        return nullptr;
+    }
+    auto* tb = new TouchBrowser();
+    tb->win = win;
+    tb->hFont = GetDefaultGuiFont();
+    HWND frame = win->hwndFrame;
+
+    tb->btnBack = TbMakeButton(frame, tb->hFont, StrL("Back"), MkFunc0<TouchBrowser>(TbOnBack, tb));
+    tb->btnBack->SetIsEnabled(false);
+    tb->btnForward = TbMakeButton(frame, tb->hFont, StrL("Fwd"), MkFunc0<TouchBrowser>(TbOnForward, tb));
+    tb->btnForward->SetIsEnabled(false);
+    tb->btnHome = TbMakeButton(frame, tb->hFont, StrL("Home"), MkFunc0<TouchBrowser>(TbOnHome, tb));
+    tb->btnStar = TbMakeButton(frame, tb->hFont, StrL("Bookmark"), MkFunc0<TouchBrowser>(TbOnStar, tb));
+
+    HINSTANCE inst = GetInstance();
+    tb->hwndUrl = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0,
+                                  frame, nullptr, inst, nullptr);
+    SendMessageW(tb->hwndUrl, WM_SETFONT, (WPARAM)tb->hFont, TRUE);
+    SetWindowSubclass(tb->hwndUrl, TbUrlEditProc, NextSubclassId(), (DWORD_PTR)tb);
+
+    tb->webView = new WebviewWnd();
+    tb->webView->dataDir = str::Dup(GetWebViewDataDirTemp());
+    tb->webView->enableAutofill = true;
+    tb->webView->enableBrowserChrome = true;
+    tb->webView->events.ctx = tb;
+    tb->webView->events.navigationStarting = TbNavigationStarting;
+    tb->webView->events.navigationCompleted = TbNavigationCompleted;
+    tb->webView->events.historyChanged = TbHistoryChanged;
+    tb->webView->forwardAppAccelerators = true;
+    CreateWebViewArgs cargs;
+    cargs.parent = frame;
+    cargs.pos = Rect(0, 0, 0, 0);
+    if (!tb->webView->Create(cargs)) {
+        delete tb->webView;
+        tb->webView = nullptr;
+    } else {
+        tb->webView->Navigate(TouchBrowserHomeUrl());
+    }
+    return tb;
+}
+
+static void TbShowWnd(HWND h, bool show) {
+    if (h) {
+        ShowWindow(h, show ? SW_SHOW : SW_HIDE);
+    }
+}
+
+static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
+    TbShowWnd(tb->btnBack ? tb->btnBack->hwnd : nullptr, show);
+    TbShowWnd(tb->btnForward ? tb->btnForward->hwnd : nullptr, show);
+    TbShowWnd(tb->btnHome ? tb->btnHome->hwnd : nullptr, show);
+    TbShowWnd(tb->btnStar ? tb->btnStar->hwnd : nullptr, show);
+    TbShowWnd(tb->hwndUrl, show);
+    for (TbChip* c : tb->bmChips) {
+        TbShowWnd(c->btn ? c->btn->hwnd : nullptr, show);
+    }
+    if (tb->webView) {
+        tb->webView->SetIsVisible(show);
+        tb->webView->SetControllerVisible(show);
+    }
+}
+
+void ShowTouchWebView(MainWindow* win, bool show) {
+    if (!win) {
+        return;
+    }
+    if (show && !win->touchBrowser) {
+        win->touchBrowser = CreateTouchBrowser(win);
+    }
+    if (!win->touchBrowser) {
+        return;
+    }
+    if (show && win->touchBrowser->bmDirty) {
+        TbRebuildChips(win->touchBrowser);
+    }
+    TbSetChildrenVisible(win->touchBrowser, show);
+}
+
+void LayoutTouchWebView(MainWindow* win, Rect rc) {
+    if (!win || !win->touchBrowser) {
+        return;
+    }
+    TouchBrowser* tb = win->touchBrowser;
+    HWND frame = win->hwndFrame;
+    int pad = DpiScale(frame, kTbPad);
+    int gap = DpiScale(frame, kTbGap);
+    int btnDx = DpiScale(frame, kTbBtnDx);
+    int navDy = DpiScale(frame, kTbNavDy);
+    int bmDy = DpiScale(frame, kTbBmDy);
+    int btnDy = navDy - 2 * pad;
+
+    int x = rc.x + pad;
+    int y = rc.y + pad;
+    auto place = [&](Button* b) {
+        if (b) {
+            MoveWindow(b->hwnd, x, y, btnDx, btnDy, TRUE);
+            x += btnDx + gap;
+        }
+    };
+    place(tb->btnBack);
+    place(tb->btnForward);
+    place(tb->btnHome);
+    // Bookmark button sits at the right edge of the nav row
+    int starDx = btnDx + DpiScale(frame, 30);
+    int starX = rc.x + rc.dx - pad - starDx;
+    if (tb->btnStar) {
+        MoveWindow(tb->btnStar->hwnd, starX, y, starDx, btnDy, TRUE);
+    }
+    if (tb->hwndUrl) {
+        int urlX = x;
+        int urlDx = std::max(0, starX - gap - urlX);
+        MoveWindow(tb->hwndUrl, urlX, y, urlDx, btnDy, TRUE);
+    }
+
+    // bookmarks row (chips)
+    int bmY = rc.y + navDy;
+    bool hasChips = len(tb->bmChips) > 0;
+    if (hasChips) {
+        int cx = rc.x + pad;
+        int cy = bmY + DpiScale(frame, 3);
+        int chipDy = bmDy - DpiScale(frame, 6);
+        for (TbChip* c : tb->bmChips) {
+            Size ideal = c->btn->GetIdealSize();
+            int cdx = std::min(ideal.dx + DpiScale(frame, 12), DpiScale(frame, 160));
+            if (cx + cdx > rc.x + rc.dx - pad) {
+                break; // one row of chips; overflow is dropped
+            }
+            MoveWindow(c->btn->hwnd, cx, cy, cdx, chipDy, TRUE);
+            cx += cdx + gap;
+        }
+    }
+
+    int webTop = rc.y + navDy + (hasChips ? bmDy : 0);
+    Rect webRc{rc.x, webTop, rc.dx, std::max(0, rc.y + rc.dy - webTop)};
+    if (tb->webView) {
+        tb->webView->SetBounds(webRc);
+        tb->webView->UpdateWebviewSize();
+    }
+}
+
+void TouchWebGoHome(MainWindow* win) {
+    if (win && win->touchBrowser) {
+        TbOnHome(win->touchBrowser);
+    }
+}
+
+void TouchWebToggleBookmark(MainWindow* win) {
+    if (!win || !win->touchBrowser) {
+        return;
+    }
+    TouchBrowser* tb = win->touchBrowser;
+    Str url = tb->currentUrl;
+    if (!url) {
+        return;
+    }
+    if (!gGlobalPrefs->browserBookmarks) {
+        gGlobalPrefs->browserBookmarks = new Vec<Str>();
+    }
+    Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
+    int found = -1;
+    for (int i = 0; i < len(*bm); i++) {
+        if (str::EqI((*bm)[i], url)) {
+            found = i;
+            break;
+        }
+    }
+    if (found >= 0) {
+        str::Free((*bm)[found]);
+        bm->RemoveAt(found);
+    } else {
+        bm->Append(str::Dup(url));
+    }
+    TbRebuildChips(tb);
+    SaveSettings();
+    if (win->touchView == TouchView::Web) {
+        TbSetChildrenVisible(tb, true);
+        ScheduleUiUpdate(win, kUiForceRelayout);
+    }
+}
+
+void DestroyTouchWebView(MainWindow* win) {
+    if (!win || !win->touchBrowser) {
+        return;
+    }
+    TouchBrowser* tb = win->touchBrowser;
+    TbDestroyChips(tb);
+    delete tb->btnBack;
+    delete tb->btnForward;
+    delete tb->btnHome;
+    delete tb->btnStar;
+    if (tb->hwndUrl) {
+        DestroyWindow(tb->hwndUrl);
+    }
+    delete tb->webView;
+    str::Free(tb->currentUrl);
+    delete tb;
+    win->touchBrowser = nullptr;
 }

@@ -6366,6 +6366,11 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
 
     dh.MoveWindow(win->hwndCanvas, rc);
 
+    // the in-product web browser (TouchView::Web) sits over the content area
+    if (win->touchView == TouchView::Web && win->touchBrowser) {
+        LayoutTouchWebView(win, rc);
+    }
+
     dh.End();
 
     // Keep the redesigned toolbar above the canvas on every architecture.

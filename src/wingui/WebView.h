@@ -168,6 +168,11 @@ struct WebviewWnd : Wnd {
     WebViewEvents events;
     bool forwardAppAccelerators = true;
     bool allowClipboardRead = false;
+    // in-product browser: turn on WebView2's own password autosave + autofill
+    // (stored in dataDir, separate from the user's Edge profile) and browser
+    // chrome (default context menus). Off for the manual / AI-chat webviews.
+    bool enableAutofill = false;
+    bool enableBrowserChrome = false;
     // when false, WebView2 won't claim external (file) drops, so they fall
     // through to the host window's drop target (e.g. to open the file)
     bool allowExternalDrop = true;

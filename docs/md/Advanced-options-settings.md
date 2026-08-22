@@ -984,6 +984,14 @@ PropWinPos = 0 0
 ; version 3.8)
 UpdateFeedURL = https://github.com/tinypocket/sumatrapdf/releases/latest/download/update-check.txt
 
+; home page for the in-product web browser (the rail's globe view) (introduced
+; in version 3.8)
+BrowserHomePage = https://www.google.com
+
+; bookmarked URLs shown in the in-product web browser (introduced in version
+; 3.8)
+BrowserBookmarks =
+
 ; if true, check at startup whether an update is available
 CheckForUpdates = true
 ```
