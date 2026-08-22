@@ -334,52 +334,98 @@ SimpleBrowserWindow* SimpleBrowserWindowCreate(const SimpleBrowserCreateArgs& ar
 // (children of hwndFrame drawn over the canvas) instead of its own window.
 // ---------------------------------------------------------------------------
 
-constexpr int kTbNavDy = 40;  // navigation row height (logical px)
-constexpr int kTbTabsDy = 32; // tab strip row height
-constexpr int kTbBmDy = 34;   // bookmarks row height
-constexpr int kTbPad = 6;
-constexpr int kTbGap = 4;
-constexpr int kTbBtnDx = 64;
-// tab strip metrics. A tab is a label button plus an adjacent "x" button, so
-// kTbTabMinDx has to stay wide enough for the close button and a few glyphs.
-constexpr int kTbTabMaxDx = 160;
-constexpr int kTbTabMinDx = 62;
-constexpr int kTbTabCloseDx = 20;
-constexpr int kTbNewTabDx = 28;
-// each tab is a live WebView2 control (its own renderer process), and a
-// plain-button strip stops being readable well before this many anyway
+
+// --- design metrics --------------------------------------------------------
+// All values are LOGICAL px from the "SumatraPDF Touch Redesign v3" spec and
+// are DpiScale()d at use. The chrome is three stacked rows (tab strip,
+// favorites bar, nav row) painted by a single owner-drawn window, TbChromeWnd,
+// which also does its own hit-testing: system Button controls can't be made to
+// look like the design's rounded pills.
+constexpr int kTbTabsRowDy = 40; // tab strip row
+constexpr int kTbFavRowDy = 36;  // favorites bar (only when there are favorites)
+constexpr int kTbNavRowDy = 56;  // nav row
+
+constexpr int kTbTabsPadX = 12;
+constexpr int kTbTabsGap = 4;
+constexpr int kTbTabDy = 32;
+constexpr int kTbTabMinDx = 110;
+constexpr int kTbTabMaxDx = 180;
+constexpr int kTbTabRadius = 8;
+constexpr int kTbTabPadLeft = 12;
+constexpr int kTbTabPadRight = 8;
+constexpr int kTbTabInnerGap = 8;
+constexpr int kTbTabCloseDx = 18;
+constexpr int kTbNewTabDx = 32;
+
+constexpr int kTbFavPadX = 16;
+constexpr int kTbFavGap = 18;
+
+constexpr int kTbNavPadX = 16;
+constexpr int kTbNavGap = 10;
+constexpr int kTbNavBtnDy = 34;
+constexpr int kTbNavBtnPadX = 14;
+constexpr int kTbNavRadius = 8;
+constexpr int kTbUrlDy = 36;
+constexpr int kTbUrlPadX = 14;
+constexpr int kTbIconBtnDx = 34;
+
+// font sizes (logical px), also from the spec
+constexpr int kTbFontTab = 13;
+constexpr int kTbFontFav = 13;
+constexpr int kTbFontBtn = 13;
+constexpr int kTbFontUrl = 14;
+constexpr int kTbFontMenu = 14;
+constexpr int kTbFontDlgTitle = 17;
+
+// each tab is a live WebView2 control (its own renderer process), and the strip
+// stops being readable well before this many anyway
 constexpr int kTbMaxTabs = 10;
-// touch-sized popup metrics (logical px), shared by the "..." menu and the
-// favorites manager. 44 is the usual minimum comfortable finger target.
-constexpr int kTbPopupRowDy = 44;
-constexpr int kTbPopupSepDy = 9;
-constexpr int kTbPopupPad = 6;
+
+// "..." menu
+constexpr int kTbMenuMinDx = 180;
 constexpr int kTbMenuDx = 300;
-constexpr int kTbFavMgrDx = 400;
+constexpr int kTbMenuItemDy = 38; // 14px text + 9px padding top/bottom
+constexpr int kTbMenuSepDy = 9;
+constexpr int kTbMenuPad = 6;
+constexpr int kTbMenuRadius = 10;
+constexpr int kTbMenuItemRadius = 6;
+constexpr int kTbMenuItemPadX = 12;
+
+// "Manage favorites" modal
+constexpr int kTbFavMgrDx = 420;
+constexpr int kTbFavMgrMaxDy = 520;
+constexpr int kTbFavMgrRadius = 14;
+constexpr int kTbFavMgrHeaderDy = 63;  // 20 + 17px line + 20, rounded
+constexpr int kTbFavMgrFooterDy = 64;  // 14 + 36 + 14
+constexpr int kTbFavMgrHeadPadX = 24;  // header / footer horizontal padding
+constexpr int kTbFavMgrListPadX = 16;  // list area horizontal padding
+constexpr int kTbFavMgrListPadY = 10;  // list area vertical padding
+constexpr int kTbFavMgrRowDy = 44;     // 8 + 28 + 8
+constexpr int kTbFavMgrRowPad = 8;
+constexpr int kTbFavMgrRowGap = 10;
+constexpr int kTbFavMgrRowRadius = 8;
+constexpr int kTbFavMgrBtnDx = 28;
+constexpr int kTbFavMgrBtnRadius = 7;
+constexpr int kTbFavMgrGripDx = 14;
+constexpr int kTbFavMgrEmptyDy = 80; // 30 padding + a line + 30
+constexpr int kTbFavMgrDoneDy = 36;
+constexpr int kTbFavMgrDonePadX = 18;
 // a press has to travel this far (logical px) before it counts as a drag
 // rather than a click, so tapping a row still works on a shaky finger
 constexpr int kTbDragSlop = 6;
 
 struct TouchBrowser;
+struct TbChromeWnd;
 struct TbMenuWnd;
 struct TbFavMgrWnd;
+struct TbScrimWnd;
 
-struct TbChip {
-    TouchBrowser* tb = nullptr;
-    int idx = 0;
-    Button* btn = nullptr;
-};
-
-// One browser tab: its own WebView2 control plus the two buttons that stand for
-// it in the tab strip (the label, which activates it, and an "x" that closes
-// it). All of them are children of hwndFrame, like the rest of the browser
-// chrome. `this` is the WebViewEvents ctx of its own webview, so the navigation
+// One browser tab: its own WebView2 control plus the state the tab strip draws
+// for it. `this` is the WebViewEvents ctx of its own webview, so the navigation
 // callbacks know which tab they belong to.
 struct TbTab {
     TouchBrowser* tb = nullptr;
     WebviewWnd* webView = nullptr;
-    Button* btnLabel = nullptr;
-    Button* btnClose = nullptr;
     Str url;   // last committed URL; shown in the URL bar while active
     Str title; // document title, empty until the page reports one
     // WebView2 ignores a Navigate issued before the control has a non-zero size
@@ -396,24 +442,20 @@ struct TouchBrowser {
     // index into `tabs`; only this tab's webview is visible. Kept in range by
     // TbActivateTab, and `tabs` is never left empty while the browser exists.
     int activeTab = 0;
-    Button* btnBack = nullptr;
-    Button* btnForward = nullptr;
-    Button* btnHome = nullptr;
-    Button* btnInfo = nullptr;
-    Button* btnMenu = nullptr;
-    Button* btnNewTab = nullptr;
-    // "+ Save" at the left of the favorites bar; the bar's own add/remove
-    // control, which is why the nav row no longer carries a "Favorite" button
-    Button* btnBmAdd = nullptr;
-    HWND hwndUrl = nullptr;
+    // the whole chrome (all three rows) is this one owner-drawn child of
+    // hwndFrame; the URL field is a real EDIT hosted inside it
+    TbChromeWnd* chrome = nullptr;
     HFONT hFont = nullptr;
-    Vec<TbChip*> bmChips;
-    bool bmDirty = true;
+    // mirrors of the active webview's history state, so the nav row can paint
+    // Back / Fwd enabled or disabled without querying WebView2 while painting
+    bool canGoBack = false;
+    bool canGoForward = false;
     // touch popups, created on first use and owned by the browser. They are
-    // top-level WS_POPUP windows, so unlike the chrome buttons they are not
-    // children of hwndFrame and WebView2 can't cover them.
+    // top-level WS_POPUP windows, so unlike the chrome they are not children of
+    // hwndFrame and WebView2 can't cover them.
     TbMenuWnd* menuWnd = nullptr;
     TbFavMgrWnd* favMgr = nullptr;
+    TbScrimWnd* scrim = nullptr;
 };
 
 static Str TouchBrowserHomeUrl() {
@@ -422,6 +464,196 @@ static Str TouchBrowserHomeUrl() {
         url = StrL("https://www.google.com");
     }
     return url;
+}
+
+// --- shared drawing helpers ------------------------------------------------
+// GDI's RoundRect can't do "rounded top corners only" (the tabs) and aliases
+// badly at these radii, so the chrome draws its shapes with GDI+ paths. Each
+// helper scopes its own Gdiplus::Graphics: GDI+ caches HDC state, so it must be
+// gone again before the GDI text calls that follow run on the same DC.
+
+// DpiScale for fractional values (pen widths, icon geometry)
+static float TbScaleF(HWND hwnd, float v) {
+    return (float)DpiScale(hwnd, 10000) * v / 10000.0f;
+}
+
+static void TbRoundRectPath(Gdiplus::GraphicsPath& p, const Gdiplus::RectF& r, float rad) {
+    float d = rad * 2;
+    d = std::min(d, std::min(r.Width, r.Height));
+    if (d <= 0.5f) {
+        p.AddRectangle(r);
+        p.CloseFigure();
+        return;
+    }
+    p.AddArc(r.X, r.Y, d, d, 180, 90);
+    p.AddArc(r.X + r.Width - d, r.Y, d, d, 270, 90);
+    p.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0, 90);
+    p.AddArc(r.X, r.Y + r.Height - d, d, d, 90, 90);
+    p.CloseFigure();
+}
+
+static Gdiplus::RectF TbRectF(const Rect& r) {
+    // half-pixel inset so a 1px pen lands on the pixel grid instead of straddling it
+    return Gdiplus::RectF((float)r.x + 0.5f, (float)r.y + 0.5f, (float)r.dx - 1.0f, (float)r.dy - 1.0f);
+}
+
+// rounded filled rect with an optional 1px border
+static void TbFillRounded(HDC hdc, const Rect& r, float rad, COLORREF fill, COLORREF border = kColorUnset,
+                          float borderW = 1.0f) {
+    if (r.dx <= 0 || r.dy <= 0) {
+        return;
+    }
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::GraphicsPath p;
+    TbRoundRectPath(p, TbRectF(r), rad);
+    if (fill != kColorUnset) {
+        Gdiplus::SolidBrush br(GdiRgbFromCOLORREF(fill));
+        g.FillPath(&br, &p);
+    }
+    if (border != kColorUnset) {
+        Gdiplus::Pen pen(GdiRgbFromCOLORREF(border), borderW);
+        g.DrawPath(&pen, &p);
+    }
+}
+
+// A tab: rounded TOP corners only, and a border that skips the bottom edge, so
+// the active tab merges into the row below it.
+static void TbFillTab(HDC hdc, const Rect& r, float rad, COLORREF fill, COLORREF border) {
+    if (r.dx <= 0 || r.dy <= 0) {
+        return;
+    }
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::RectF rf = TbRectF(r);
+    float d = std::min(rad * 2, std::min(rf.Width, rf.Height));
+    float x0 = rf.X;
+    float x1 = rf.X + rf.Width;
+    float y0 = rf.Y;
+    float y1 = rf.Y + rf.Height;
+    {
+        Gdiplus::GraphicsPath fillPath;
+        fillPath.AddArc(x0, y0, d, d, 180, 90);
+        fillPath.AddArc(x1 - d, y0, d, d, 270, 90);
+        fillPath.AddLine(x1, y1, x0, y1);
+        fillPath.CloseFigure();
+        Gdiplus::SolidBrush br(GdiRgbFromCOLORREF(fill));
+        g.FillPath(&br, &fillPath);
+    }
+    if (border == kColorUnset) {
+        return;
+    }
+    // open path: left edge up, both top corners, right edge down. No bottom.
+    Gdiplus::GraphicsPath edge;
+    edge.AddLine(x0, y1, x0, y0 + d / 2);
+    edge.AddArc(x0, y0, d, d, 180, 90);
+    edge.AddArc(x1 - d, y0, d, d, 270, 90);
+    edge.AddLine(x1, y0 + d / 2, x1, y1);
+    Gdiplus::Pen pen(GdiRgbFromCOLORREF(border), 1.0f);
+    g.DrawPath(&pen, &edge);
+}
+
+// the tab's close affordance: an 18px circle with a small "x" in it. Drawn, not
+// typed, so it doesn't depend on the UI font (and can't come out as mojibake).
+static void TbDrawCloseGlyph(HDC hdc, HWND hwnd, const Rect& box, COLORREF col, COLORREF circleBg) {
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    if (circleBg != kColorUnset) {
+        Gdiplus::SolidBrush br(GdiRgbFromCOLORREF(circleBg));
+        g.FillEllipse(&br, (float)box.x, (float)box.y, (float)box.dx, (float)box.dy);
+    }
+    float cx = (float)box.x + (float)box.dx / 2;
+    float cy = (float)box.y + (float)box.dy / 2;
+    float a = TbScaleF(hwnd, 3.2f);
+    Gdiplus::Pen pen(GdiRgbFromCOLORREF(col), TbScaleF(hwnd, 1.3f));
+    g.DrawLine(&pen, cx - a, cy - a, cx + a, cy + a);
+    g.DrawLine(&pen, cx + a, cy - a, cx - a, cy + a);
+}
+
+// the new-tab "+": two 15px strokes, not a text glyph
+static void TbDrawPlus(HDC hdc, HWND hwnd, const Rect& box, COLORREF col) {
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    float cx = (float)box.x + (float)box.dx / 2;
+    float cy = (float)box.y + (float)box.dy / 2;
+    float a = TbScaleF(hwnd, 7.5f);
+    Gdiplus::Pen pen(GdiRgbFromCOLORREF(col), TbScaleF(hwnd, 1.8f));
+    g.DrawLine(&pen, cx - a, cy, cx + a, cy);
+    g.DrawLine(&pen, cx, cy - a, cx, cy + a);
+}
+
+// the overflow button: three horizontal dots (r=1.8 at x=5,12,19 of a 24 box)
+static void TbDrawDots(HDC hdc, HWND hwnd, const Rect& box, COLORREF col) {
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::SolidBrush br(GdiRgbFromCOLORREF(col));
+    float unit = (float)DpiScale(hwnd, 24) / 24.0f;
+    float x0 = (float)box.x + (float)box.dx / 2 - 12.0f * unit;
+    float cy = (float)box.y + (float)box.dy / 2;
+    float r = 1.8f * unit;
+    const float cxs[3] = {5.0f, 12.0f, 19.0f};
+    for (float c : cxs) {
+        float cx = x0 + c * unit;
+        g.FillEllipse(&br, cx - r, cy - r, r * 2, r * 2);
+    }
+}
+
+// a chevron for the move-up / move-down buttons
+static void TbDrawChevron(HDC hdc, HWND hwnd, const Rect& box, COLORREF col, bool up) {
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    float cx = (float)box.x + (float)box.dx / 2;
+    float cy = (float)box.y + (float)box.dy / 2;
+    float w = TbScaleF(hwnd, 4.5f);
+    float h = TbScaleF(hwnd, 2.5f);
+    Gdiplus::Pen pen(GdiRgbFromCOLORREF(col), TbScaleF(hwnd, 1.6f));
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    if (up) {
+        g.DrawLine(&pen, cx - w, cy + h, cx, cy - h);
+        g.DrawLine(&pen, cx, cy - h, cx + w, cy + h);
+    } else {
+        g.DrawLine(&pen, cx - w, cy - h, cx, cy + h);
+        g.DrawLine(&pen, cx, cy + h, cx + w, cy - h);
+    }
+}
+
+// the delete button's trash can
+static void TbDrawTrash(HDC hdc, HWND hwnd, const Rect& box, COLORREF col) {
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    float u = (float)DpiScale(hwnd, 1000) / 1000.0f;
+    float cx = (float)box.x + (float)box.dx / 2;
+    float cy = (float)box.y + (float)box.dy / 2;
+    Gdiplus::Pen pen(GdiRgbFromCOLORREF(col), TbScaleF(hwnd, 1.4f));
+    // lid
+    g.DrawLine(&pen, cx - 5.5f * u, cy - 3.5f * u, cx + 5.5f * u, cy - 3.5f * u);
+    // handle
+    g.DrawLine(&pen, cx - 2.0f * u, cy - 5.5f * u, cx + 2.0f * u, cy - 5.5f * u);
+    g.DrawLine(&pen, cx - 2.0f * u, cy - 5.5f * u, cx - 2.0f * u, cy - 3.5f * u);
+    g.DrawLine(&pen, cx + 2.0f * u, cy - 5.5f * u, cx + 2.0f * u, cy - 3.5f * u);
+    // body
+    g.DrawLine(&pen, cx - 4.0f * u, cy - 3.0f * u, cx - 3.4f * u, cy + 5.5f * u);
+    g.DrawLine(&pen, cx + 4.0f * u, cy - 3.0f * u, cx + 3.4f * u, cy + 5.5f * u);
+    g.DrawLine(&pen, cx - 3.4f * u, cy + 5.5f * u, cx + 3.4f * u, cy + 5.5f * u);
+}
+
+// the 6-dot grab handle that marks a favorites row as draggable
+static void TbDrawGrip(HDC hdc, HWND hwnd, const Rect& box, COLORREF col) {
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::SolidBrush br(GdiRgbFromCOLORREF(col));
+    float unit = (float)DpiScale(hwnd, 14) / 14.0f;
+    float x0 = (float)box.x + (float)box.dx / 2 - 7.0f * unit;
+    float y0 = (float)box.y + (float)box.dy / 2 - 7.0f * unit;
+    float r = 1.3f * unit;
+    const float cxs[2] = {4.0f, 10.0f};
+    const float cys[3] = {3.0f, 7.0f, 11.0f};
+    for (float c : cxs) {
+        for (float ry : cys) {
+            g.FillEllipse(&br, x0 + c * unit - r, y0 + ry * unit - r, r * 2, r * 2);
+        }
+    }
 }
 
 // a URL points at a document we can open when its LAST path segment names a
@@ -536,10 +768,20 @@ static void TbDocDownloadAsync(TbDocDownload* d) {
 
 static void TbSetChildrenVisible(TouchBrowser* tb, bool show);
 static void TbActivateTab(TouchBrowser* tb, int idx);
-// refreshes a tab's strip button from its title / URL
-static void TbUpdateTabButton(TbTab*);
 // opens `url` in a new browser tab, from the message loop rather than inline
 static void TbRequestNewTab(MainWindow* win, Str url);
+// repaint the chrome (a tab title changed, history changed, ...)
+static void TbRedrawChrome(TouchBrowser* tb);
+// repaint AND re-measure: the row set or the tab count changed. The favorites
+// bar appears and disappears with the favorites, which changes the chrome's
+// height, so the frame has to lay out again too.
+static void TbRelayoutChrome(TouchBrowser* tb);
+// screen rect of the "..." button, which the popups anchor to
+static Rect TbMenuAnchorScreenRect(TouchBrowser* tb);
+static void TbShowFavMgr(TouchBrowser* tb);
+static void TbShowMenu(TouchBrowser* tb);
+static void TbOnNewTab(TouchBrowser* tb);
+static void TbCloseTab(TbTab* t);
 
 static TbTab* TbActiveTab(TouchBrowser* tb) {
     if (tb->activeTab < 0 || tb->activeTab >= len(tb->tabs)) {
@@ -597,34 +839,24 @@ static bool TbNavigationStarting(void* ctx, Str url, bool newWindow) {
     // would throw the new title away. Navigations we cancelled above returned
     // before this, so they keep the title of the page still on screen.
     str::FreePtr(&tab->title);
-    TbUpdateTabButton(tab);
+    TbRedrawChrome(tb);
     return true;
 }
 
 // the nav row always reflects the ACTIVE tab, so background tabs never write to it
-static void TbSyncUrlBar(TouchBrowser* tb) {
-    if (!tb->hwndUrl) {
-        return;
-    }
-    TbTab* t = TbActiveTab(tb);
-    Str url = t ? t->url : Str();
-    HwndSetText(tb->hwndUrl, url ? url : StrL(""));
-}
+static void TbSyncUrlBar(TouchBrowser* tb);
 
 static void TbUpdateNavButtons(TouchBrowser* tb) {
     WebviewWnd* wv = TbActiveWebView(tb);
-    if (tb->btnBack) {
-        tb->btnBack->SetIsEnabled(wv && wv->CanGoBack());
-    }
-    if (tb->btnForward) {
-        tb->btnForward->SetIsEnabled(wv && wv->CanGoForward());
-    }
+    tb->canGoBack = wv && wv->CanGoBack();
+    tb->canGoForward = wv && wv->CanGoForward();
+    TbRedrawChrome(tb);
 }
 
 static void TbNavigationCompleted(void* ctx, Str url, bool /*success*/) {
     auto* tab = (TbTab*)ctx;
     str::ReplaceWithCopy(&tab->url, url);
-    TbUpdateTabButton(tab);
+    TbRedrawChrome(tab->tb);
     if (TbIsActiveTab(tab)) {
         TbSyncUrlBar(tab->tb);
         TbUpdateNavButtons(tab->tb);
@@ -634,7 +866,7 @@ static void TbNavigationCompleted(void* ctx, Str url, bool /*success*/) {
 static void TbDocumentTitleChanged(void* ctx, Str title) {
     auto* tab = (TbTab*)ctx;
     str::ReplaceWithCopy(&tab->title, title);
-    TbUpdateTabButton(tab);
+    TbRedrawChrome(tab->tb);
 }
 
 static void TbHistoryChanged(void* ctx, bool canBack, bool canFwd) {
@@ -643,41 +875,9 @@ static void TbHistoryChanged(void* ctx, bool canBack, bool canFwd) {
         return;
     }
     TouchBrowser* tb = tab->tb;
-    if (tb->btnBack) {
-        tb->btnBack->SetIsEnabled(canBack);
-    }
-    if (tb->btnForward) {
-        tb->btnForward->SetIsEnabled(canFwd);
-    }
-}
-
-// Enter in the URL field navigates (prefixing https:// when no scheme is typed)
-static LRESULT CALLBACK TbUrlEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
-    auto* tb = (TouchBrowser*)ref;
-    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
-        TempStr txt = HwndGetTextTemp(hwnd);
-        WebviewWnd* wv = tb ? TbActiveWebView(tb) : nullptr;
-        if (wv && !str::IsEmptyOrWhiteSpace(txt)) {
-            Str url = txt;
-            if (!str::StartsWithI(url, StrL("http://")) && !str::StartsWithI(url, StrL("https://"))) {
-                url = str::JoinTemp(StrL("https://"), txt);
-            }
-            wv->Navigate(url);
-        }
-        return 0;
-    }
-    // A plain Win32 EDIT has no built-in Ctrl+A, and the frame's accelerators
-    // would otherwise swallow it, so select-all has to be implemented here.
-    if (msg == WM_KEYDOWN && wp == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
-        SendMessageW(hwnd, EM_SETSEL, 0, -1);
-        return 0;
-    }
-    // ...and Ctrl+A still reaches the edit as a control character, which the
-    // default handler would insert as a literal glyph
-    if (msg == WM_CHAR && wp == 1) {
-        return 0;
-    }
-    return DefSubclassProc(hwnd, msg, wp, lp);
+    tb->canGoBack = canBack;
+    tb->canGoForward = canFwd;
+    TbRedrawChrome(tb);
 }
 
 static void TbOnBack(TouchBrowser* tb) {
@@ -768,81 +968,26 @@ static void TbSetHomePage(TouchBrowser* tb) {
            MB_OK | MB_ICONINFORMATION);
 }
 
-// the favorites bar's "+ Save" button: add (or un-add) the current page
-static void TbOnSaveFav(TouchBrowser* tb) {
-    TouchWebToggleBookmark(tb->win);
-}
-// favorites chips navigate the active tab, like typing in the URL bar does
-static void TbOnChipClick(TbChip* c) {
-    Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
-    WebviewWnd* wv = TbActiveWebView(c->tb);
-    if (wv && bm && c->idx >= 0 && c->idx < len(*bm)) {
-        wv->Navigate((*bm)[c->idx]);
-    }
-}
-
-static void TbDestroyChips(TouchBrowser* tb) {
-    for (TbChip* c : tb->bmChips) {
-        delete c->btn;
-        delete c;
-    }
-    tb->bmChips.Reset();
-}
-
-static void TbRebuildChips(TouchBrowser* tb) {
-    TbDestroyChips(tb);
-    Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
-    if (bm) {
-        for (int i = 0; i < len(*bm); i++) {
-            auto* c = new TbChip();
-            c->tb = tb;
-            c->idx = i;
-            Button::CreateArgs ba;
-            ba.parent = tb->win->hwndFrame;
-            ba.font = tb->hFont;
-            ba.text = TbChipLabel((*bm)[i]);
-            c->btn = new Button();
-            c->btn->Create(ba);
-            c->btn->onClick = MkFunc0<TbChip>(TbOnChipClick, c);
-            tb->bmChips.Append(c);
-        }
-    }
-    tb->bmDirty = false;
-}
-
-static Button* TbMakeButton(HWND frame, HFONT font, Str text, const Func0& onClick) {
-    Button::CreateArgs ba;
-    ba.parent = frame;
-    ba.font = font;
-    ba.text = text;
-    auto* b = new Button();
-    b->Create(ba);
-    b->onClick = onClick;
-    return b;
-}
-
-// --- touch popups ----------------------------------------------------------
-// The "..." menu and the favorites manager are custom WS_POPUP windows rather
-// than TrackPopupMenu / a dialog: system menu metrics give ~20px rows, which
-// are unusable with a finger. Both draw kTbPopupRowDy-tall rows themselves.
-
-static Kind kindTbMenu = "tbMenu";
-static Kind kindTbFavMgr = "tbFavMgr";
+// --- favorites -------------------------------------------------------------
 
 static int TbFavCount() {
     Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
     return bm ? len(*bm) : 0;
 }
 
-// after any change to gGlobalPrefs->browserBookmarks: persist it and put the
-// chip row back in sync with it
-static void TbFavRefresh(TouchBrowser* tb) {
-    TbRebuildChips(tb);
-    SaveSettings();
-    if (tb->win && tb->win->touchView == TouchView::Web) {
-        TbSetChildrenVisible(tb, true);
-        ScheduleUiUpdate(tb->win, kUiForceRelayout);
+static Str TbFavAt(int idx) {
+    Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
+    if (!bm || idx < 0 || idx >= len(*bm)) {
+        return {};
     }
+    return (*bm)[idx];
+}
+
+// after any change to gGlobalPrefs->browserBookmarks: persist it and put the
+// favorites bar back in sync with it
+static void TbFavRefresh(TouchBrowser* tb) {
+    SaveSettings();
+    TbRelayoutChrome(tb);
 }
 
 static void TbFavDelete(TouchBrowser* tb, int idx) {
@@ -869,46 +1014,145 @@ static void TbFavMove(TouchBrowser* tb, int from, int to) {
     TbFavRefresh(tb);
 }
 
-// rounded filled rect; the popups' one bit of decoration
-static void TbFillRounded(HDC hdc, const Rect& r, int radius, COLORREF fill, COLORREF border = kColorUnset) {
-    if (r.dx <= 0 || r.dy <= 0) {
+// the favorites bar and the nav row's "Favorite" button navigate the active tab
+static void TbOnFavClick(TouchBrowser* tb, int idx) {
+    Str url = TbFavAt(idx);
+    WebviewWnd* wv = TbActiveWebView(tb);
+    if (wv && url) {
+        wv->Navigate(url);
+    }
+}
+
+// is the page in the active tab already a favorite?
+static bool TbCurrentIsFav(TouchBrowser* tb) {
+    TbTab* act = TbActiveTab(tb);
+    Str url = act ? act->url : Str();
+    if (!url) {
+        return false;
+    }
+    int n = TbFavCount();
+    for (int i = 0; i < n; i++) {
+        if (str::EqI(TbFavAt(i), url)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- touch popups ----------------------------------------------------------
+// The "..." menu and the favorites manager are custom WS_POPUP windows rather
+// than TrackPopupMenu / a dialog: system menu metrics give ~20px rows, which
+// are unusable with a finger, and neither can be made to look like the design.
+// Each gets its own window class so it can carry CS_DROPSHADOW without
+// affecting every other Wnd, and a rounded window region so the corners are
+// really clipped rather than merely painted round.
+
+static Kind kindTbMenu = "tbMenu";
+static Kind kindTbFavMgr = "tbFavMgr";
+static Kind kindTbScrim = "tbScrim";
+static Kind kindTbChrome = "tbChrome";
+
+static void TbAddDropShadow(HWND hwnd) {
+    if (!hwnd) {
         return;
     }
-    AutoDeleteBrush br = CreateSolidBrush(fill);
-    AutoDeletePen pen = CreatePen(PS_SOLID, 1, border == kColorUnset ? fill : border);
-    ScopedSelectObject selBr(hdc, br);
-    ScopedSelectObject selPen(hdc, pen);
-    RoundRect(hdc, r.x, r.y, r.x + r.dx, r.y + r.dy, radius * 2, radius * 2);
+    LONG_PTR st = GetClassLongPtrW(hwnd, GCL_STYLE);
+    SetClassLongPtrW(hwnd, GCL_STYLE, st | CS_DROPSHADOW);
 }
 
-// the "x" of a delete button, drawn rather than typed so it isn't at the mercy
-// of the UI font
-static void TbDrawCross(HDC hdc, const Rect& r, COLORREF col, int arm, int width) {
-    AutoDeletePen pen = CreatePen(PS_SOLID, width, col);
-    ScopedSelectObject selPen(hdc, pen);
-    int cx = r.x + r.dx / 2;
-    int cy = r.y + r.dy / 2;
-    MoveToEx(hdc, cx - arm, cy - arm, nullptr);
-    LineTo(hdc, cx + arm + 1, cy + arm + 1);
-    MoveToEx(hdc, cx + arm, cy - arm, nullptr);
-    LineTo(hdc, cx - arm - 1, cy + arm + 1);
-}
-
-// the grab handle (three lines) that marks a favorites row as draggable
-static void TbDrawGrip(HDC hdc, const Rect& r, COLORREF col) {
-    AutoDeletePen pen = CreatePen(PS_SOLID, 1, col);
-    ScopedSelectObject selPen(hdc, pen);
-    int cx = r.x + r.dx / 2;
-    int cy = r.y + r.dy / 2;
-    int half = r.dx / 4;
-    for (int i = -1; i <= 1; i++) {
-        int y = cy + i * std::max(3, r.dy / 8);
-        MoveToEx(hdc, cx - half, y, nullptr);
-        LineTo(hdc, cx + half + 1, y);
+static void TbSetRoundedRegion(HWND hwnd, int dx, int dy, int radius) {
+    if (!hwnd || dx <= 0 || dy <= 0) {
+        return;
     }
+    HRGN rgn = CreateRoundRectRgn(0, 0, dx + 1, dy + 1, radius * 2, radius * 2);
+    SetWindowRgn(hwnd, rgn, TRUE); // the window owns the region now
+}
+
+// relative luminance test, used to pick the darker of two theme colors
+static int TbLuminance(COLORREF c) {
+    return (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000;
+}
+
+// the modal scrim's tint. #1c1a17 on Touch Paper, but a scrim has to DARKEN in
+// every theme, so take whichever of the theme's text / window colors is darker
+// (text on a light theme, the background on a dark one).
+static COLORREF TbScrimColor() {
+    COLORREF a = ThemeWindowTextColor();
+    COLORREF b = ThemeWindowBackgroundColor();
+    return TbLuminance(a) <= TbLuminance(b) ? a : b;
+}
+
+// --- the modal scrim -------------------------------------------------------
+// A layered popup covering the whole frame at 35% alpha. It is what makes the
+// favorites manager modal: it swallows every click meant for the window below,
+// and a click on it closes the dialog.
+
+static void TbHideFavMgr(TouchBrowser* tb);
+
+struct TbScrimWnd : Wnd {
+    TbScrimWnd();
+    bool Create(TouchBrowser*);
+    void ShowOverFrame();
+    void Hide();
+    void OnPaint(HDC, PAINTSTRUCT*) override;
+    LRESULT WndProc(HWND, UINT, WPARAM, LPARAM) override;
+
+    TouchBrowser* tb = nullptr;
+};
+
+TbScrimWnd::TbScrimWnd() {
+    kind = kindTbScrim;
+}
+
+bool TbScrimWnd::Create(TouchBrowser* browser) {
+    tb = browser;
+    CreateCustomArgs args;
+    args.className = L"SumatraTouchBrowserScrim";
+    args.visible = false;
+    args.style = WS_POPUP;
+    // NOACTIVATE so clicking the scrim doesn't deactivate (and so close) the
+    // dialog before the scrim's own click handler runs
+    args.exStyle = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+    args.pos = {0, 0, 10, 10};
+    CreateCustom(args);
+    if (!hwnd) {
+        return false;
+    }
+    SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, (LONG_PTR)tb->win->hwndFrame);
+    SetLayeredWindowAttributes(hwnd, 0, 89, LWA_ALPHA); // .35 * 255
+    return true;
+}
+
+void TbScrimWnd::ShowOverFrame() {
+    Rect fr = HwndWindowRect(tb->win->hwndFrame);
+    SetWindowPos(hwnd, HWND_TOP, fr.x, fr.y, fr.dx, fr.dy, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    HwndInvalidate(hwnd, true);
+}
+
+void TbScrimWnd::Hide() {
+    if (hwnd) {
+        ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+void TbScrimWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
+    HdcFillRect(hdc, ToRect(ps->rcPaint), TbScrimColor());
+}
+
+LRESULT TbScrimWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_ERASEBKGND) {
+        return TRUE;
+    }
+    if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN) {
+        TbHideFavMgr(tb);
+        return 0;
+    }
+    return WndProcDefault(hw, msg, wp, lp);
 }
 
 // --- favorites manager -----------------------------------------------------
+
+enum class TbFavPart { None, Row, Up, Down, Delete };
 
 struct TbFavMgrWnd : Wnd {
     TbFavMgrWnd();
@@ -919,21 +1163,30 @@ struct TbFavMgrWnd : Wnd {
     LRESULT WndProc(HWND, UINT, WPARAM, LPARAM) override;
 
     int HeaderDy() const;
+    int FooterDy() const;
     int RowDy() const;
+    Rect ListRect() const;
     Rect RowRect(int idx) const;
-    Rect DeleteRect(int idx) const;
+    Rect BtnRect(int idx, TbFavPart part) const;
+    Rect DoneRect() const;
     int RowAt(Point pt) const;
+    TbFavPart PartAt(Point pt, int* idxOut) const;
+    int MaxScrollY() const;
 
     TouchBrowser* tb = nullptr;
-    // the row the left button went down on, and whether it went down on that
-    // row's delete button (which suppresses dragging)
+    // the row the left button went down on, and which part of it (a press on a
+    // button suppresses dragging)
     int pressedIdx = -1;
-    bool pressedDelete = false;
+    TbFavPart pressedPart = TbFavPart::None;
     Point pressPt;
     bool dragging = false;
     int dragTo = -1;
     int hotIdx = -1;
+    TbFavPart hotPart = TbFavPart::None;
+    bool doneHot = false;
+    bool donePressed = false;
     bool tracking = false;
+    int scrollY = 0;
 };
 
 TbFavMgrWnd::TbFavMgrWnd() {
@@ -943,40 +1196,85 @@ TbFavMgrWnd::TbFavMgrWnd() {
 bool TbFavMgrWnd::Create(TouchBrowser* browser) {
     tb = browser;
     CreateCustomArgs args;
+    args.className = L"SumatraTouchBrowserFavMgr";
     args.visible = false;
     args.style = WS_POPUP;
     args.exStyle = WS_EX_TOOLWINDOW;
     args.pos = {0, 0, 10, 10};
-    args.bgColor = ThemeControlBackgroundColor();
+    args.bgColor = ThemeWindowControlBackgroundColor();
     CreateCustom(args);
     if (!hwnd) {
         return false;
     }
     SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, (LONG_PTR)tb->win->hwndFrame);
+    TbAddDropShadow(hwnd);
     return true;
 }
 
 int TbFavMgrWnd::HeaderDy() const {
-    return DpiScale(hwnd, 38);
+    return DpiScale(hwnd, kTbFavMgrHeaderDy);
+}
+int TbFavMgrWnd::FooterDy() const {
+    return DpiScale(hwnd, kTbFavMgrFooterDy);
+}
+int TbFavMgrWnd::RowDy() const {
+    return DpiScale(hwnd, kTbFavMgrRowDy);
 }
 
-int TbFavMgrWnd::RowDy() const {
-    return DpiScale(hwnd, kTbPopupRowDy);
+Rect TbFavMgrWnd::ListRect() const {
+    Rect rc = HwndClientRect(hwnd);
+    int top = HeaderDy();
+    int dy = std::max(0, rc.dy - top - FooterDy());
+    return {0, top, rc.dx, dy};
 }
 
 Rect TbFavMgrWnd::RowRect(int idx) const {
-    int pad = DpiScale(hwnd, kTbPopupPad);
-    int dx = HwndClientRect(hwnd).dx;
-    return {pad, HeaderDy() + idx * RowDy(), std::max(0, dx - 2 * pad), RowDy() - DpiScale(hwnd, 4)};
+    Rect list = ListRect();
+    int padX = DpiScale(hwnd, kTbFavMgrListPadX);
+    int padY = DpiScale(hwnd, kTbFavMgrListPadY);
+    int y = list.y + padY - scrollY + idx * RowDy();
+    return {list.x + padX, y, std::max(0, list.dx - 2 * padX), RowDy()};
 }
 
-Rect TbFavMgrWnd::DeleteRect(int idx) const {
+Rect TbFavMgrWnd::BtnRect(int idx, TbFavPart part) const {
     Rect r = RowRect(idx);
-    int d = r.dy;
-    return {r.x + r.dx - d, r.y, d, d};
+    int pad = DpiScale(hwnd, kTbFavMgrRowPad);
+    int gap = DpiScale(hwnd, kTbFavMgrRowGap);
+    int d = DpiScale(hwnd, kTbFavMgrBtnDx);
+    int right = r.x + r.dx - pad;
+    int y = r.y + (r.dy - d) / 2;
+    switch (part) {
+        case TbFavPart::Delete:
+            return {right - d, y, d, d};
+        case TbFavPart::Down:
+            return {right - 2 * d - gap, y, d, d};
+        case TbFavPart::Up:
+            return {right - 3 * d - 2 * gap, y, d, d};
+        default:
+            return {};
+    }
+}
+
+Rect TbFavMgrWnd::DoneRect() const {
+    Rect rc = HwndClientRect(hwnd);
+    int padX = DpiScale(hwnd, kTbFavMgrHeadPadX);
+    int dy = DpiScale(hwnd, kTbFavMgrDoneDy);
+    int dx = DpiScale(hwnd, 40 + 2 * kTbFavMgrDonePadX); // "Done" at 14px + padding
+    int y = rc.dy - FooterDy() + (FooterDy() - dy) / 2;
+    return {rc.dx - padX - dx, y, dx, dy};
+}
+
+int TbFavMgrWnd::MaxScrollY() const {
+    int n = TbFavCount();
+    int padY = DpiScale(hwnd, kTbFavMgrListPadY);
+    int contentDy = (n > 0 ? n * RowDy() : DpiScale(hwnd, kTbFavMgrEmptyDy)) + 2 * padY;
+    return std::max(0, contentDy - ListRect().dy);
 }
 
 int TbFavMgrWnd::RowAt(Point pt) const {
+    if (!ListRect().Contains(pt)) {
+        return -1;
+    }
     int n = TbFavCount();
     for (int i = 0; i < n; i++) {
         if (RowRect(i).Contains(pt)) {
@@ -986,14 +1284,36 @@ int TbFavMgrWnd::RowAt(Point pt) const {
     return -1;
 }
 
+TbFavPart TbFavMgrWnd::PartAt(Point pt, int* idxOut) const {
+    int idx = RowAt(pt);
+    *idxOut = idx;
+    if (idx < 0) {
+        return TbFavPart::None;
+    }
+    if (BtnRect(idx, TbFavPart::Delete).Contains(pt)) {
+        return TbFavPart::Delete;
+    }
+    if (BtnRect(idx, TbFavPart::Down).Contains(pt)) {
+        return TbFavPart::Down;
+    }
+    if (BtnRect(idx, TbFavPart::Up).Contains(pt)) {
+        return TbFavPart::Up;
+    }
+    return TbFavPart::Row;
+}
+
 void TbFavMgrWnd::Hide() {
     if (GetCapture() == hwnd) {
         ReleaseCapture();
     }
     pressedIdx = -1;
+    pressedPart = TbFavPart::None;
     dragging = false;
     dragTo = -1;
     hotIdx = -1;
+    hotPart = TbFavPart::None;
+    doneHot = false;
+    donePressed = false;
     if (hwnd) {
         ShowWindow(hwnd, SW_HIDE);
     }
@@ -1001,94 +1321,129 @@ void TbFavMgrWnd::Hide() {
 
 void TbFavMgrWnd::ShowAt() {
     pressedIdx = -1;
-    pressedDelete = false;
+    pressedPart = TbFavPart::None;
     dragging = false;
     dragTo = -1;
     hotIdx = -1;
+    hotPart = TbFavPart::None;
+    scrollY = 0;
+
     int n = TbFavCount();
-    int pad = DpiScale(hwnd, kTbPopupPad);
+    int padY = DpiScale(hwnd, kTbFavMgrListPadY);
     int dx = DpiScale(hwnd, kTbFavMgrDx);
-    int dy = HeaderDy() + std::max(1, n) * RowDy() + pad;
+    int contentDy = (n > 0 ? n * RowDy() : DpiScale(hwnd, kTbFavMgrEmptyDy)) + 2 * padY;
+    int dy = HeaderDy() + contentDy + FooterDy();
+    dy = std::min(dy, DpiScale(hwnd, kTbFavMgrMaxDy));
 
-    HWND anchorHwnd = tb->btnMenu ? tb->btnMenu->hwnd : tb->win->hwndFrame;
-    Rect ar = HwndWindowRect(anchorHwnd);
-    int x = ar.x + ar.dx - dx;
-    int y = ar.y + ar.dy + DpiScale(hwnd, 4);
-
+    // centred over the frame, like a modal dialog
+    Rect fr = HwndWindowRect(tb->win->hwndFrame);
+    int x = fr.x + (fr.dx - dx) / 2;
+    int y = fr.y + (fr.dy - dy) / 2;
     MONITORINFO mi{};
     mi.cbSize = sizeof(mi);
-    HMONITOR monitor = MonitorFromPoint(POINT{ar.x, ar.y}, MONITOR_DEFAULTTONEAREST);
+    HMONITOR monitor = MonitorFromWindow(tb->win->hwndFrame, MONITOR_DEFAULTTONEAREST);
     GetMonitorInfoW(monitor, &mi);
     Rect work = ToRect(mi.rcWork);
     x = std::clamp(x, work.x, std::max(work.x, work.x + work.dx - dx));
-    if (y + dy > work.y + work.dy) {
-        y = std::max(work.y, work.y + work.dy - dy);
-    }
+    y = std::clamp(y, work.y, std::max(work.y, work.y + work.dy - dy));
+
     SetWindowPos(hwnd, HWND_TOP, x, y, dx, dy, SWP_SHOWWINDOW);
+    TbSetRoundedRegion(hwnd, dx, dy, DpiScale(hwnd, kTbFavMgrRadius));
     SetForegroundWindow(hwnd);
     HwndInvalidate(hwnd, true);
 }
 
 void TbFavMgrWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
     Rect rc = HwndClientRect(hwnd);
-    HdcFillRect(hdc, ToRect(ps->rcPaint), ThemeControlBackgroundColor());
+    COLORREF panel = ThemeWindowControlBackgroundColor();
+    HdcFillRect(hdc, ToRect(ps->rcPaint), panel);
     SetBkMode(hdc, TRANSPARENT);
+
+    int headPadX = DpiScale(hwnd, kTbFavMgrHeadPadX);
+    int headerDy = HeaderDy();
+    // header
     {
-        AutoDeletePen border = CreatePen(PS_SOLID, 1, ThemeEdgeColor());
-        ScopedSelectObject selPen(hdc, border);
-        ScopedSelectObject selBr(hdc, GetStockBrush(NULL_BRUSH));
-        int radius = DpiScale(hwnd, 10);
-        RoundRect(hdc, 0, 0, rc.dx, rc.dy, radius * 2, radius * 2);
+        Rect r{headPadX, 0, std::max(0, rc.dx - 2 * headPadX), headerDy};
+        SetTextColor(hdc, ThemeWindowTextColor());
+        HdcDrawText(hdc, StrL("Manage favorites"), r,
+                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, kTbFontDlgTitle, FW_SEMIBOLD));
+        HdcFillRect(hdc, Rect{0, headerDy - 1, rc.dx, 1}, ThemeEdgeColor());
     }
 
-    int pad = DpiScale(hwnd, kTbPopupPad);
-    Rect header{pad + DpiScale(hwnd, 6), DpiScale(hwnd, 6), rc.dx - 2 * pad, HeaderDy() - DpiScale(hwnd, 8)};
-    SetTextColor(hdc, ThemeWindowDarkerTextColor());
-    HdcDrawText(hdc, StrL("Favorites - drag to reorder"), header,
-                DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX, HdcGetUiFont(hdc, 13, FW_MEDIUM));
-
+    Rect list = ListRect();
     int n = TbFavCount();
     if (n == 0) {
-        Rect r = RowRect(0);
+        Rect r = list;
         SetTextColor(hdc, ThemeWindowDarkerTextColor());
-        HdcDrawText(hdc, StrL("No favorites yet. Use '+ Save' to add this page."), r,
-                    DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX, HdcGetUiFont(hdc, 13));
-        return;
+        HdcDrawText(hdc, StrL("No favorites yet."), r,
+                    DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, kTbFontUrl));
+    } else {
+        // the list scrolls, so nothing may spill into the header or the footer
+        int saved = SaveDC(hdc);
+        IntersectClipRect(hdc, list.x, list.y, list.x + list.dx, list.y + list.dy);
+        int pad = DpiScale(hwnd, kTbFavMgrRowPad);
+        int gap = DpiScale(hwnd, kTbFavMgrRowGap);
+        int gripDx = DpiScale(hwnd, kTbFavMgrGripDx);
+        float radius = (float)DpiScale(hwnd, kTbFavMgrRowRadius);
+        for (int i = 0; i < n; i++) {
+            Rect r = RowRect(i);
+            if (r.y > list.y + list.dy || r.y + r.dy < list.y) {
+                continue;
+            }
+            bool isDragged = dragging && i == pressedIdx;
+            if (i == hotIdx || isDragged) {
+                TbFillRounded(hdc, r, radius, ThemeHotBackgroundColor());
+            }
+            HdcFillRect(hdc, Rect{r.x, r.y + r.dy - 1, r.dx, 1}, ThemeEdgeColor());
+
+            Rect grip{r.x + pad, r.y + (r.dy - gripDx) / 2, gripDx, gripDx};
+            TbDrawGrip(hdc, hwnd, grip, ThemeWindowDarkerTextColor());
+
+            Rect up = BtnRect(i, TbFavPart::Up);
+            Rect down = BtnRect(i, TbFavPart::Down);
+            Rect del = BtnRect(i, TbFavPart::Delete);
+            float btnRadius = (float)DpiScale(hwnd, kTbFavMgrBtnRadius);
+            auto btnBg = [&](TbFavPart part) {
+                bool hot = (i == hotIdx && hotPart == part);
+                return hot ? ThemeDisabledEdgeColor() : ThemeTouchSurfaceColor();
+            };
+            bool canUp = i > 0;
+            bool canDown = i < n - 1;
+            TbFillRounded(hdc, up, btnRadius, btnBg(TbFavPart::Up), ThemeEdgeColor());
+            TbFillRounded(hdc, down, btnRadius, btnBg(TbFavPart::Down), ThemeEdgeColor());
+            TbFillRounded(hdc, del, btnRadius, btnBg(TbFavPart::Delete), ThemeEdgeColor());
+            TbDrawChevron(hdc, hwnd, up, canUp ? ThemeWindowDarkerTextColor() : ThemeWindowTextDisabledColor(), true);
+            TbDrawChevron(hdc, hwnd, down, canDown ? ThemeWindowDarkerTextColor() : ThemeWindowTextDisabledColor(),
+                          false);
+            TbDrawTrash(hdc, hwnd, del, ThemeWindowLinkColor());
+
+            Rect name{grip.x + grip.dx + gap, r.y, std::max(0, up.x - gap - (grip.x + grip.dx + gap)), r.dy};
+            SetTextColor(hdc, ThemeWindowTextColor());
+            HdcDrawText(hdc, TbChipLabel(TbFavAt(i)), name,
+                        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
+                        HdcGetUiFont(hdc, kTbFontUrl));
+        }
+        // insertion marker: where the dragged row would land on mouse-up
+        if (dragging && dragTo >= 0 && dragTo != pressedIdx) {
+            Rect r = RowRect(dragTo);
+            int y = (dragTo > pressedIdx) ? (r.y + r.dy) : r.y;
+            HdcFillRect(hdc, Rect{r.x, y - DpiScale(hwnd, 1), r.dx, DpiScale(hwnd, 2)}, ThemeWindowLinkColor());
+        }
+        RestoreDC(hdc, saved);
     }
 
-    Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
-    int radius = DpiScale(hwnd, 8);
-    for (int i = 0; i < n; i++) {
-        Rect r = RowRect(i);
-        bool isDragged = dragging && i == pressedIdx;
-        COLORREF bg = (i == hotIdx || isDragged) ? ThemeHotBackgroundColor() : ThemeWindowControlBackgroundColor();
-        TbFillRounded(hdc, r, radius, bg, ThemeEdgeColor());
-
-        Rect grip{r.x + DpiScale(hwnd, 4), r.y, DpiScale(hwnd, 20), r.dy};
-        TbDrawGrip(hdc, grip, ThemeWindowDarkerTextColor());
-
-        Rect del = DeleteRect(i);
-        TbDrawCross(hdc, del, ThemeWindowTextColor(), DpiScale(hwnd, 5), DpiScale(hwnd, 2));
-
-        Rect label{grip.x + grip.dx + DpiScale(hwnd, 6), r.y, del.x - grip.x - grip.dx - DpiScale(hwnd, 12), r.dy};
-        Str url = (*bm)[i];
-        Rect top = label;
-        top.dy = label.dy / 2;
-        Rect bot = label;
-        bot.y += label.dy / 2;
-        bot.dy = label.dy / 2;
+    // footer
+    {
+        int footTop = rc.dy - FooterDy();
+        HdcFillRect(hdc, Rect{0, footTop, rc.dx, 1}, ThemeEdgeColor());
+        Rect done = DoneRect();
+        COLORREF bg = donePressed ? ThemeEdgeColor() : (doneHot ? ThemeHotBackgroundColor() : ThemeDisabledEdgeColor());
+        TbFillRounded(hdc, done, (float)DpiScale(hwnd, kTbNavRadius), bg);
         SetTextColor(hdc, ThemeWindowTextColor());
-        HdcDrawText(hdc, TbChipLabel(url), top, DT_SINGLELINE | DT_BOTTOM | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
-                    HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
-        SetTextColor(hdc, ThemeWindowDarkerTextColor());
-        HdcDrawText(hdc, url, bot, DT_SINGLELINE | DT_TOP | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
-                    HdcGetUiFont(hdc, 11));
-    }
-    // insertion marker: where the dragged row would land on mouse-up
-    if (dragging && dragTo >= 0 && dragTo != pressedIdx) {
-        Rect r = RowRect(dragTo);
-        int y = (dragTo > pressedIdx) ? (r.y + r.dy) : r.y;
-        HdcFillRect(hdc, Rect{r.x, y - DpiScale(hwnd, 1), r.dx, DpiScale(hwnd, 3)}, ThemeWindowTextColor());
+        HdcDrawText(hdc, StrL("Done"), done, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, kTbFontUrl, FW_SEMIBOLD));
     }
 }
 
@@ -1096,11 +1451,27 @@ LRESULT TbFavMgrWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_ERASEBKGND) {
         return TRUE;
     }
+    if (msg == WM_MOUSEWHEEL) {
+        int delta = GET_WHEEL_DELTA_WPARAM(wp);
+        int next = std::clamp(scrollY - delta / 2, 0, MaxScrollY());
+        if (next != scrollY) {
+            scrollY = next;
+            HwndInvalidate(hw, false);
+        }
+        return 0;
+    }
     if (msg == WM_LBUTTONDOWN) {
         Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-        int row = RowAt(pt);
+        if (DoneRect().Contains(pt)) {
+            donePressed = true;
+            SetCapture(hw);
+            HwndInvalidate(hw, false);
+            return 0;
+        }
+        int row = -1;
+        TbFavPart part = PartAt(pt, &row);
         pressedIdx = row;
-        pressedDelete = (row >= 0) && DeleteRect(row).Contains(pt);
+        pressedPart = part;
         pressPt = pt;
         dragging = false;
         dragTo = row;
@@ -1112,21 +1483,33 @@ LRESULT TbFavMgrWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_MOUSEMOVE) {
         Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (donePressed) {
+            return 0;
+        }
         if (pressedIdx >= 0 && GetCapture() == hw) {
-            if (!dragging && !pressedDelete && std::abs(pt.y - pressPt.y) > DpiScale(hw, kTbDragSlop)) {
+            // only a press on the row body starts a drag, and only after the
+            // slop, so a tap on a button is never a reorder
+            if (!dragging && pressedPart == TbFavPart::Row &&
+                std::abs(pt.y - pressPt.y) > DpiScale(hw, kTbDragSlop)) {
                 dragging = true;
             }
             if (dragging) {
                 int n = TbFavCount();
-                int idx = (pt.y - HeaderDy()) / std::max(1, RowDy());
+                Rect list = ListRect();
+                int padY = DpiScale(hw, kTbFavMgrListPadY);
+                int idx = (pt.y - list.y - padY + scrollY) / std::max(1, RowDy());
                 dragTo = std::clamp(idx, 0, std::max(0, n - 1));
                 HwndInvalidate(hw, false);
             }
             return 0;
         }
-        int row = RowAt(pt);
-        if (row != hotIdx) {
+        int row = -1;
+        TbFavPart part = PartAt(pt, &row);
+        bool done = DoneRect().Contains(pt);
+        if (row != hotIdx || part != hotPart || done != doneHot) {
             hotIdx = row;
+            hotPart = part;
+            doneHot = done;
             HwndInvalidate(hw, false);
         }
         if (!tracking) {
@@ -1141,61 +1524,115 @@ LRESULT TbFavMgrWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_MOUSELEAVE) {
         tracking = false;
-        if (hotIdx != -1) {
+        if (hotIdx != -1 || doneHot) {
             hotIdx = -1;
+            hotPart = TbFavPart::None;
+            doneHot = false;
             HwndInvalidate(hw, false);
         }
         return 0;
     }
     if (msg == WM_LBUTTONUP) {
         Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        bool wasDone = donePressed;
         int idx = pressedIdx;
-        bool wasDelete = pressedDelete;
+        TbFavPart part = pressedPart;
         bool wasDrag = dragging;
         int to = dragTo;
+        donePressed = false;
         pressedIdx = -1;
-        pressedDelete = false;
+        pressedPart = TbFavPart::None;
         dragging = false;
         dragTo = -1;
         if (GetCapture() == hw) {
             ReleaseCapture();
         }
+        if (wasDone) {
+            if (DoneRect().Contains(pt)) {
+                TbHideFavMgr(tb);
+                return 0;
+            }
+            HwndInvalidate(hw, false);
+            return 0;
+        }
         if (idx < 0) {
             return 0;
         }
-        if (wasDelete) {
-            // only a press and release on the same delete button deletes
-            if (DeleteRect(idx).Contains(pt)) {
-                TbFavDelete(tb, idx);
-                if (TbFavCount() == 0) {
-                    Hide();
-                    return 0;
-                }
-                ShowAt(); // the popup got one row shorter
+        if (wasDrag) {
+            if (to >= 0 && to != idx) {
+                TbFavMove(tb, idx, to);
             }
-        } else if (wasDrag && to >= 0 && to != idx) {
-            TbFavMove(tb, idx, to);
+        } else if (part != TbFavPart::Row && part != TbFavPart::None) {
+            // only a press AND release on the same button fires it
+            if (!BtnRect(idx, part).Contains(pt)) {
+                HwndInvalidate(hw, true);
+                return 0;
+            }
+            int n = TbFavCount();
+            if (part == TbFavPart::Delete) {
+                TbFavDelete(tb, idx);
+            } else if (part == TbFavPart::Up && idx > 0) {
+                TbFavMove(tb, idx, idx - 1);
+            } else if (part == TbFavPart::Down && idx < n - 1) {
+                TbFavMove(tb, idx, idx + 1);
+            }
+            scrollY = std::clamp(scrollY, 0, MaxScrollY());
         }
         HwndInvalidate(hw, true);
         return 0;
     }
     if (msg == WM_CAPTURECHANGED) {
         pressedIdx = -1;
-        pressedDelete = false;
+        pressedPart = TbFavPart::None;
+        donePressed = false;
         dragging = false;
         dragTo = -1;
         HwndInvalidate(hw, false);
         return 0;
     }
     if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
-        Hide();
+        TbHideFavMgr(tb);
         return 0;
     }
     if (msg == WM_ACTIVATE && LOWORD(wp) == WA_INACTIVE) {
-        Hide();
+        // the scrim is WS_EX_NOACTIVATE, so anything taking activation from us
+        // is really outside the modal and the dialog should go away
+        TbHideFavMgr(tb);
         return 0;
     }
     return WndProcDefault(hw, msg, wp, lp);
+}
+
+static void TbShowFavMgr(TouchBrowser* tb) {
+    if (!tb->scrim) {
+        auto* s = new TbScrimWnd();
+        if (s->Create(tb)) {
+            tb->scrim = s;
+        } else {
+            delete s;
+        }
+    }
+    if (!tb->favMgr) {
+        auto* w = new TbFavMgrWnd();
+        if (!w->Create(tb)) {
+            delete w;
+            return;
+        }
+        tb->favMgr = w;
+    }
+    if (tb->scrim) {
+        tb->scrim->ShowOverFrame();
+    }
+    tb->favMgr->ShowAt();
+}
+
+static void TbHideFavMgr(TouchBrowser* tb) {
+    if (tb->favMgr) {
+        tb->favMgr->Hide();
+    }
+    if (tb->scrim) {
+        tb->scrim->Hide();
+    }
 }
 
 // --- the "..." menu --------------------------------------------------------
@@ -1219,18 +1656,6 @@ static const TbMenuItemDef gTbMenuItems[] = {
     {"Where do downloads go?", kTbCmdInfo},
 };
 constexpr int kTbMenuItemCount = (int)dimof(gTbMenuItems);
-
-static void TbShowFavMgr(TouchBrowser* tb) {
-    if (!tb->favMgr) {
-        auto* w = new TbFavMgrWnd();
-        if (!w->Create(tb)) {
-            delete w;
-            return;
-        }
-        tb->favMgr = w;
-    }
-    tb->favMgr->ShowAt();
-}
 
 // A menu command may put up a modal MsgBox, and the fav manager takes over the
 // activation the closing menu just gave back, so commands run from the message
@@ -1278,6 +1703,7 @@ struct TbMenuWnd : Wnd {
     Rect ItemRect(int idx) const;
     int ItemAt(Point pt) const;
     int TotalDy() const;
+    int WantedDx() const;
 
     TouchBrowser* tb = nullptr;
     int hotIdx = -1;
@@ -1292,23 +1718,25 @@ TbMenuWnd::TbMenuWnd() {
 bool TbMenuWnd::Create(TouchBrowser* browser) {
     tb = browser;
     CreateCustomArgs args;
+    args.className = L"SumatraTouchBrowserMenu";
     args.visible = false;
     args.style = WS_POPUP;
     args.exStyle = WS_EX_TOOLWINDOW;
     args.pos = {0, 0, 10, 10};
-    args.bgColor = ThemeControlBackgroundColor();
+    args.bgColor = ThemeWindowControlBackgroundColor();
     CreateCustom(args);
     if (!hwnd) {
         return false;
     }
     SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, (LONG_PTR)tb->win->hwndFrame);
+    TbAddDropShadow(hwnd);
     return true;
 }
 
 Rect TbMenuWnd::ItemRect(int idx) const {
-    int pad = DpiScale(hwnd, kTbPopupPad);
-    int rowDy = DpiScale(hwnd, kTbPopupRowDy);
-    int sepDy = DpiScale(hwnd, kTbPopupSepDy);
+    int pad = DpiScale(hwnd, kTbMenuPad);
+    int rowDy = DpiScale(hwnd, kTbMenuItemDy);
+    int sepDy = DpiScale(hwnd, kTbMenuSepDy);
     int dx = HwndClientRect(hwnd).dx;
     int y = pad;
     for (int i = 0; i < idx; i++) {
@@ -1319,9 +1747,27 @@ Rect TbMenuWnd::ItemRect(int idx) const {
 }
 
 int TbMenuWnd::TotalDy() const {
-    int pad = DpiScale(hwnd, kTbPopupPad);
+    int pad = DpiScale(hwnd, kTbMenuPad);
     Rect last = ItemRect(kTbMenuItemCount - 1);
     return last.y + last.dy + pad;
+}
+
+// min-width 180 per the design, but our menu carries longer labels than the
+// mock, so grow to fit them (up to kTbMenuDx) instead of ellipsizing
+int TbMenuWnd::WantedDx() const {
+    HDC hdc = GetDC(hwnd);
+    HFONT font = HdcGetUiFont(hdc, kTbFontMenu, FW_MEDIUM);
+    int textDx = 0;
+    for (int i = 0; i < kTbMenuItemCount; i++) {
+        if (!gTbMenuItems[i].label) {
+            continue;
+        }
+        Size sz = HdcMeasureText(hdc, Str(gTbMenuItems[i].label), DT_SINGLELINE | DT_NOPREFIX, font);
+        textDx = std::max(textDx, sz.dx);
+    }
+    ReleaseDC(hwnd, hdc);
+    int want = textDx + 2 * DpiScale(hwnd, kTbMenuPad) + 2 * DpiScale(hwnd, kTbMenuItemPadX);
+    return std::clamp(want, DpiScale(hwnd, kTbMenuMinDx), DpiScale(hwnd, kTbMenuDx));
 }
 
 int TbMenuWnd::ItemAt(Point pt) const {
@@ -1344,12 +1790,12 @@ void TbMenuWnd::Hide() {
 void TbMenuWnd::ShowAt() {
     hotIdx = -1;
     pressedIdx = -1;
-    int dx = DpiScale(hwnd, kTbMenuDx);
+    int dx = WantedDx();
     // TotalDy reads the client width only for the item rects' dx, so it is safe
     // to compute before the window has its final size
     int dy = TotalDy();
-    HWND anchorHwnd = tb->btnMenu ? tb->btnMenu->hwnd : tb->win->hwndFrame;
-    Rect ar = HwndWindowRect(anchorHwnd);
+    // top-aligned under the button, right-aligned to it
+    Rect ar = TbMenuAnchorScreenRect(tb);
     int x = ar.x + ar.dx - dx;
     int y = ar.y + ar.dy + DpiScale(hwnd, 4);
 
@@ -1363,22 +1809,22 @@ void TbMenuWnd::ShowAt() {
         y = std::max(work.y, ar.y - dy - DpiScale(hwnd, 4));
     }
     SetWindowPos(hwnd, HWND_TOP, x, y, dx, dy, SWP_SHOWWINDOW);
+    TbSetRoundedRegion(hwnd, dx, dy, DpiScale(hwnd, kTbMenuRadius));
     SetForegroundWindow(hwnd);
     HwndInvalidate(hwnd, true);
 }
 
 void TbMenuWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
     Rect rc = HwndClientRect(hwnd);
-    HdcFillRect(hdc, ToRect(ps->rcPaint), ThemeControlBackgroundColor());
+    HdcFillRect(hdc, ToRect(ps->rcPaint), ThemeWindowControlBackgroundColor());
     SetBkMode(hdc, TRANSPARENT);
     {
-        AutoDeletePen border = CreatePen(PS_SOLID, 1, ThemeEdgeColor());
-        ScopedSelectObject selPen(hdc, border);
-        ScopedSelectObject selBr(hdc, GetStockBrush(NULL_BRUSH));
-        int radius = DpiScale(hwnd, 10);
-        RoundRect(hdc, 0, 0, rc.dx, rc.dy, radius * 2, radius * 2);
+        // 1px border just inside the rounded region
+        Rect border{0, 0, rc.dx, rc.dy};
+        TbFillRounded(hdc, border, (float)DpiScale(hwnd, kTbMenuRadius), kColorUnset, ThemeEdgeColor());
     }
-    int radius = DpiScale(hwnd, 8);
+    float radius = (float)DpiScale(hwnd, kTbMenuItemRadius);
+    int itemPadX = DpiScale(hwnd, kTbMenuItemPadX);
     for (int i = 0; i < kTbMenuItemCount; i++) {
         Rect r = ItemRect(i);
         if (!gTbMenuItems[i].label) {
@@ -1391,12 +1837,12 @@ void TbMenuWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
             TbFillRounded(hdc, r, radius, ThemeHotBackgroundColor());
         }
         Rect text = r;
-        text.x += DpiScale(hwnd, 14);
-        text.dx -= DpiScale(hwnd, 22);
+        text.x += itemPadX;
+        text.dx = std::max(0, text.dx - 2 * itemPadX);
         SetTextColor(hdc, ThemeWindowTextColor());
         HdcDrawText(hdc, Str(gTbMenuItems[i].label), text,
                     DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
-                    HdcGetUiFont(hdc, 14, FW_MEDIUM));
+                    HdcGetUiFont(hdc, kTbFontMenu, FW_MEDIUM));
     }
 }
 
@@ -1462,7 +1908,7 @@ LRESULT TbMenuWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 // the "..." overflow button
-static void TbOnMenu(TouchBrowser* tb) {
+static void TbShowMenu(TouchBrowser* tb) {
     if (!tb->menuWnd) {
         auto* w = new TbMenuWnd();
         if (!w->Create(tb)) {
@@ -1474,7 +1920,11 @@ static void TbOnMenu(TouchBrowser* tb) {
     tb->menuWnd->ShowAt();
 }
 
-// --- tab strip -------------------------------------------------------------
+// --- the browser chrome ----------------------------------------------------
+// One owner-drawn child of hwndFrame paints all three rows and hit-tests them
+// itself. System Buttons can't be made to look like the design's pills (the
+// owner-draw path has a single app-wide palette), and N buttons also meant N
+// windows to raise above WebView2 on every switch.
 
 // the strip is narrow, so prefer the page title and fall back to the host name
 static TempStr TbTabLabel(TbTab* t) {
@@ -1490,30 +1940,683 @@ static TempStr TbTabLabel(TbTab* t) {
     return str::DupTemp(StrL("New Tab"));
 }
 
-static void TbUpdateTabButton(TbTab* t) {
-    if (t->btnLabel) {
-        t->btnLabel->SetText(TbTabLabel(t));
+enum class TbPart { None, Tab, TabClose, NewTab, Fav, Back, Fwd, Home, FavBtn, Info, Menu };
+
+struct TbHit {
+    TbPart part = TbPart::None;
+    int idx = -1;
+};
+
+static bool TbSameHit(const TbHit& a, const TbHit& b) {
+    return a.part == b.part && a.idx == b.idx;
+}
+
+struct TbChromeWnd : Wnd {
+    TbChromeWnd();
+    ~TbChromeWnd() override;
+    bool Create(TouchBrowser*);
+    void OnPaint(HDC, PAINTSTRUCT*) override;
+    LRESULT WndProc(HWND, UINT, WPARAM, LPARAM) override;
+
+    void Layout(HDC hdc);
+    void EnsureLayout();
+    void Draw(HDC hdc);
+    TbHit HitTest(Point pt) const;
+    void Invoke(const TbHit&);
+    void SyncUrlText();
+    void UpdateTooltip(const TbHit&);
+
+    TouchBrowser* tb = nullptr;
+    HWND hwndUrl = nullptr;
+    HFONT urlFont = nullptr;
+    HBRUSH urlBrush = nullptr;
+    COLORREF urlBrushColor = kColorUnset;
+    Tooltip* tooltip = nullptr;
+    bool tooltipUp = false;
+
+    // layout, in client coords (already offset by the rows' scroll)
+    Rect tabsRow, favRow, navRow;
+    Vec<Rect> tabRects;
+    Vec<Rect> tabCloseRects;
+    Vec<Rect> favRects;
+    Rect newTabRect, backRect, fwdRect, homeRect, urlRect, favBtnRect, infoRect, menuRect;
+    Rect editRect;
+    int tabScrollX = 0;
+    int tabContentDx = 0;
+    int favScrollX = 0;
+    int favContentDx = 0;
+
+    TbHit hot;
+    TbHit pressed;
+};
+
+// Enter in the URL field navigates (prefixing https:// when no scheme is typed)
+static LRESULT CALLBACK TbUrlEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
+    auto* tb = (TouchBrowser*)ref;
+    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
+        TempStr txt = HwndGetTextTemp(hwnd);
+        WebviewWnd* wv = tb ? TbActiveWebView(tb) : nullptr;
+        if (wv && !str::IsEmptyOrWhiteSpace(txt)) {
+            Str url = txt;
+            if (!str::StartsWithI(url, StrL("http://")) && !str::StartsWithI(url, StrL("https://"))) {
+                url = str::JoinTemp(StrL("https://"), txt);
+            }
+            wv->Navigate(url);
+        }
+        return 0;
+    }
+    // A plain Win32 EDIT has no built-in Ctrl+A, and the frame's accelerators
+    // would otherwise swallow it, so select-all has to be implemented here.
+    if (msg == WM_KEYDOWN && wp == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+        SendMessageW(hwnd, EM_SETSEL, 0, -1);
+        return 0;
+    }
+    // ...and Ctrl+A still reaches the edit as a control character, which the
+    // default handler would insert as a literal glyph
+    if (msg == WM_CHAR && wp == 1) {
+        return 0;
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+TbChromeWnd::TbChromeWnd() {
+    kind = kindTbChrome;
+}
+
+TbChromeWnd::~TbChromeWnd() {
+    delete tooltip;
+    if (urlBrush) {
+        DeleteObject(urlBrush);
+    }
+    if (hwndUrl) {
+        DestroyWindow(hwndUrl);
+        hwndUrl = nullptr;
     }
 }
 
-// A plain Win32 push button has no "selected" look, and the owner-draw path
-// (ButtonGetColors) has a single app-wide palette. Button::isDefault is the one
-// per-button variation it offers - the palette's brighter edge - so that marks
-// the active tab.
-static void TbUpdateTabHighlight(TouchBrowser* tb) {
-    for (int i = 0; i < len(tb->tabs); i++) {
-        TbTab* t = tb->tabs[i];
-        bool isActive = (i == tb->activeTab);
-        if (t->btnLabel && t->btnLabel->isDefault != isActive) {
-            t->btnLabel->isDefault = isActive;
-            HwndScheduleRepaint(t->btnLabel->hwnd);
+bool TbChromeWnd::Create(TouchBrowser* browser) {
+    tb = browser;
+    CreateCustomArgs args;
+    args.className = L"SumatraTouchBrowserChrome";
+    args.parent = tb->win->hwndFrame;
+    args.style = WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+    args.visible = false;
+    args.pos = {0, 0, 10, 10};
+    args.bgColor = ThemeWindowControlBackgroundColor();
+    CreateCustom(args);
+    if (!hwnd) {
+        return false;
+    }
+    // The URL field stays a real EDIT (typing, Ctrl+A, Enter, the caret and
+    // the IME all come for free); only its surround is drawn by us, so it has
+    // no border of its own and lives inside the rounded rect we paint.
+    HINSTANCE inst = GetInstance();
+    hwndUrl = CreateWindowExW(0, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, nullptr, inst,
+                              nullptr);
+    SendMessageW(hwndUrl, WM_SETFONT, (WPARAM)tb->hFont, TRUE);
+    SetWindowSubclass(hwndUrl, TbUrlEditProc, NextSubclassId(), (DWORD_PTR)tb);
+    return true;
+}
+
+// how tall the chrome wants to be: the favorites bar only exists when there is
+// at least one favorite
+static int TbChromeDy(HWND hwnd) {
+    int dy = DpiScale(hwnd, kTbTabsRowDy) + DpiScale(hwnd, kTbNavRowDy);
+    if (TbFavCount() > 0) {
+        dy += DpiScale(hwnd, kTbFavRowDy);
+    }
+    return dy;
+}
+
+void TbChromeWnd::SyncUrlText() {
+    if (!hwndUrl) {
+        return;
+    }
+    TbTab* t = TbActiveTab(tb);
+    Str url = t ? t->url : Str();
+    HwndSetText(hwndUrl, url ? url : StrL(""));
+}
+
+void TbChromeWnd::Layout(HDC hdc) {
+    Rect rc = HwndClientRect(hwnd);
+    tabRects.Reset();
+    tabCloseRects.Reset();
+    favRects.Reset();
+    newTabRect = {};
+    backRect = fwdRect = homeRect = urlRect = favBtnRect = infoRect = menuRect = {};
+    if (rc.dx <= 0 || rc.dy <= 0) {
+        return;
+    }
+
+    int tabsDy = DpiScale(hwnd, kTbTabsRowDy);
+    int navDy = DpiScale(hwnd, kTbNavRowDy);
+    bool hasFavs = TbFavCount() > 0;
+    int favDy = hasFavs ? DpiScale(hwnd, kTbFavRowDy) : 0;
+    tabsRow = {0, 0, rc.dx, tabsDy};
+    favRow = {0, tabsDy, rc.dx, favDy};
+    navRow = {0, tabsDy + favDy, rc.dx, navDy};
+
+    HFONT fontBtn = HdcGetUiFont(hdc, kTbFontBtn, FW_MEDIUM);
+    HFONT fontFav = HdcGetUiFont(hdc, kTbFontFav, FW_MEDIUM);
+
+    // --- tab strip: bottom-aligned, horizontally scrollable
+    {
+        int padX = DpiScale(hwnd, kTbTabsPadX);
+        int gap = DpiScale(hwnd, kTbTabsGap);
+        int tabDy = DpiScale(hwnd, kTbTabDy);
+        int minDx = DpiScale(hwnd, kTbTabMinDx);
+        int maxDx = DpiScale(hwnd, kTbTabMaxDx);
+        int newDx = DpiScale(hwnd, kTbNewTabDx);
+        int closeDx = DpiScale(hwnd, kTbTabCloseDx);
+        int padRight = DpiScale(hwnd, kTbTabPadRight);
+        // the row's 1px bottom border is the line the tabs sit on; the active
+        // tab is drawn one pixel taller so it merges with the row below
+        int tabTop = tabsRow.dy - 1 - tabDy;
+        int nTabs = len(tb->tabs);
+        int avail = std::max(0, rc.dx - 2 * padX);
+        int tabDx = maxDx;
+        if (nTabs > 0) {
+            int perTab = (avail - newDx - nTabs * gap) / nTabs;
+            tabDx = std::clamp(perTab, minDx, maxDx);
+        }
+        tabContentDx = nTabs * (tabDx + gap) + newDx;
+        int maxScroll = std::max(0, tabContentDx - avail);
+        tabScrollX = std::clamp(tabScrollX, 0, maxScroll);
+        int x = padX - tabScrollX;
+        for (int i = 0; i < nTabs; i++) {
+            Rect r{x, tabTop, tabDx, tabDy};
+            tabRects.Append(r);
+            Rect close{r.x + r.dx - padRight - closeDx, r.y + (r.dy - closeDx) / 2, closeDx, closeDx};
+            tabCloseRects.Append(close);
+            x += tabDx + gap;
+        }
+        newTabRect = {x, tabsRow.dy - 1 - newDx, newDx, newDx};
+    }
+
+    // --- favorites bar: plain accent-coloured text, no chrome
+    if (hasFavs) {
+        int padX = DpiScale(hwnd, kTbFavPadX);
+        int gap = DpiScale(hwnd, kTbFavGap);
+        int n = TbFavCount();
+        int x = padX - favScrollX;
+        int total = padX;
+        for (int i = 0; i < n; i++) {
+            TempStr label = TbChipLabel(TbFavAt(i));
+            Size sz = HdcMeasureText(hdc, label, DT_SINGLELINE | DT_NOPREFIX, fontFav);
+            favRects.Append(Rect{x, favRow.y, sz.dx, favRow.dy});
+            x += sz.dx + gap;
+            total += sz.dx + gap;
+        }
+        favContentDx = total;
+        int maxScroll = std::max(0, favContentDx - rc.dx);
+        int clamped = std::clamp(favScrollX, 0, maxScroll);
+        if (clamped != favScrollX) {
+            int delta = favScrollX - clamped;
+            favScrollX = clamped;
+            for (Rect& r : favRects) {
+                r.x += delta;
+            }
+        }
+    } else {
+        favContentDx = 0;
+        favScrollX = 0;
+    }
+
+    // --- nav row
+    {
+        int padX = DpiScale(hwnd, kTbNavPadX);
+        int gap = DpiScale(hwnd, kTbNavGap);
+        int btnDy = DpiScale(hwnd, kTbNavBtnDy);
+        int btnPadX = DpiScale(hwnd, kTbNavBtnPadX);
+        int iconDx = DpiScale(hwnd, kTbIconBtnDx);
+        int urlDy = DpiScale(hwnd, kTbUrlDy);
+        int btnY = navRow.y + (navRow.dy - btnDy) / 2;
+        auto textBtn = [&](Str s, int x) {
+            Size sz = HdcMeasureText(hdc, s, DT_SINGLELINE | DT_NOPREFIX, fontBtn);
+            return Rect{x, btnY, sz.dx + 2 * btnPadX, btnDy};
+        };
+        int x = padX;
+        backRect = textBtn(StrL("Back"), x);
+        x += backRect.dx + gap;
+        fwdRect = textBtn(StrL("Fwd"), x);
+        x += fwdRect.dx + gap;
+        homeRect = textBtn(StrL("Home"), x);
+        x += homeRect.dx + gap;
+
+        int right = rc.dx - padX;
+        menuRect = {right - iconDx, btnY, iconDx, iconDx};
+        infoRect = {menuRect.x - gap - iconDx, btnY, iconDx, iconDx};
+        Size favSz = HdcMeasureText(hdc, StrL("Favorite"), DT_SINGLELINE | DT_NOPREFIX, fontBtn);
+        int favBtnDx = favSz.dx + 2 * btnPadX;
+        favBtnRect = {infoRect.x - gap - favBtnDx, btnY, favBtnDx, btnDy};
+
+        int urlX = x;
+        int urlDx = std::max(0, favBtnRect.x - gap - urlX);
+        urlRect = {urlX, navRow.y + (navRow.dy - urlDy) / 2, urlDx, urlDy};
+    }
+
+    // the EDIT itself sits inside the drawn URL pill
+    if (hwndUrl) {
+        HFONT wantFont = HdcGetUiFont(hdc, kTbFontUrl);
+        if (wantFont != urlFont) {
+            urlFont = wantFont;
+            SendMessageW(hwndUrl, WM_SETFONT, (WPARAM)urlFont, TRUE);
+        }
+        int padX = DpiScale(hwnd, kTbUrlPadX);
+        int editDy = FontDyPx(hwnd, urlFont);
+        if (editDy <= 0 || editDy > urlRect.dy) {
+            editDy = urlRect.dy;
+        }
+        Rect r{urlRect.x + padX, urlRect.y + (urlRect.dy - editDy) / 2, std::max(0, urlRect.dx - 2 * padX), editDy};
+        // guard against re-entering WM_PAINT from a MoveWindow that changes nothing
+        if (r != editRect) {
+            editRect = r;
+            MoveWindow(hwndUrl, r.x, r.y, r.dx, r.dy, TRUE);
         }
     }
 }
 
+void TbChromeWnd::EnsureLayout() {
+    if (!hwnd) {
+        return;
+    }
+    HDC hdc = GetDC(hwnd);
+    Layout(hdc);
+    ReleaseDC(hwnd, hdc);
+}
+
+void TbChromeWnd::Draw(HDC hdc) {
+    Rect rc = HwndClientRect(hwnd);
+    COLORREF panel = ThemeWindowControlBackgroundColor();
+    COLORREF edge = ThemeEdgeColor();
+    COLORREF hotBg = ThemeHotBackgroundColor();
+    COLORREF text = ThemeWindowTextColor();
+    COLORREF muted = ThemeWindowDarkerTextColor();
+    COLORREF accent = ThemeWindowLinkColor();
+    HdcFillRect(hdc, rc, panel);
+    SetBkMode(hdc, TRANSPARENT);
+
+    Layout(hdc);
+
+    auto btnBg = [&](TbPart part, int idx) {
+        bool isHot = hot.part == part && hot.idx == idx;
+        bool isPressed = pressed.part == part && pressed.idx == idx;
+        if (isPressed) {
+            return ThemeEdgeColor();
+        }
+        return isHot ? ThemeDisabledEdgeColor() : hotBg;
+    };
+
+    // --- row 1: tab strip
+    {
+        int saved = SaveDC(hdc);
+        IntersectClipRect(hdc, tabsRow.x, tabsRow.y, tabsRow.x + tabsRow.dx, tabsRow.y + tabsRow.dy);
+        HdcFillRect(hdc, Rect{tabsRow.x, tabsRow.y + tabsRow.dy - 1, tabsRow.dx, 1}, edge);
+        float radius = (float)DpiScale(hwnd, kTbTabRadius);
+        int padLeft = DpiScale(hwnd, kTbTabPadLeft);
+        int innerGap = DpiScale(hwnd, kTbTabInnerGap);
+        HFONT fontActive = HdcGetUiFont(hdc, kTbFontTab, FW_SEMIBOLD);
+        HFONT fontIdle = HdcGetUiFont(hdc, kTbFontTab);
+        for (int i = 0; i < len(tabRects); i++) {
+            Rect r = tabRects[i];
+            bool isActive = (i == tb->activeTab);
+            bool isHot = (hot.part == TbPart::Tab && hot.idx == i);
+            Rect fillR = r;
+            if (isActive) {
+                // one pixel taller, so its body covers the row's bottom border
+                // and it merges with the page below
+                fillR.dy += 1;
+            }
+            COLORREF bg = isActive ? panel : (isHot ? ThemeTouchSurfaceColor() : hotBg);
+            TbFillTab(hdc, fillR, radius, bg, edge);
+
+            Rect close = tabCloseRects[i];
+            Rect label{r.x + padLeft, r.y, std::max(0, close.x - innerGap - (r.x + padLeft)), r.dy};
+            SetTextColor(hdc, text);
+            HdcDrawText(hdc, TbTabLabel(tb->tabs[i]), label,
+                        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
+                        isActive ? fontActive : fontIdle);
+            bool closeHot = (hot.part == TbPart::TabClose && hot.idx == i);
+            TbDrawCloseGlyph(hdc, hwnd, close, muted, closeHot ? ThemeEdgeColor() : kColorUnset);
+        }
+        bool newHot = (hot.part == TbPart::NewTab);
+        if (newHot) {
+            TbFillRounded(hdc, newTabRect, (float)DpiScale(hwnd, kTbTabRadius), hotBg);
+        }
+        TbDrawPlus(hdc, hwnd, newTabRect, muted);
+        RestoreDC(hdc, saved);
+    }
+
+    // --- row 2: favorites bar (plain accent text, no pills)
+    if (favRow.dy > 0) {
+        int saved = SaveDC(hdc);
+        IntersectClipRect(hdc, favRow.x, favRow.y, favRow.x + favRow.dx, favRow.y + favRow.dy);
+        HdcFillRect(hdc, Rect{favRow.x, favRow.y + favRow.dy - 1, favRow.dx, 1}, edge);
+        HFONT font = HdcGetUiFont(hdc, kTbFontFav, FW_MEDIUM);
+        for (int i = 0; i < len(favRects); i++) {
+            Rect r = favRects[i];
+            bool isHot = (hot.part == TbPart::Fav && hot.idx == i);
+            SetTextColor(hdc, accent);
+            uint flags = DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX;
+            HdcDrawText(hdc, TbChipLabel(TbFavAt(i)), r, flags, font);
+            if (isHot) {
+                // hover: underline, the only affordance plain text can carry
+                HdcFillRect(hdc, Rect{r.x, r.y + r.dy - DpiScale(hwnd, 9), r.dx, 1}, accent);
+            }
+        }
+        RestoreDC(hdc, saved);
+    }
+
+    // --- row 3: nav row
+    {
+        HdcFillRect(hdc, Rect{navRow.x, navRow.y + navRow.dy - 1, navRow.dx, 1}, edge);
+        float radius = (float)DpiScale(hwnd, kTbNavRadius);
+        HFONT font = HdcGetUiFont(hdc, kTbFontBtn, FW_MEDIUM);
+        uint flags = DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX;
+
+        TbFillRounded(hdc, backRect, radius, btnBg(TbPart::Back, -1));
+        SetTextColor(hdc, tb->canGoBack ? text : ThemeWindowTextDisabledColor());
+        HdcDrawText(hdc, StrL("Back"), backRect, flags, font);
+
+        TbFillRounded(hdc, fwdRect, radius, btnBg(TbPart::Fwd, -1));
+        SetTextColor(hdc, tb->canGoForward ? text : ThemeWindowTextDisabledColor());
+        HdcDrawText(hdc, StrL("Fwd"), fwdRect, flags, font);
+
+        TbFillRounded(hdc, homeRect, radius, btnBg(TbPart::Home, -1));
+        SetTextColor(hdc, text);
+        HdcDrawText(hdc, StrL("Home"), homeRect, flags, font);
+
+        // the URL field's surround; the EDIT itself is a child window on top
+        TbFillRounded(hdc, urlRect, radius, ThemeTouchSurfaceColor(), edge);
+
+        TbFillRounded(hdc, favBtnRect, radius, btnBg(TbPart::FavBtn, -1));
+        // the button is a toggle, so it says which way it is pointing by
+        // colouring its label with the accent once the page is a favorite
+        SetTextColor(hdc, TbCurrentIsFav(tb) ? accent : text);
+        HdcDrawText(hdc, StrL("Favorite"), favBtnRect, flags, font);
+
+        TbFillRounded(hdc, infoRect, radius, btnBg(TbPart::Info, -1));
+        SetTextColor(hdc, muted);
+        HdcDrawText(hdc, StrL("i"), infoRect, flags, HdcGetUiFont(hdc, kTbFontBtn, FW_SEMIBOLD));
+
+        TbFillRounded(hdc, menuRect, radius, btnBg(TbPart::Menu, -1));
+        TbDrawDots(hdc, hwnd, menuRect, muted);
+    }
+}
+
+void TbChromeWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
+    Rect rc = HwndClientRect(hwnd);
+    if (rc.dx <= 0 || rc.dy <= 0) {
+        return;
+    }
+    // double-buffered: the whole chrome repaints on every hover change
+    HDC memDc = CreateCompatibleDC(hdc);
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.dx, rc.dy);
+    HGDIOBJ prev = SelectObject(memDc, bmp);
+    Draw(memDc);
+    Rect clip = ToRect(ps->rcPaint);
+    BitBlt(hdc, clip.x, clip.y, clip.dx, clip.dy, memDc, clip.x, clip.y, SRCCOPY);
+    SelectObject(memDc, prev);
+    DeleteObject(bmp);
+    DeleteDC(memDc);
+}
+
+TbHit TbChromeWnd::HitTest(Point pt) const {
+    if (tabsRow.Contains(pt)) {
+        for (int i = 0; i < len(tabCloseRects); i++) {
+            if (tabCloseRects[i].Contains(pt)) {
+                return {TbPart::TabClose, i};
+            }
+        }
+        for (int i = 0; i < len(tabRects); i++) {
+            if (tabRects[i].Contains(pt)) {
+                return {TbPart::Tab, i};
+            }
+        }
+        if (newTabRect.Contains(pt)) {
+            return {TbPart::NewTab, -1};
+        }
+        return {};
+    }
+    if (favRow.dy > 0 && favRow.Contains(pt)) {
+        for (int i = 0; i < len(favRects); i++) {
+            if (favRects[i].Contains(pt)) {
+                return {TbPart::Fav, i};
+            }
+        }
+        return {};
+    }
+    if (backRect.Contains(pt)) {
+        return {TbPart::Back, -1};
+    }
+    if (fwdRect.Contains(pt)) {
+        return {TbPart::Fwd, -1};
+    }
+    if (homeRect.Contains(pt)) {
+        return {TbPart::Home, -1};
+    }
+    if (favBtnRect.Contains(pt)) {
+        return {TbPart::FavBtn, -1};
+    }
+    if (infoRect.Contains(pt)) {
+        return {TbPart::Info, -1};
+    }
+    if (menuRect.Contains(pt)) {
+        return {TbPart::Menu, -1};
+    }
+    return {};
+}
+
+void TbChromeWnd::Invoke(const TbHit& h) {
+    switch (h.part) {
+        case TbPart::Tab:
+            if (h.idx != tb->activeTab) {
+                TbActivateTab(tb, h.idx);
+            }
+            break;
+        case TbPart::TabClose:
+            if (h.idx >= 0 && h.idx < len(tb->tabs)) {
+                TbCloseTab(tb->tabs[h.idx]);
+            }
+            break;
+        case TbPart::NewTab:
+            TbOnNewTab(tb);
+            break;
+        case TbPart::Fav:
+            TbOnFavClick(tb, h.idx);
+            break;
+        case TbPart::Back:
+            TbOnBack(tb);
+            break;
+        case TbPart::Fwd:
+            TbOnForward(tb);
+            break;
+        case TbPart::Home:
+            TbOnHome(tb);
+            break;
+        case TbPart::FavBtn:
+            TouchWebToggleBookmark(tb->win);
+            break;
+        case TbPart::Info:
+            TbOnInfo(tb);
+            break;
+        case TbPart::Menu:
+            TbShowMenu(tb);
+            break;
+        default:
+            break;
+    }
+}
+
+void TbChromeWnd::UpdateTooltip(const TbHit& h) {
+    bool want = (h.part == TbPart::Info);
+    if (want == tooltipUp) {
+        return;
+    }
+    tooltipUp = want;
+    if (!want) {
+        if (tooltip) {
+            tooltip->Delete();
+        }
+        return;
+    }
+    if (!tooltip) {
+        Tooltip::CreateArgs targs;
+        targs.parent = hwnd;
+        targs.font = tb->hFont;
+        tooltip = new Tooltip();
+        tooltip->Create(targs);
+    }
+    tooltip->SetSingle(StrL("Page info"), infoRect, false);
+}
+
+LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_ERASEBKGND) {
+        return TRUE;
+    }
+    if (msg == WM_SIZE) {
+        EnsureLayout();
+        HwndInvalidate(hw, false);
+        return 0;
+    }
+    if (msg == WM_CTLCOLOREDIT && (HWND)lp == hwndUrl) {
+        HDC dc = (HDC)wp;
+        COLORREF bg = ThemeTouchSurfaceColor();
+        if (!urlBrush || urlBrushColor != bg) {
+            if (urlBrush) {
+                DeleteObject(urlBrush);
+            }
+            urlBrush = CreateSolidBrush(bg);
+            urlBrushColor = bg;
+        }
+        SetBkColor(dc, bg);
+        SetTextColor(dc, ThemeWindowTextColor());
+        return (LRESULT)urlBrush;
+    }
+    if (msg == WM_MOUSEMOVE) {
+        Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        TbHit h = HitTest(pt);
+        if (!TbSameHit(h, hot)) {
+            hot = h;
+            UpdateTooltip(h);
+            HwndInvalidate(hw, false);
+        }
+        TRACKMOUSEEVENT tme{};
+        tme.cbSize = sizeof(tme);
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hw;
+        TrackMouseEvent(&tme);
+        return 0;
+    }
+    if (msg == WM_MOUSELEAVE) {
+        if (hot.part != TbPart::None) {
+            hot = {};
+            UpdateTooltip(hot);
+            HwndInvalidate(hw, false);
+        }
+        return 0;
+    }
+    if (msg == WM_MOUSEWHEEL) {
+        // the tab strip and the favorites bar scroll horizontally
+        POINT sp{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ScreenToClient(hw, &sp);
+        Point pt{sp.x, sp.y};
+        int delta = GET_WHEEL_DELTA_WPARAM(wp);
+        int step = DpiScale(hw, 40) * delta / WHEEL_DELTA;
+        if (tabsRow.Contains(pt)) {
+            int maxScroll = std::max(0, tabContentDx - HwndClientRect(hw).dx);
+            int next = std::clamp(tabScrollX - step, 0, maxScroll);
+            if (next != tabScrollX) {
+                tabScrollX = next;
+                HwndInvalidate(hw, false);
+            }
+            return 0;
+        }
+        if (favRow.dy > 0 && favRow.Contains(pt)) {
+            int maxScroll = std::max(0, favContentDx - HwndClientRect(hw).dx);
+            int next = std::clamp(favScrollX - step, 0, maxScroll);
+            if (next != favScrollX) {
+                favScrollX = next;
+                HwndInvalidate(hw, false);
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if (msg == WM_LBUTTONDOWN) {
+        Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        pressed = HitTest(pt);
+        if (pressed.part != TbPart::None) {
+            SetCapture(hw);
+            HwndInvalidate(hw, false);
+        }
+        return 0;
+    }
+    if (msg == WM_LBUTTONUP) {
+        Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        TbHit was = pressed;
+        pressed = {};
+        if (GetCapture() == hw) {
+            ReleaseCapture();
+        }
+        HwndInvalidate(hw, false);
+        if (was.part == TbPart::None) {
+            return 0;
+        }
+        TbHit now = HitTest(pt);
+        if (TbSameHit(was, now)) {
+            Invoke(was);
+        }
+        return 0;
+    }
+    if (msg == WM_CAPTURECHANGED) {
+        if (pressed.part != TbPart::None) {
+            pressed = {};
+            HwndInvalidate(hw, false);
+        }
+        return 0;
+    }
+    return WndProcDefault(hw, msg, wp, lp);
+}
+
+static void TbRedrawChrome(TouchBrowser* tb) {
+    if (tb && tb->chrome && tb->chrome->hwnd) {
+        HwndInvalidate(tb->chrome->hwnd, false);
+    }
+}
+
+static void TbRelayoutChrome(TouchBrowser* tb) {
+    if (!tb || !tb->chrome || !tb->chrome->hwnd) {
+        return;
+    }
+    tb->chrome->EnsureLayout();
+    HwndInvalidate(tb->chrome->hwnd, false);
+    if (tb->win && tb->win->touchView == TouchView::Web) {
+        // the favorites bar appears / disappears with the favorites, which
+        // changes how much room is left for the webview
+        ScheduleUiUpdate(tb->win, kUiForceRelayout);
+    }
+}
+
+static void TbSyncUrlBar(TouchBrowser* tb) {
+    if (tb->chrome) {
+        tb->chrome->SyncUrlText();
+    }
+}
+
+static Rect TbMenuAnchorScreenRect(TouchBrowser* tb) {
+    if (!tb->chrome || !tb->chrome->hwnd) {
+        return HwndWindowRect(tb->win->hwndFrame);
+    }
+    Rect r = tb->chrome->menuRect;
+    POINT origin{0, 0};
+    ClientToScreen(tb->chrome->hwnd, &origin);
+    return {origin.x + r.x, origin.y + r.y, r.dx, r.dy};
+}
+
+// --- tabs ------------------------------------------------------------------
+
 static void TbDestroyTab(TbTab* t) {
-    delete t->btnLabel;
-    delete t->btnClose;
     delete t->webView;
     str::Free(t->url);
     str::Free(t->title);
@@ -1521,18 +2624,10 @@ static void TbDestroyTab(TbTab* t) {
     delete t;
 }
 
-static void TbOnTabClick(TbTab* t) {
-    TouchBrowser* tb = t->tb;
-    int idx = tb->tabs.Find(t);
-    if (idx >= 0 && idx != tb->activeTab) {
-        TbActivateTab(tb, idx);
-    }
-}
-
-// Closing a tab deletes the very Button whose click handler is running, so the
-// work is posted back to the message loop. The request identifies the browser
-// by its window, so a browser torn down in the meantime is detected before
-// `tab` (which would then be dangling) is ever dereferenced.
+// Closing a tab tears down a WebView2 control from inside the chrome's own
+// click handler, so the work is posted back to the message loop. The request
+// identifies the browser by its window, so a browser torn down in the meantime
+// is detected before `tab` (which would then be dangling) is ever dereferenced.
 struct TbCloseTabReq {
     MainWindow* win = nullptr;
     TbTab* tab = nullptr;
@@ -1569,7 +2664,7 @@ static void TbCloseTabNow(TbCloseTabReq* req) {
     TbActivateTab(tb, active);
 }
 
-static void TbOnTabClose(TbTab* t) {
+static void TbCloseTab(TbTab* t) {
     auto* req = new TbCloseTabReq();
     req->win = t->tb->win;
     req->tab = t;
@@ -1588,8 +2683,6 @@ static TbTab* TbCreateTab(TouchBrowser* tb, Str url) {
     auto* t = new TbTab();
     t->tb = tb;
     t->pendingUrl = str::Dup(url);
-    t->btnLabel = TbMakeButton(frame, tb->hFont, StrL("New Tab"), MkFunc0<TbTab>(TbOnTabClick, t));
-    t->btnClose = TbMakeButton(frame, tb->hFont, StrL("x"), MkFunc0<TbTab>(TbOnTabClose, t));
 
     t->webView = new WebviewWnd();
     t->webView->dataDir = str::Dup(GetWebViewDataDirTemp());
@@ -1609,6 +2702,7 @@ static TbTab* TbCreateTab(TouchBrowser* tb, Str url) {
         t->webView = nullptr;
     }
     tb->tabs.Append(t);
+    TbRedrawChrome(tb);
     return t;
 }
 
@@ -1621,21 +2715,18 @@ static void TbActivateTab(TouchBrowser* tb, int idx) {
     tb->activeTab = limitValue(idx, 0, n - 1);
     TbSyncUrlBar(tb);
     TbUpdateNavButtons(tb);
-    TbUpdateTabHighlight(tb);
     if (tb->win->touchView == TouchView::Web) {
         // redo the show/hide + z-order dance for the new set of controls, then
         // relayout (which also issues a newly activated tab's deferred Navigate)
         TbSetChildrenVisible(tb, true);
         ScheduleUiUpdate(tb->win, kUiForceRelayout);
         // Put the caret on the page the way a browser does after a tab switch.
-        // It also takes the focus ring off whichever button was clicked, which
-        // matters here: a focused button gets the same brighter edge that marks
-        // the active tab, so "+" would otherwise look like the selected tab.
         WebviewWnd* wv = TbActiveWebView(tb);
         if (wv) {
             wv->Focus();
         }
     }
+    TbRedrawChrome(tb);
 }
 
 static void TbOpenNewTab(TouchBrowser* tb, Str url) {
@@ -1679,34 +2770,18 @@ static TouchBrowser* CreateTouchBrowser(MainWindow* win) {
     auto* tb = new TouchBrowser();
     tb->win = win;
     tb->hFont = GetDefaultGuiFont();
-    HWND frame = win->hwndFrame;
 
-    tb->btnBack = TbMakeButton(frame, tb->hFont, StrL("Back"), MkFunc0<TouchBrowser>(TbOnBack, tb));
-    tb->btnBack->SetIsEnabled(false);
-    tb->btnForward = TbMakeButton(frame, tb->hFont, StrL("Fwd"), MkFunc0<TouchBrowser>(TbOnForward, tb));
-    tb->btnForward->SetIsEnabled(false);
-    tb->btnHome = TbMakeButton(frame, tb->hFont, StrL("Home"), MkFunc0<TouchBrowser>(TbOnHome, tb));
-    tb->btnBmAdd = TbMakeButton(frame, tb->hFont, StrL("+ Save"), MkFunc0<TouchBrowser>(TbOnSaveFav, tb));
-    tb->btnInfo = TbMakeButton(frame, tb->hFont, StrL("i"), MkFunc0<TouchBrowser>(TbOnInfo, tb));
-    tb->btnMenu = TbMakeButton(frame, tb->hFont, StrL("..."), MkFunc0<TouchBrowser>(TbOnMenu, tb));
-    tb->btnNewTab = TbMakeButton(frame, tb->hFont, StrL("+"), MkFunc0<TouchBrowser>(TbOnNewTab, tb));
-
-    HINSTANCE inst = GetInstance();
-    tb->hwndUrl = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0,
-                                  frame, nullptr, inst, nullptr);
-    SendMessageW(tb->hwndUrl, WM_SETFONT, (WPARAM)tb->hFont, TRUE);
-    SetWindowSubclass(tb->hwndUrl, TbUrlEditProc, NextSubclassId(), (DWORD_PTR)tb);
+    auto* chrome = new TbChromeWnd();
+    if (!chrome->Create(tb)) {
+        delete chrome;
+        delete tb;
+        return nullptr;
+    }
+    tb->chrome = chrome;
 
     TbCreateTab(tb, TouchBrowserHomeUrl());
     tb->activeTab = 0;
-    TbUpdateTabHighlight(tb);
     return tb;
-}
-
-static void TbShowWnd(HWND h, bool show) {
-    if (h) {
-        ShowWindow(h, show ? SW_SHOW : SW_HIDE);
-    }
 }
 
 static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
@@ -1716,9 +2791,7 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
         if (tb->menuWnd) {
             tb->menuWnd->Hide();
         }
-        if (tb->favMgr) {
-            tb->favMgr->Hide();
-        }
+        TbHideFavMgr(tb);
     }
     // Hide the canvas while the web view is up: it covers the same content area
     // and would paint the Home page through/around the browser chrome. Done here
@@ -1726,20 +2799,9 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
     if (tb->win && tb->win->hwndCanvas) {
         HwndSetVisible(tb->win->hwndCanvas, !show);
     }
-    TbShowWnd(tb->btnBack ? tb->btnBack->hwnd : nullptr, show);
-    TbShowWnd(tb->btnForward ? tb->btnForward->hwnd : nullptr, show);
-    TbShowWnd(tb->btnHome ? tb->btnHome->hwnd : nullptr, show);
-    TbShowWnd(tb->btnBmAdd ? tb->btnBmAdd->hwnd : nullptr, show);
-    TbShowWnd(tb->btnInfo ? tb->btnInfo->hwnd : nullptr, show);
-    TbShowWnd(tb->btnMenu ? tb->btnMenu->hwnd : nullptr, show);
-    TbShowWnd(tb->btnNewTab ? tb->btnNewTab->hwnd : nullptr, show);
-    TbShowWnd(tb->hwndUrl, show);
-    for (TbChip* c : tb->bmChips) {
-        TbShowWnd(c->btn ? c->btn->hwnd : nullptr, show);
-    }
-    for (TbTab* t : tb->tabs) {
-        TbShowWnd(t->btnLabel ? t->btnLabel->hwnd : nullptr, show);
-        TbShowWnd(t->btnClose ? t->btnClose->hwnd : nullptr, show);
+    HWND hwndChrome = tb->chrome ? tb->chrome->hwnd : nullptr;
+    if (hwndChrome) {
+        ShowWindow(hwndChrome, show ? SW_SHOW : SW_HIDE);
     }
     for (int i = 0; i < len(tb->tabs); i++) {
         WebviewWnd* wv = tb->tabs[i]->webView;
@@ -1757,31 +2819,12 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
             SetWindowPos(wv->hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
-    if (show) {
-        // ...but then the nav row, the tab strip and the favorites chips must go
-        // above the webview, or WebView2 (which is topmost and briefly covers the
-        // whole content area before the first layout) eats clicks meant for them -
-        // that is what made the buttons "sometimes stop working".
-        auto raise = [](HWND h) {
-            if (h) {
-                SetWindowPos(h, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            }
-        };
-        raise(tb->btnBack ? tb->btnBack->hwnd : nullptr);
-        raise(tb->btnForward ? tb->btnForward->hwnd : nullptr);
-        raise(tb->btnHome ? tb->btnHome->hwnd : nullptr);
-        raise(tb->btnBmAdd ? tb->btnBmAdd->hwnd : nullptr);
-        raise(tb->btnInfo ? tb->btnInfo->hwnd : nullptr);
-        raise(tb->btnMenu ? tb->btnMenu->hwnd : nullptr);
-        raise(tb->hwndUrl);
-        for (TbTab* t : tb->tabs) {
-            raise(t->btnLabel ? t->btnLabel->hwnd : nullptr);
-            raise(t->btnClose ? t->btnClose->hwnd : nullptr);
-        }
-        raise(tb->btnNewTab ? tb->btnNewTab->hwnd : nullptr);
-        for (TbChip* c : tb->bmChips) {
-            raise(c->btn ? c->btn->hwnd : nullptr);
-        }
+    if (show && hwndChrome) {
+        // ...but then the chrome must go above the webview, or WebView2 (which
+        // is topmost and briefly covers the whole content area before the first
+        // layout) eats clicks meant for it - that is what made the buttons
+        // "sometimes stop working".
+        SetWindowPos(hwndChrome, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 }
 
@@ -1794,9 +2837,6 @@ void ShowTouchWebView(MainWindow* win, bool show) {
     }
     if (!win->touchBrowser) {
         return;
-    }
-    if (show && win->touchBrowser->bmDirty) {
-        TbRebuildChips(win->touchBrowser);
     }
     TbSetChildrenVisible(win->touchBrowser, show);
     // RelayoutFrame's cached layout snapshot records touchView but not whether
@@ -1811,115 +2851,14 @@ void LayoutTouchWebView(MainWindow* win, Rect rc) {
         return;
     }
     TouchBrowser* tb = win->touchBrowser;
-    HWND frame = win->hwndFrame;
-    int pad = DpiScale(frame, kTbPad);
-    int gap = DpiScale(frame, kTbGap);
-    int btnDx = DpiScale(frame, kTbBtnDx);
-    int navDy = DpiScale(frame, kTbNavDy);
-    int tabsDy = DpiScale(frame, kTbTabsDy);
-    int bmDy = DpiScale(frame, kTbBmDy);
-    int btnDy = navDy - 2 * pad;
-
-    // rows, top to bottom: tab strip, favorites bar, nav row, then the webview.
-    // The favorites bar sits directly above the address bar (and is always
-    // present: it carries the "+ Save" button even with no favorites yet).
-    int tabsTop = rc.y;
-    int bmTop = tabsTop + tabsDy;
-    int navTop = bmTop + bmDy;
-
-    int x = rc.x + pad;
-    int y = navTop + pad;
-    auto place = [&](Button* b) {
-        if (b) {
-            MoveWindow(b->hwnd, x, y, btnDx, btnDy, TRUE);
-            x += btnDx + gap;
-        }
-    };
-    place(tb->btnBack);
-    place(tb->btnForward);
-    place(tb->btnHome);
-    // right-aligned cluster: [i] [...]
-    int miniDx = DpiScale(frame, 30);
-    int menuX = rc.x + rc.dx - pad - miniDx;
-    if (tb->btnMenu) {
-        MoveWindow(tb->btnMenu->hwnd, menuX, y, miniDx, btnDy, TRUE);
-    }
-    int infoX = menuX - gap - miniDx;
-    if (tb->btnInfo) {
-        MoveWindow(tb->btnInfo->hwnd, infoX, y, miniDx, btnDy, TRUE);
-    }
-    if (tb->hwndUrl) {
-        int urlX = x;
-        int urlDx = std::max(0, infoX - gap - urlX);
-        MoveWindow(tb->hwndUrl, urlX, y, urlDx, btnDy, TRUE);
+    TbChromeWnd* chrome = tb->chrome;
+    int chromeDy = 0;
+    if (chrome && chrome->hwnd) {
+        chromeDy = std::min(TbChromeDy(chrome->hwnd), std::max(0, rc.dy));
+        MoveWindow(chrome->hwnd, rc.x, rc.y, rc.dx, chromeDy, TRUE);
     }
 
-    // tab strip: [label][x] per tab, then "+". Tabs share the row evenly up to
-    // kTbTabMaxDx; a tab that would collide with "+" gets a zero-size rect so it
-    // stays out of the way (and unclickable) instead of overlapping it.
-    {
-        int closeDx = DpiScale(frame, kTbTabCloseDx);
-        int newDx = DpiScale(frame, kTbNewTabDx);
-        int maxTabDx = DpiScale(frame, kTbTabMaxDx);
-        int minTabDx = DpiScale(frame, kTbTabMinDx);
-        int tabY = tabsTop + DpiScale(frame, 2);
-        int tabDy = std::max(0, tabsDy - DpiScale(frame, 5));
-        int right = rc.x + rc.dx - pad;
-        int tabsLeft = rc.x + pad;
-        int nTabs = len(tb->tabs);
-        int tabDx = maxTabDx;
-        if (nTabs > 0) {
-            int avail = std::max(0, right - tabsLeft - newDx - gap);
-            tabDx = std::min(maxTabDx, (avail / nTabs) - gap);
-        }
-        tabDx = std::max(tabDx, minTabDx);
-        int tx = tabsLeft;
-        for (TbTab* t : tb->tabs) {
-            if (!t->btnLabel || !t->btnClose) {
-                continue;
-            }
-            bool fits = (tx + tabDx + gap + newDx) <= right;
-            if (!fits) {
-                MoveWindow(t->btnLabel->hwnd, tx, tabY, 0, 0, TRUE);
-                MoveWindow(t->btnClose->hwnd, tx, tabY, 0, 0, TRUE);
-                continue;
-            }
-            MoveWindow(t->btnLabel->hwnd, tx, tabY, tabDx - closeDx, tabDy, TRUE);
-            MoveWindow(t->btnClose->hwnd, tx + tabDx - closeDx, tabY, closeDx, tabDy, TRUE);
-            tx += tabDx + gap;
-        }
-        if (tb->btnNewTab) {
-            int newX = std::min(tx, right - newDx);
-            MoveWindow(tb->btnNewTab->hwnd, newX, tabY, newDx, tabDy, TRUE);
-        }
-    }
-
-    // favorites bar: "+ Save" first, then a chip per favorite
-    {
-        int cx = rc.x + pad;
-        int cy = bmTop + DpiScale(frame, 3);
-        int chipDy = bmDy - DpiScale(frame, 6);
-        int right = rc.x + rc.dx - pad;
-        if (tb->btnBmAdd) {
-            int addDx = DpiScale(frame, 58);
-            MoveWindow(tb->btnBmAdd->hwnd, cx, cy, addDx, chipDy, TRUE);
-            cx += addDx + gap * 2;
-        }
-        for (TbChip* c : tb->bmChips) {
-            Size ideal = c->btn->GetIdealSize();
-            int cdx = std::min(ideal.dx + DpiScale(frame, 12), DpiScale(frame, 160));
-            if (cx + cdx > right) {
-                // one row of chips; the overflow is parked off-layout (and so
-                // unclickable) rather than left overlapping the last chip
-                MoveWindow(c->btn->hwnd, cx, cy, 0, 0, TRUE);
-                continue;
-            }
-            MoveWindow(c->btn->hwnd, cx, cy, cdx, chipDy, TRUE);
-            cx += cdx + gap;
-        }
-    }
-
-    int webTop = navTop + navDy;
+    int webTop = rc.y + chromeDy;
     Rect webRc{rc.x, webTop, rc.dx, std::max(0, rc.y + rc.dy - webTop)};
     // every tab gets the bounds, so switching to one doesn't show a stale size
     for (TbTab* t : tb->tabs) {
@@ -1974,11 +2913,10 @@ void TouchWebToggleBookmark(MainWindow* win) {
     } else {
         bm->Append(str::Dup(url));
     }
-    TbRebuildChips(tb);
     SaveSettings();
+    TbRelayoutChrome(tb);
     if (win->touchView == TouchView::Web) {
         TbSetChildrenVisible(tb, true);
-        ScheduleUiUpdate(win, kUiForceRelayout);
     }
 }
 
@@ -1990,22 +2928,13 @@ void DestroyTouchWebView(MainWindow* win) {
     // clear this first: a queued TbCloseTabNow / TbOpenNewTabNow that runs after
     // us must see the browser as gone rather than walk freed tabs
     win->touchBrowser = nullptr;
-    TbDestroyChips(tb);
     for (TbTab* t : tb->tabs) {
         TbDestroyTab(t);
     }
     tb->tabs.Reset();
-    delete tb->btnBack;
-    delete tb->btnForward;
-    delete tb->btnHome;
-    delete tb->btnBmAdd;
-    delete tb->btnInfo;
-    delete tb->btnMenu;
-    delete tb->btnNewTab;
+    delete tb->chrome;
     delete tb->menuWnd;
     delete tb->favMgr;
-    if (tb->hwndUrl) {
-        DestroyWindow(tb->hwndUrl);
-    }
+    delete tb->scrim;
     delete tb;
 }
