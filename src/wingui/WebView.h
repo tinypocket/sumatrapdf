@@ -37,6 +37,9 @@ struct WebViewEvents {
     bool (*navigationStarting)(void* ctx, Str url, bool newWindow) = nullptr;
     void (*navigationCompleted)(void* ctx, Str url, bool success) = nullptr;
     void (*historyChanged)(void* ctx, bool canGoBack, bool canGoForward) = nullptr;
+    // the page's document title changed (fires on load and on any later change).
+    // The in-product browser labels its tabs with it.
+    void (*documentTitleChanged)(void* ctx, Str title) = nullptr;
     // maps an accelerator key press inside the webview to an app command id to
     // post (WM_COMMAND) to the top-level window, or 0 to leave it to the
     // webview, or kWebViewForwardKey to re-post the key itself. Lets the host

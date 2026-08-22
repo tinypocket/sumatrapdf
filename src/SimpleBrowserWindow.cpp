@@ -332,11 +332,21 @@ SimpleBrowserWindow* SimpleBrowserWindowCreate(const SimpleBrowserCreateArgs& ar
 // (children of hwndFrame drawn over the canvas) instead of its own window.
 // ---------------------------------------------------------------------------
 
-constexpr int kTbNavDy = 40; // navigation row height (logical px)
-constexpr int kTbBmDy = 34;  // bookmarks row height
+constexpr int kTbNavDy = 40;  // navigation row height (logical px)
+constexpr int kTbTabsDy = 32; // tab strip row height
+constexpr int kTbBmDy = 34;   // bookmarks row height
 constexpr int kTbPad = 6;
 constexpr int kTbGap = 4;
 constexpr int kTbBtnDx = 64;
+// tab strip metrics. A tab is a label button plus an adjacent "x" button, so
+// kTbTabMinDx has to stay wide enough for the close button and a few glyphs.
+constexpr int kTbTabMaxDx = 160;
+constexpr int kTbTabMinDx = 62;
+constexpr int kTbTabCloseDx = 20;
+constexpr int kTbNewTabDx = 28;
+// each tab is a live WebView2 control (its own renderer process), and a
+// plain-button strip stops being readable well before this many anyway
+constexpr int kTbMaxTabs = 10;
 
 struct TouchBrowser;
 
@@ -346,22 +356,41 @@ struct TbChip {
     Button* btn = nullptr;
 };
 
+// One browser tab: its own WebView2 control plus the two buttons that stand for
+// it in the tab strip (the label, which activates it, and an "x" that closes
+// it). All of them are children of hwndFrame, like the rest of the browser
+// chrome. `this` is the WebViewEvents ctx of its own webview, so the navigation
+// callbacks know which tab they belong to.
+struct TbTab {
+    TouchBrowser* tb = nullptr;
+    WebviewWnd* webView = nullptr;
+    Button* btnLabel = nullptr;
+    Button* btnClose = nullptr;
+    Str url;   // last committed URL; shown in the URL bar while active
+    Str title; // document title, empty until the page reports one
+    // WebView2 ignores a Navigate issued before the control has a non-zero size
+    // and a first layout, so every tab defers its first navigation to
+    // LayoutTouchWebView (mirrors SimpleBrowserWindow::Create). Until then the
+    // page it should open is parked here.
+    Str pendingUrl;
+    bool didInitialNav = false;
+};
+
 struct TouchBrowser {
     MainWindow* win = nullptr;
-    WebviewWnd* webView = nullptr;
+    Vec<TbTab*> tabs;
+    // index into `tabs`; only this tab's webview is visible. Kept in range by
+    // TbActivateTab, and `tabs` is never left empty while the browser exists.
+    int activeTab = 0;
     Button* btnBack = nullptr;
     Button* btnForward = nullptr;
     Button* btnHome = nullptr;
     Button* btnStar = nullptr;
+    Button* btnNewTab = nullptr;
     HWND hwndUrl = nullptr;
     HFONT hFont = nullptr;
-    Str currentUrl;
     Vec<TbChip*> bmChips;
     bool bmDirty = true;
-    // WebView2 ignores a Navigate issued before the control has a non-zero size
-    // and a first layout, so the home page is loaded from LayoutTouchWebView
-    // once the webview has real bounds (mirrors SimpleBrowserWindow::Create).
-    bool didInitialNav = false;
 };
 
 static Str TouchBrowserHomeUrl() {
@@ -427,10 +456,36 @@ static void TbDocDownloadAsync(TbDocDownload* d) {
     uitask::Post(MkFunc0<TbDocDownload>(TbDocDownloadFinish, d), "TbDocDownloadFinish");
 }
 
+static void TbSetChildrenVisible(TouchBrowser* tb, bool show);
+static void TbActivateTab(TouchBrowser* tb, int idx);
+// refreshes a tab's strip button from its title / URL
+static void TbUpdateTabButton(TbTab*);
+// opens `url` in a new browser tab, from the message loop rather than inline
+static void TbRequestNewTab(MainWindow* win, Str url);
+
+static TbTab* TbActiveTab(TouchBrowser* tb) {
+    if (tb->activeTab < 0 || tb->activeTab >= len(tb->tabs)) {
+        return nullptr;
+    }
+    return tb->tabs[tb->activeTab];
+}
+
+static WebviewWnd* TbActiveWebView(TouchBrowser* tb) {
+    TbTab* t = TbActiveTab(tb);
+    return t ? t->webView : nullptr;
+}
+
+static bool TbIsActiveTab(TbTab* t) {
+    return t == TbActiveTab(t->tb);
+}
+
 // navigationStarting: intercept links to documents so they open as tabs in
 // SumatraPDF+ instead of navigating the webview; everything else proceeds.
-static bool TbNavigationStarting(void* ctx, Str url, bool /*newWindow*/) {
-    auto* tb = (TouchBrowser*)ctx;
+// Also fired (with newWindow) for target=_blank / window.open, which the
+// webview has already declined to handle - we turn those into browser tabs.
+static bool TbNavigationStarting(void* ctx, Str url, bool newWindow) {
+    auto* tab = (TbTab*)ctx;
+    TouchBrowser* tb = tab->tb;
     Str ext;
     if (TouchBrowserUrlIsDoc(url, &ext)) {
         auto* d = new TbDocDownload();
@@ -458,33 +513,63 @@ static bool TbNavigationStarting(void* ctx, Str url, bool /*newWindow*/) {
         RunAsync(MkFunc0<TbDocDownload>(TbDocDownloadAsync, d), "TbDocDownloadAsync");
         return false; // cancel the webview navigation
     }
+    if (newWindow) {
+        TbRequestNewTab(tb->win, url);
+        return false;
+    }
+    // This tab is really leaving its page, so drop the title it had: the strip
+    // falls back to the host until the new page reports one. Done here and not
+    // in navigationCompleted because DocumentTitleChanged arrives first (the
+    // title is known as soon as the document is parsed) and clearing later
+    // would throw the new title away. Navigations we cancelled above returned
+    // before this, so they keep the title of the page still on screen.
+    str::FreePtr(&tab->title);
+    TbUpdateTabButton(tab);
     return true;
 }
 
-static void TbSetUrl(TouchBrowser* tb, Str url) {
-    str::ReplaceWithCopy(&tb->currentUrl, url);
-    if (tb->hwndUrl) {
-        HwndSetText(tb->hwndUrl, url);
+// the nav row always reflects the ACTIVE tab, so background tabs never write to it
+static void TbSyncUrlBar(TouchBrowser* tb) {
+    if (!tb->hwndUrl) {
+        return;
     }
+    TbTab* t = TbActiveTab(tb);
+    Str url = t ? t->url : Str();
+    HwndSetText(tb->hwndUrl, url ? url : StrL(""));
 }
 
 static void TbUpdateNavButtons(TouchBrowser* tb) {
-    if (tb->btnBack && tb->webView) {
-        tb->btnBack->SetIsEnabled(tb->webView->CanGoBack());
+    WebviewWnd* wv = TbActiveWebView(tb);
+    if (tb->btnBack) {
+        tb->btnBack->SetIsEnabled(wv && wv->CanGoBack());
     }
-    if (tb->btnForward && tb->webView) {
-        tb->btnForward->SetIsEnabled(tb->webView->CanGoForward());
+    if (tb->btnForward) {
+        tb->btnForward->SetIsEnabled(wv && wv->CanGoForward());
     }
 }
 
 static void TbNavigationCompleted(void* ctx, Str url, bool /*success*/) {
-    auto* tb = (TouchBrowser*)ctx;
-    TbSetUrl(tb, url);
-    TbUpdateNavButtons(tb);
+    auto* tab = (TbTab*)ctx;
+    str::ReplaceWithCopy(&tab->url, url);
+    TbUpdateTabButton(tab);
+    if (TbIsActiveTab(tab)) {
+        TbSyncUrlBar(tab->tb);
+        TbUpdateNavButtons(tab->tb);
+    }
+}
+
+static void TbDocumentTitleChanged(void* ctx, Str title) {
+    auto* tab = (TbTab*)ctx;
+    str::ReplaceWithCopy(&tab->title, title);
+    TbUpdateTabButton(tab);
 }
 
 static void TbHistoryChanged(void* ctx, bool canBack, bool canFwd) {
-    auto* tb = (TouchBrowser*)ctx;
+    auto* tab = (TbTab*)ctx;
+    if (!TbIsActiveTab(tab)) {
+        return;
+    }
+    TouchBrowser* tb = tab->tb;
     if (tb->btnBack) {
         tb->btnBack->SetIsEnabled(canBack);
     }
@@ -498,12 +583,13 @@ static LRESULT CALLBACK TbUrlEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     auto* tb = (TouchBrowser*)ref;
     if (msg == WM_KEYDOWN && wp == VK_RETURN) {
         TempStr txt = HwndGetTextTemp(hwnd);
-        if (tb && tb->webView && !str::IsEmptyOrWhiteSpace(txt)) {
+        WebviewWnd* wv = tb ? TbActiveWebView(tb) : nullptr;
+        if (wv && !str::IsEmptyOrWhiteSpace(txt)) {
             Str url = txt;
             if (!str::StartsWithI(url, StrL("http://")) && !str::StartsWithI(url, StrL("https://"))) {
                 url = str::JoinTemp(StrL("https://"), txt);
             }
-            tb->webView->Navigate(url);
+            wv->Navigate(url);
         }
         return 0;
     }
@@ -522,27 +608,32 @@ static LRESULT CALLBACK TbUrlEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 }
 
 static void TbOnBack(TouchBrowser* tb) {
-    if (tb->webView) {
-        tb->webView->GoBack();
+    WebviewWnd* wv = TbActiveWebView(tb);
+    if (wv) {
+        wv->GoBack();
     }
 }
 static void TbOnForward(TouchBrowser* tb) {
-    if (tb->webView) {
-        tb->webView->GoForward();
+    WebviewWnd* wv = TbActiveWebView(tb);
+    if (wv) {
+        wv->GoForward();
     }
 }
 static void TbOnHome(TouchBrowser* tb) {
-    if (tb->webView) {
-        tb->webView->Navigate(TouchBrowserHomeUrl());
+    WebviewWnd* wv = TbActiveWebView(tb);
+    if (wv) {
+        wv->Navigate(TouchBrowserHomeUrl());
     }
 }
 static void TbOnStar(TouchBrowser* tb) {
     TouchWebToggleBookmark(tb->win);
 }
+// favorites chips navigate the active tab, like typing in the URL bar does
 static void TbOnChipClick(TbChip* c) {
     Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
-    if (c->tb->webView && bm && c->idx >= 0 && c->idx < len(*bm)) {
-        c->tb->webView->Navigate((*bm)[c->idx]);
+    WebviewWnd* wv = TbActiveWebView(c->tb);
+    if (wv && bm && c->idx >= 0 && c->idx < len(*bm)) {
+        wv->Navigate((*bm)[c->idx]);
     }
 }
 
@@ -586,6 +677,204 @@ static Button* TbMakeButton(HWND frame, HFONT font, Str text, const Func0& onCli
     return b;
 }
 
+// --- tab strip -------------------------------------------------------------
+
+// the strip is narrow, so prefer the page title and fall back to the host name
+static TempStr TbTabLabel(TbTab* t) {
+    if (!str::IsEmptyOrWhiteSpace(t->title)) {
+        return str::DupTemp(t->title);
+    }
+    if (t->url) {
+        TempStr host = TbChipLabel(t->url);
+        if (!str::IsEmptyOrWhiteSpace(host)) {
+            return host;
+        }
+    }
+    return str::DupTemp(StrL("New Tab"));
+}
+
+static void TbUpdateTabButton(TbTab* t) {
+    if (t->btnLabel) {
+        t->btnLabel->SetText(TbTabLabel(t));
+    }
+}
+
+// A plain Win32 push button has no "selected" look, and the owner-draw path
+// (ButtonGetColors) has a single app-wide palette. Button::isDefault is the one
+// per-button variation it offers - the palette's brighter edge - so that marks
+// the active tab.
+static void TbUpdateTabHighlight(TouchBrowser* tb) {
+    for (int i = 0; i < len(tb->tabs); i++) {
+        TbTab* t = tb->tabs[i];
+        bool isActive = (i == tb->activeTab);
+        if (t->btnLabel && t->btnLabel->isDefault != isActive) {
+            t->btnLabel->isDefault = isActive;
+            HwndScheduleRepaint(t->btnLabel->hwnd);
+        }
+    }
+}
+
+static void TbDestroyTab(TbTab* t) {
+    delete t->btnLabel;
+    delete t->btnClose;
+    delete t->webView;
+    str::Free(t->url);
+    str::Free(t->title);
+    str::Free(t->pendingUrl);
+    delete t;
+}
+
+static void TbOnTabClick(TbTab* t) {
+    TouchBrowser* tb = t->tb;
+    int idx = tb->tabs.Find(t);
+    if (idx >= 0 && idx != tb->activeTab) {
+        TbActivateTab(tb, idx);
+    }
+}
+
+// Closing a tab deletes the very Button whose click handler is running, so the
+// work is posted back to the message loop. The request identifies the browser
+// by its window, so a browser torn down in the meantime is detected before
+// `tab` (which would then be dangling) is ever dereferenced.
+struct TbCloseTabReq {
+    MainWindow* win = nullptr;
+    TbTab* tab = nullptr;
+};
+
+static void TbCloseTabNow(TbCloseTabReq* req) {
+    MainWindow* win = req->win;
+    TbTab* tab = req->tab;
+    delete req;
+    if (!IsMainWindowValid(win) || !win->touchBrowser) {
+        return;
+    }
+    TouchBrowser* tb = win->touchBrowser;
+    int idx = tb->tabs.Find(tab);
+    if (idx < 0) {
+        return; // already closed
+    }
+    if (len(tb->tabs) == 1) {
+        // never leave the browser without a live webview: the last tab is
+        // recycled back to the home page instead of being closed
+        if (tab->webView) {
+            tab->webView->Navigate(TouchBrowserHomeUrl());
+        }
+        return;
+    }
+    tb->tabs.RemoveAt(idx);
+    TbDestroyTab(tab);
+    // closing a tab left of the active one shifts it down; closing the active
+    // one hands over to the tab that slid into its slot (clamped for the last)
+    int active = tb->activeTab;
+    if (idx < active) {
+        active--;
+    }
+    TbActivateTab(tb, active);
+}
+
+static void TbOnTabClose(TbTab* t) {
+    auto* req = new TbCloseTabReq();
+    req->win = t->tb->win;
+    req->tab = t;
+    uitask::Post(MkFunc0<TbCloseTabReq>(TbCloseTabNow, req), "TbCloseTabNow");
+}
+
+// Creates a tab and its webview. Like SimpleBrowserWindow the control is created
+// at a real size (not 0x0), and `url` is parked in pendingUrl because WebView2
+// drops a Navigate issued before the control has bounds and a first layout;
+// LayoutTouchWebView issues it. Returns nullptr when the strip is full.
+static TbTab* TbCreateTab(TouchBrowser* tb, Str url) {
+    if (len(tb->tabs) >= kTbMaxTabs) {
+        return nullptr;
+    }
+    HWND frame = tb->win->hwndFrame;
+    auto* t = new TbTab();
+    t->tb = tb;
+    t->pendingUrl = str::Dup(url);
+    t->btnLabel = TbMakeButton(frame, tb->hFont, StrL("New Tab"), MkFunc0<TbTab>(TbOnTabClick, t));
+    t->btnClose = TbMakeButton(frame, tb->hFont, StrL("x"), MkFunc0<TbTab>(TbOnTabClose, t));
+
+    t->webView = new WebviewWnd();
+    t->webView->dataDir = str::Dup(GetWebViewDataDirTemp());
+    t->webView->enableAutofill = true;
+    t->webView->enableBrowserChrome = true;
+    t->webView->events.ctx = t;
+    t->webView->events.navigationStarting = TbNavigationStarting;
+    t->webView->events.navigationCompleted = TbNavigationCompleted;
+    t->webView->events.historyChanged = TbHistoryChanged;
+    t->webView->events.documentTitleChanged = TbDocumentTitleChanged;
+    t->webView->forwardAppAccelerators = true;
+    CreateWebViewArgs cargs;
+    cargs.parent = frame;
+    cargs.pos = HwndClientRect(frame);
+    if (!t->webView->Create(cargs)) {
+        delete t->webView;
+        t->webView = nullptr;
+    }
+    tb->tabs.Append(t);
+    return t;
+}
+
+static void TbActivateTab(TouchBrowser* tb, int idx) {
+    int n = len(tb->tabs);
+    if (n == 0) {
+        tb->activeTab = 0;
+        return;
+    }
+    tb->activeTab = limitValue(idx, 0, n - 1);
+    TbSyncUrlBar(tb);
+    TbUpdateNavButtons(tb);
+    TbUpdateTabHighlight(tb);
+    if (tb->win->touchView == TouchView::Web) {
+        // redo the show/hide + z-order dance for the new set of controls, then
+        // relayout (which also issues a newly activated tab's deferred Navigate)
+        TbSetChildrenVisible(tb, true);
+        ScheduleUiUpdate(tb->win, kUiForceRelayout);
+        // Put the caret on the page the way a browser does after a tab switch.
+        // It also takes the focus ring off whichever button was clicked, which
+        // matters here: a focused button gets the same brighter edge that marks
+        // the active tab, so "+" would otherwise look like the selected tab.
+        WebviewWnd* wv = TbActiveWebView(tb);
+        if (wv) {
+            wv->Focus();
+        }
+    }
+}
+
+static void TbOpenNewTab(TouchBrowser* tb, Str url) {
+    if (!TbCreateTab(tb, url)) {
+        return;
+    }
+    TbActivateTab(tb, len(tb->tabs) - 1);
+}
+
+static void TbOnNewTab(TouchBrowser* tb) {
+    TbOpenNewTab(tb, TouchBrowserHomeUrl());
+}
+
+struct TbNewTabReq {
+    MainWindow* win = nullptr;
+    Str url;
+};
+
+static void TbOpenNewTabNow(TbNewTabReq* req) {
+    if (IsMainWindowValid(req->win) && req->win->touchBrowser) {
+        TbOpenNewTab(req->win->touchBrowser, req->url);
+    }
+    str::Free(req->url);
+    delete req;
+}
+
+// creating a WebView2 control from inside a WebView2 event callback is asking
+// for re-entrancy trouble, so target=_blank links open their tab from the
+// message loop instead
+static void TbRequestNewTab(MainWindow* win, Str url) {
+    auto* req = new TbNewTabReq();
+    req->win = win;
+    req->url = str::Dup(url);
+    uitask::Post(MkFunc0<TbNewTabReq>(TbOpenNewTabNow, req), "TbOpenNewTabNow");
+}
+
 static TouchBrowser* CreateTouchBrowser(MainWindow* win) {
     if (!HasWebView()) {
         return nullptr;
@@ -601,6 +890,7 @@ static TouchBrowser* CreateTouchBrowser(MainWindow* win) {
     tb->btnForward->SetIsEnabled(false);
     tb->btnHome = TbMakeButton(frame, tb->hFont, StrL("Home"), MkFunc0<TouchBrowser>(TbOnHome, tb));
     tb->btnStar = TbMakeButton(frame, tb->hFont, StrL("Favorite"), MkFunc0<TouchBrowser>(TbOnStar, tb));
+    tb->btnNewTab = TbMakeButton(frame, tb->hFont, StrL("+"), MkFunc0<TouchBrowser>(TbOnNewTab, tb));
 
     HINSTANCE inst = GetInstance();
     tb->hwndUrl = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0,
@@ -608,24 +898,9 @@ static TouchBrowser* CreateTouchBrowser(MainWindow* win) {
     SendMessageW(tb->hwndUrl, WM_SETFONT, (WPARAM)tb->hFont, TRUE);
     SetWindowSubclass(tb->hwndUrl, TbUrlEditProc, NextSubclassId(), (DWORD_PTR)tb);
 
-    tb->webView = new WebviewWnd();
-    tb->webView->dataDir = str::Dup(GetWebViewDataDirTemp());
-    tb->webView->enableAutofill = true;
-    tb->webView->enableBrowserChrome = true;
-    tb->webView->events.ctx = tb;
-    tb->webView->events.navigationStarting = TbNavigationStarting;
-    tb->webView->events.navigationCompleted = TbNavigationCompleted;
-    tb->webView->events.historyChanged = TbHistoryChanged;
-    tb->webView->forwardAppAccelerators = true;
-    CreateWebViewArgs cargs;
-    cargs.parent = frame;
-    // create at a real size (not 0x0) like SimpleBrowserWindow; the initial
-    // Navigate is deferred to LayoutTouchWebView once the bounds are final.
-    cargs.pos = HwndClientRect(frame);
-    if (!tb->webView->Create(cargs)) {
-        delete tb->webView;
-        tb->webView = nullptr;
-    }
+    TbCreateTab(tb, TouchBrowserHomeUrl());
+    tb->activeTab = 0;
+    TbUpdateTabHighlight(tb);
     return tb;
 }
 
@@ -646,25 +921,35 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
     TbShowWnd(tb->btnForward ? tb->btnForward->hwnd : nullptr, show);
     TbShowWnd(tb->btnHome ? tb->btnHome->hwnd : nullptr, show);
     TbShowWnd(tb->btnStar ? tb->btnStar->hwnd : nullptr, show);
+    TbShowWnd(tb->btnNewTab ? tb->btnNewTab->hwnd : nullptr, show);
     TbShowWnd(tb->hwndUrl, show);
     for (TbChip* c : tb->bmChips) {
         TbShowWnd(c->btn ? c->btn->hwnd : nullptr, show);
     }
-    if (tb->webView) {
-        tb->webView->SetIsVisible(show);
-        tb->webView->SetControllerVisible(show);
+    for (TbTab* t : tb->tabs) {
+        TbShowWnd(t->btnLabel ? t->btnLabel->hwnd : nullptr, show);
+        TbShowWnd(t->btnClose ? t->btnClose->hwnd : nullptr, show);
+    }
+    for (int i = 0; i < len(tb->tabs); i++) {
+        WebviewWnd* wv = tb->tabs[i]->webView;
+        if (!wv) {
+            continue;
+        }
+        // only the active tab is on screen; the others keep running hidden
+        bool isVisible = show && (i == tb->activeTab);
+        wv->SetIsVisible(isVisible);
+        wv->SetControllerVisible(isVisible);
         // The canvas is a sibling that covers the same content area and sits
         // above us in z-order, so it would paint the Home page over the page
         // content. Raise the webview (both have WS_CLIPSIBLINGS) when shown.
-        if (show && tb->webView->hwnd) {
-            SetWindowPos(tb->webView->hwnd, HWND_TOP, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        if (isVisible && wv->hwnd) {
+            SetWindowPos(wv->hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
     if (show) {
-        // ...but then the nav row and the favorites chips must go above the
-        // webview, or WebView2 (which is topmost and briefly covers the whole
-        // content area before the first layout) eats clicks meant for them -
+        // ...but then the nav row, the tab strip and the favorites chips must go
+        // above the webview, or WebView2 (which is topmost and briefly covers the
+        // whole content area before the first layout) eats clicks meant for them -
         // that is what made the buttons "sometimes stop working".
         auto raise = [](HWND h) {
             if (h) {
@@ -676,6 +961,11 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
         raise(tb->btnHome ? tb->btnHome->hwnd : nullptr);
         raise(tb->btnStar ? tb->btnStar->hwnd : nullptr);
         raise(tb->hwndUrl);
+        for (TbTab* t : tb->tabs) {
+            raise(t->btnLabel ? t->btnLabel->hwnd : nullptr);
+            raise(t->btnClose ? t->btnClose->hwnd : nullptr);
+        }
+        raise(tb->btnNewTab ? tb->btnNewTab->hwnd : nullptr);
         for (TbChip* c : tb->bmChips) {
             raise(c->btn ? c->btn->hwnd : nullptr);
         }
@@ -713,6 +1003,7 @@ void LayoutTouchWebView(MainWindow* win, Rect rc) {
     int gap = DpiScale(frame, kTbGap);
     int btnDx = DpiScale(frame, kTbBtnDx);
     int navDy = DpiScale(frame, kTbNavDy);
+    int tabsDy = DpiScale(frame, kTbTabsDy);
     int bmDy = DpiScale(frame, kTbBmDy);
     int btnDy = navDy - 2 * pad;
 
@@ -739,8 +1030,48 @@ void LayoutTouchWebView(MainWindow* win, Rect rc) {
         MoveWindow(tb->hwndUrl, urlX, y, urlDx, btnDy, TRUE);
     }
 
+    // tab strip: [label][x] per tab, then "+". Tabs share the row evenly up to
+    // kTbTabMaxDx; a tab that would collide with "+" gets a zero-size rect so it
+    // stays out of the way (and unclickable) instead of overlapping it.
+    {
+        int closeDx = DpiScale(frame, kTbTabCloseDx);
+        int newDx = DpiScale(frame, kTbNewTabDx);
+        int maxTabDx = DpiScale(frame, kTbTabMaxDx);
+        int minTabDx = DpiScale(frame, kTbTabMinDx);
+        int tabY = rc.y + navDy + DpiScale(frame, 2);
+        int tabDy = std::max(0, tabsDy - DpiScale(frame, 5));
+        int right = rc.x + rc.dx - pad;
+        int tabsLeft = rc.x + pad;
+        int nTabs = len(tb->tabs);
+        int tabDx = maxTabDx;
+        if (nTabs > 0) {
+            int avail = std::max(0, right - tabsLeft - newDx - gap);
+            tabDx = std::min(maxTabDx, (avail / nTabs) - gap);
+        }
+        tabDx = std::max(tabDx, minTabDx);
+        int tx = tabsLeft;
+        for (TbTab* t : tb->tabs) {
+            if (!t->btnLabel || !t->btnClose) {
+                continue;
+            }
+            bool fits = (tx + tabDx + gap + newDx) <= right;
+            if (!fits) {
+                MoveWindow(t->btnLabel->hwnd, tx, tabY, 0, 0, TRUE);
+                MoveWindow(t->btnClose->hwnd, tx, tabY, 0, 0, TRUE);
+                continue;
+            }
+            MoveWindow(t->btnLabel->hwnd, tx, tabY, tabDx - closeDx, tabDy, TRUE);
+            MoveWindow(t->btnClose->hwnd, tx + tabDx - closeDx, tabY, closeDx, tabDy, TRUE);
+            tx += tabDx + gap;
+        }
+        if (tb->btnNewTab) {
+            int newX = std::min(tx, right - newDx);
+            MoveWindow(tb->btnNewTab->hwnd, newX, tabY, newDx, tabDy, TRUE);
+        }
+    }
+
     // bookmarks row (chips)
-    int bmY = rc.y + navDy;
+    int bmY = rc.y + navDy + tabsDy;
     bool hasChips = len(tb->bmChips) > 0;
     if (hasChips) {
         int cx = rc.x + pad;
@@ -757,16 +1088,25 @@ void LayoutTouchWebView(MainWindow* win, Rect rc) {
         }
     }
 
-    int webTop = rc.y + navDy + (hasChips ? bmDy : 0);
+    int webTop = rc.y + navDy + tabsDy + (hasChips ? bmDy : 0);
     Rect webRc{rc.x, webTop, rc.dx, std::max(0, rc.y + rc.dy - webTop)};
-    if (tb->webView) {
-        tb->webView->SetBounds(webRc);
-        tb->webView->UpdateWebviewSize();
-        // load the home page once the webview finally has non-zero bounds
-        if (!tb->didInitialNav && !webRc.IsEmpty()) {
-            tb->didInitialNav = true;
-            tb->webView->Navigate(TouchBrowserHomeUrl());
+    // every tab gets the bounds, so switching to one doesn't show a stale size
+    for (TbTab* t : tb->tabs) {
+        if (t->webView) {
+            t->webView->SetBounds(webRc);
+            t->webView->UpdateWebviewSize();
         }
+    }
+    // ...but the deferred first Navigate only runs for the tab that is actually
+    // on screen: a hidden WebView2 control can swallow it. A background tab
+    // therefore loads when it is first activated - TbActivateTab forces a
+    // relayout, which brings us back here with the tab visible.
+    TbTab* act = TbActiveTab(tb);
+    if (act && act->webView && !act->didInitialNav && !webRc.IsEmpty()) {
+        act->didInitialNav = true;
+        TempStr url = str::DupTemp(act->pendingUrl ? act->pendingUrl : TouchBrowserHomeUrl());
+        str::FreePtr(&act->pendingUrl);
+        act->webView->Navigate(url);
     }
 }
 
@@ -781,7 +1121,8 @@ void TouchWebToggleBookmark(MainWindow* win) {
         return;
     }
     TouchBrowser* tb = win->touchBrowser;
-    Str url = tb->currentUrl;
+    TbTab* act = TbActiveTab(tb);
+    Str url = act ? act->url : Str();
     if (!url) {
         return;
     }
@@ -815,16 +1156,21 @@ void DestroyTouchWebView(MainWindow* win) {
         return;
     }
     TouchBrowser* tb = win->touchBrowser;
+    // clear this first: a queued TbCloseTabNow / TbOpenNewTabNow that runs after
+    // us must see the browser as gone rather than walk freed tabs
+    win->touchBrowser = nullptr;
     TbDestroyChips(tb);
+    for (TbTab* t : tb->tabs) {
+        TbDestroyTab(t);
+    }
+    tb->tabs.Reset();
     delete tb->btnBack;
     delete tb->btnForward;
     delete tb->btnHome;
     delete tb->btnStar;
+    delete tb->btnNewTab;
     if (tb->hwndUrl) {
         DestroyWindow(tb->hwndUrl);
     }
-    delete tb->webView;
-    str::Free(tb->currentUrl);
     delete tb;
-    win->touchBrowser = nullptr;
 }

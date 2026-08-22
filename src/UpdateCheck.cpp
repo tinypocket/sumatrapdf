@@ -187,15 +187,23 @@ static UpdateInfo* ParseUpdateInfo(Str d) {
     res->portableArm64 = str::Dup(node->GetValue(StrL("PortableExeArm64")));
     res->portable32 = str::Dup(node->GetValue(StrL("PortableExe32")));
 
-    // figure out which executable to download
+    // Figure out which executable to download. This MUST agree with how
+    // StartInstallerAutoUpgrade() will launch it: an installed copy is upgraded
+    // by running an installer, a portable one by overwriting itself.
+    //
+    // It used to key off IsDllBuild(), which despite the name only reports
+    // whether THIS exe embeds the installer payload (IDR_DLL_PAK). The
+    // installed SumatraPDF+.exe has no payload, so an installed copy downloaded
+    // the *portable* exe and then ran it with -install - and a portable build
+    // is not an installer, hence "Not a valid installer".
     Str dlURL;
-    bool isDll = IsDllBuild();
+    bool wantInstaller = IsOurExeInstalled();
     if (IsArmBuild()) {
-        dlURL = isDll ? res->installerArm64 : res->portableArm64;
+        dlURL = wantInstaller ? res->installerArm64 : res->portableArm64;
     } else if (IsProcess64()) {
-        dlURL = isDll ? res->installer64 : res->portable64;
+        dlURL = wantInstaller ? res->installer64 : res->portable64;
     } else {
-        dlURL = isDll ? res->installer32 : res->portable32;
+        dlURL = wantInstaller ? res->installer32 : res->portable32;
     }
     res->dlURL = str::Dup(dlURL);
     return res;

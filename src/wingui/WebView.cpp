@@ -590,6 +590,48 @@ class webview2_history_changed_handler : public ICoreWebView2HistoryChangedEvent
     ULONG m_refCount = 1;
 };
 
+class webview2_document_title_changed_handler : public ICoreWebView2DocumentTitleChangedEventHandler {
+  public:
+    explicit webview2_document_title_changed_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
+    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    ULONG STDMETHODCALLTYPE Release() {
+        ULONG n = --m_refCount;
+        if (n == 0) {
+            delete this;
+        }
+        return n;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, LPVOID* ppv) {
+        if (!ppv) {
+            return E_POINTER;
+        }
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == __uuidof(ICoreWebView2DocumentTitleChangedEventHandler)) {
+            *ppv = static_cast<ICoreWebView2DocumentTitleChangedEventHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* sender, IUnknown* /*args*/) {
+        if (!sender || !m_wnd || !m_wnd->events.documentTitleChanged) {
+            return S_OK;
+        }
+        WCHAR* title = nullptr;
+        if (FAILED(sender->get_DocumentTitle(&title)) || !title) {
+            return S_OK;
+        }
+        TempStr s = ToUtf8Temp(title);
+        CoTaskMemFree(title);
+        m_wnd->events.documentTitleChanged(m_wnd->events.ctx, s);
+        return S_OK;
+    }
+
+  private:
+    WebviewWnd* m_wnd = nullptr;
+    ULONG m_refCount = 1;
+};
+
 class webview2_new_window_handler : public ICoreWebView2NewWindowRequestedEventHandler {
   public:
     explicit webview2_new_window_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
@@ -1214,6 +1256,13 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
             webview->add_HistoryChanged(handler, &token);
             handler->Release();
         }
+    }
+
+    if (events.documentTitleChanged) {
+        auto* handler = new webview2_document_title_changed_handler(this);
+        ::EventRegistrationToken token = {};
+        webview->add_DocumentTitleChanged(handler, &token);
+        handler->Release();
     }
 
     {
