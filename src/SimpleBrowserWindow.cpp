@@ -385,7 +385,10 @@ static bool TouchBrowserUrlIsDoc(Str url, Str* extOut) {
     if (!TouchBrowserUrlFileType(url, &ft, &ext)) {
         return false;
     }
-    if (!IsSupportedFileType(ft, true)) {
+    // NOT IsSupportedFileType: the engine also opens .html/.txt/images, so that
+    // would hijack ordinary web links (a link to page.html opened as a document
+    // tab instead of being browsed). Only real "download me" document formats.
+    if (!TouchBrowserFileTypeIsDownloadableDoc(ft)) {
         return false;
     }
     if (extOut) {
@@ -397,17 +400,24 @@ static bool TouchBrowserUrlIsDoc(Str url, Str* extOut) {
 struct TbDocDownload {
     Str url;
     Str destPath;
+    // the file name from the URL; the download lands in a unique temp file, so
+    // without this the tab would be labelled e.g. "sum3236.tmp.pdf"
+    Str displayName;
     MainWindow* win = nullptr;
 };
 
 static void TbDocDownloadFinish(TbDocDownload* d) {
     if (IsMainWindowValid(d->win) && file::Exists(d->destPath)) {
         LoadArgs args(d->destPath, d->win);
+        if (d->displayName) {
+            args.SetDisplayName(d->displayName);
+        }
         LoadDocument(&args);
         SetTouchView(d->win, TouchView::Doc);
     }
     str::Free(d->url);
     str::Free(d->destPath);
+    str::Free(d->displayName);
     delete d;
 }
 
@@ -428,6 +438,23 @@ static bool TbNavigationStarting(void* ctx, Str url, bool /*newWindow*/) {
         d->url = str::Dup(url);
         TempStr base = GetTempFilePathTemp("sumatra-web");
         d->destPath = str::Dup(str::JoinTemp(base, ext));
+        // label the tab with the file name from the URL, not the temp file's
+        Str name = url;
+        int cut = str::IndexOfChar(name, '?');
+        if (cut >= 0) {
+            name = Str(name.s, cut);
+        }
+        cut = str::IndexOfChar(name, '#');
+        if (cut >= 0) {
+            name = Str(name.s, cut);
+        }
+        int slash = str::LastIndexOfChar(name, '/');
+        if (slash >= 0) {
+            name = Str(name.s + slash + 1, name.len - slash - 1);
+        }
+        if (name) {
+            d->displayName = str::Dup(name);
+        }
         RunAsync(MkFunc0<TbDocDownload>(TbDocDownloadAsync, d), "TbDocDownloadAsync");
         return false; // cancel the webview navigation
     }

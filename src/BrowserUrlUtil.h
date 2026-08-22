@@ -4,4 +4,5 @@
 enum class FileType : u8;
 
 bool TouchBrowserUrlFileType(Str url, FileType* ftOut, Str* extOut);
+bool TouchBrowserFileTypeIsDownloadableDoc(FileType ft);
 TempStr TbChipLabel(Str url);

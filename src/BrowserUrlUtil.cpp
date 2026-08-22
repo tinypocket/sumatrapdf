@@ -48,6 +48,36 @@ bool TouchBrowserUrlFileType(Str url, FileType* ftOut, Str* extOut) {
     return true;
 }
 
+// Should a link to this file type be pulled out of the browser and opened as a
+// document? Only formats a PDF reader is clearly the right home for.
+//
+// Deliberately EXCLUDES types SumatraPDF can open but that are ordinary web
+// content: HTML/Markdown/Txt/Svg and every image format - the engine opens
+// .html natively, so without this an ordinary link to a page was downloaded and
+// opened as a document tab instead of being browsed. Bare archives (zip/rar/7z/
+// tar) are excluded too; only their comic-book variants are documents.
+bool TouchBrowserFileTypeIsDownloadableDoc(FileType ft) {
+    switch (ft) {
+        case FileType::PDF:
+        case FileType::PS:
+        case FileType::Xps:
+        case FileType::DjVu:
+        case FileType::Chm:
+        case FileType::Cbz:
+        case FileType::Cbr:
+        case FileType::Cb7:
+        case FileType::Cbt:
+        case FileType::Fb2:
+        case FileType::Fb2z:
+        case FileType::Epub:
+        case FileType::Mobi:
+        case FileType::PalmDoc:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Short host label for a bookmark chip: strip the scheme, then the path
 // (everything from the first '/'), then a leading "www." so chips stay short.
 // E.g. "https://www.google.com/search" -> "google.com".

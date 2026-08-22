@@ -60,4 +60,26 @@ void BrowserUrl_UnitTests() {
     expectChip(StrL("https://www.google.com/search"), StrL("google.com"));
     expectChip(StrL("http://example.org"), StrL("example.org"));
     expectChip(StrL("https://docs.example.com/a/b"), StrL("docs.example.com"));
+
+    // Which file types the browser pulls out and opens as a document.
+    // Regression: the engine also opens .html/.txt/images, so using
+    // IsSupportedFileType here hijacked ordinary web links - a link to
+    // index.html was downloaded and opened as a document tab.
+    utassert(!TouchBrowserFileTypeIsDownloadableDoc(FileType::HTML));
+    utassert(!TouchBrowserFileTypeIsDownloadableDoc(FileType::Txt));
+    utassert(!TouchBrowserFileTypeIsDownloadableDoc(FileType::Markdown));
+    utassert(!TouchBrowserFileTypeIsDownloadableDoc(FileType::Svg));
+    utassert(!TouchBrowserFileTypeIsDownloadableDoc(FileType::Png));
+    utassert(!TouchBrowserFileTypeIsDownloadableDoc(FileType::Jpeg));
+    utassert(!TouchBrowserFileTypeIsDownloadableDoc(FileType::Webp));
+    utassert(!TouchBrowserFileTypeIsDownloadableDoc(FileType::Zip));
+    utassert(!TouchBrowserFileTypeIsDownloadableDoc(FileType::Unknown));
+    // real documents still are
+    utassert(TouchBrowserFileTypeIsDownloadableDoc(FileType::PDF));
+    utassert(TouchBrowserFileTypeIsDownloadableDoc(FileType::Epub));
+    utassert(TouchBrowserFileTypeIsDownloadableDoc(FileType::Mobi));
+    utassert(TouchBrowserFileTypeIsDownloadableDoc(FileType::DjVu));
+    utassert(TouchBrowserFileTypeIsDownloadableDoc(FileType::Cbz));
+    utassert(TouchBrowserFileTypeIsDownloadableDoc(FileType::Xps));
+    utassert(TouchBrowserFileTypeIsDownloadableDoc(FileType::Chm));
 }
