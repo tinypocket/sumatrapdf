@@ -247,6 +247,13 @@ void TopBarWnd::ShowPreview(HWND anchorHwnd, Rect anchorRect) {
 }
 
 void TopBarWnd::PinPreview(HWND anchorHwnd, Rect anchorRect) {
+    // tapping the switcher again closes it
+    if (previewPinned && previewWnd && HwndIsVisible(previewWnd->hwnd)) {
+        previewPinned = false;
+        CancelPreviewClose();
+        previewWnd->Hide();
+        return;
+    }
     previewPinned = true;
     ShowPreview(anchorHwnd, anchorRect);
     if (!previewWnd || !HwndIsVisible(previewWnd->hwnd)) {
@@ -821,13 +828,21 @@ void TouchPreviewWnd::Show(HWND anchorHwnd, Rect anchorRect) {
     HMONITOR monitor = MonitorFromPoint(POINT{anchor.x, anchor.y}, MONITOR_DEFAULTTONEAREST);
     GetMonitorInfoW(monitor, &mi);
     Rect work = ToRect(mi.rcWork);
+    // Anchored low (the switcher at the bottom of the rail): run the strip
+    // along the bottom of the screen, starting just right of the rail - like
+    // the taskbar's thumbnails - instead of flipping it above the button.
+    bool anchoredLow = anchor.y > work.y + (work.dy * 2 / 3);
+    if (anchoredLow) {
+        x = anchor.x + anchorRect.dx + DpiScale(hwnd, 6);
+        y = work.y + work.dy - dy - DpiScale(hwnd, 6);
+    }
     if (x + dx > work.x + work.dx) {
         x = work.x + work.dx - dx;
     }
     if (x < work.x) {
         x = work.x;
     }
-    if (y + dy > work.y + work.dy) {
+    if (!anchoredLow && y + dy > work.y + work.dy) {
         y = anchor.y - dy - DpiScale(hwnd, 4);
     }
     SetWindowPos(hwnd, HWND_TOP, x, y, dx, dy, SWP_NOACTIVATE | SWP_SHOWWINDOW);

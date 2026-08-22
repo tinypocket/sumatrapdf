@@ -47,6 +47,9 @@ struct RailItem {
 };
 
 constexpr int kRailDocumentPreview = -1;
+// hovering the document switcher opens the preview strip after this delay
+constexpr UINT_PTR kRailHoverTimerId = 4;
+constexpr int kRailHoverDelayMs = 450;
 
 static RailItem gRailItems[] = {
     {TbIcon::Document, TouchPanelMode::Bookmarks, TouchView::Doc, 0, false, true},
@@ -55,10 +58,10 @@ static RailItem gRailItems[] = {
     {TbIcon::Search, TouchPanelMode::Search, TouchView::Doc, 0, false, false},
     {TbIcon::Annotation, TouchPanelMode::Annotations, TouchView::Doc, 0, false, false},
     {TbIcon::Attachment, TouchPanelMode::Attachments, TouchView::Doc, 0, false, false},
-    {TbIcon::WindowStack, TouchPanelMode::Bookmarks, TouchView::Doc, kRailDocumentPreview, true, false, true},
     {TbIcon::Recent, TouchPanelMode::Bookmarks, TouchView::Home, 0, true, false},
     {TbIcon::Library, TouchPanelMode::Bookmarks, TouchView::Library, 0, true, false},
     {TbIcon::Web, TouchPanelMode::Bookmarks, TouchView::Web, 0, true, false},
+    {TbIcon::WindowStack, TouchPanelMode::Bookmarks, TouchView::Doc, kRailDocumentPreview, true, false},
 };
 
 constexpr int kRailItemsCount = (int)dimof(gRailItems);
@@ -95,6 +98,7 @@ struct RailWnd : Wnd {
     // icons in the two colors a rail button can have. Rebuilt on theme change.
     HIMAGELIST imlNormal = nullptr;
     HIMAGELIST imlActive = nullptr;
+    HIMAGELIST imlDisabled = nullptr;
     int iconDy = 0;
     int hotIdx = -1;
     bool trackingMouse = false;
@@ -112,6 +116,9 @@ RailWnd::~RailWnd() {
     }
     if (imlActive) {
         ImageList_Destroy(imlActive);
+    }
+    if (imlDisabled) {
+        ImageList_Destroy(imlDisabled);
     }
 }
 
@@ -149,9 +156,15 @@ void RailWnd::RebuildImageLists() {
         ImageList_Destroy(imlActive);
         imlActive = nullptr;
     }
+    if (imlDisabled) {
+        ImageList_Destroy(imlDisabled);
+        imlDisabled = nullptr;
+    }
     iconDy = DpiScale(hwnd, kTopBarIconDy);
     imlNormal = BuildTintedToolbarImageList(iconDy, RailFgColor(), RailBgColor());
     imlActive = BuildTintedToolbarImageList(iconDy, RailActiveFgColor(), RailActiveBgColor());
+    // document-only items are greyed out when no document is open
+    imlDisabled = BuildTintedToolbarImageList(iconDy, ThemeWindowTextDisabledColor(), RailBgColor());
 }
 
 // true if this item's panel is the one currently showing
@@ -222,8 +235,16 @@ void SetTouchView(MainWindow* win, TouchView view) {
             win->touchView = previous;
             return;
         }
-        win->uiState.tocVisible = true;
-        win->touchSidebarCollapsed = false;
+        // Don't force the bookmarks panel open. Honour what this document was
+        // last left at (WindowTab::showToc, restored per file); a document seen
+        // for the first time only opens it when it actually has bookmarks.
+        WindowTab* docTab = win->CurrentTab();
+        // showToc is restored per file (FileState) and defaults per file type,
+        // so this remembers the last state; requiring HasToc() keeps a document
+        // without any bookmarks from opening an empty panel.
+        bool showToc = docTab && docTab->showToc && win->ctrl && win->ctrl->HasToc();
+        win->uiState.tocVisible = showToc;
+        win->touchSidebarCollapsed = !showToc;
     } else {
         win->touchView = view;
         if (!SelectTouchHomeTab(win)) {
@@ -235,6 +256,8 @@ void SetTouchView(MainWindow* win, TouchView view) {
     win->touchView = view;
     if (view == TouchView::Home || view == TouchView::Library || view == TouchView::Web) {
         SetTouchHomeTabLabel(win, view);
+        // remember where the user was, so closing the last document comes back here
+        win->lastNonDocView = view;
     }
     if (view == TouchView::Web) {
         ShowTouchWebView(win, true);
@@ -438,6 +461,24 @@ LRESULT SidebarToggleWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
     return WndProcDefault(hwnd, msg, wparam, lparam);
 }
 
+// small badge in the switcher button's top-right corner with the number of
+// open documents, like a taskbar/notification count
+static void DrawRailCountPill(HDC hdc, HWND hwnd, const Rect& btn, int count) {
+    TempStr txt = count > 99 ? str::DupTemp("99+") : fmt("%d", count);
+    HFONT font = HdcGetUiFont(hdc, 10, FW_SEMIBOLD);
+    Size sz = HdcMeasureText(hdc, txt, font);
+    int padX = DpiScale(hwnd, 5);
+    int dy = DpiScale(hwnd, 15);
+    int dx = std::max(dy, sz.dx + 2 * padX);
+    Rect pill{btn.x + btn.dx - dx + DpiScale(hwnd, 2), btn.y + DpiScale(hwnd, 1), dx, dy};
+    COLORREF bg, fg;
+    ThemeAccentSurfaceColors(&bg, &fg);
+    FillRoundedRect(hdc, pill, dy / 2, fg);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, bg);
+    HdcDrawText(hdc, txt, pill, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, font);
+}
+
 void RailWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
     Rect rcClient = HwndClientRect(hwnd);
     COLORREF bgCol = RailBgColor();
@@ -498,10 +539,23 @@ void RailWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
 
         // the icons are opaque, so an icon on the active button has to come
         // from the image list built against that button's background
-        HIMAGELIST iml = isActive ? imlActive : imlNormal;
+        HIMAGELIST iml = isActive ? imlActive : (isEnabled ? imlNormal : imlDisabled);
         int ix = r.x + (r.dx - iconDy) / 2;
         int iy = r.y + (r.dy - iconDy) / 2;
         ImageList_Draw(iml, (int)item.icon, hdc, ix, iy, ILD_NORMAL);
+        // the document switcher carries a count pill with the number of open PDFs
+        if (item.cmdId == kRailDocumentPreview) {
+            int nDocs = 0;
+            for (int t = 0; win && t < win->TabCount(); t++) {
+                WindowTab* tab = win->GetTab(t);
+                if (tab && !tab->IsAboutTab()) {
+                    nDocs++;
+                }
+            }
+            if (nDocs > 0) {
+                DrawRailCountPill(hdc, hwnd, r, nDocs);
+            }
+        }
     }
 }
 
@@ -516,6 +570,14 @@ LRESULT RailWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         if (idx != hotIdx) {
             hotIdx = idx;
             HwndInvalidate(hwnd, false);
+            // hovering the switcher previews the open documents after a short
+            // delay, the way the taskbar does; moving off cancels it
+            KillTimer(hwnd, kRailHoverTimerId);
+            if (idx >= 0 && gRailItems[idx].cmdId == kRailDocumentPreview) {
+                SetTimer(hwnd, kRailHoverTimerId, kRailHoverDelayMs, nullptr);
+            } else {
+                HoverTouchDocumentPreview(win, hwnd, Rect{}, false);
+            }
         }
         if (!trackingMouse) {
             TRACKMOUSEEVENT tme{};
@@ -530,9 +592,19 @@ LRESULT RailWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
     if (msg == WM_MOUSELEAVE) {
         trackingMouse = false;
+        KillTimer(hwnd, kRailHoverTimerId);
         if (hotIdx != -1) {
             hotIdx = -1;
             HwndInvalidate(hwnd, false);
+        }
+        HoverTouchDocumentPreview(win, hwnd, Rect{}, false);
+        return 0;
+    }
+
+    if (msg == WM_TIMER && wparam == kRailHoverTimerId) {
+        KillTimer(hwnd, kRailHoverTimerId);
+        if (hotIdx >= 0 && gRailItems[hotIdx].cmdId == kRailDocumentPreview) {
+            HoverTouchDocumentPreview(win, hwnd, ItemRect(hotIdx), true);
         }
         return 0;
     }

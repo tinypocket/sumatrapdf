@@ -209,6 +209,9 @@ struct MainWindow {
 
     // the in-product web browser shown for TouchView::Web (see SimpleBrowserWindow.cpp)
     TouchBrowser* touchBrowser = nullptr;
+    // the last non-document view the user was in (Recent / Library / Web), so
+    // closing the last document returns to where they came from
+    TouchView lastNonDocView = TouchView::Home;
 
     // custom-drawn top bar; replaces the rebar toolbar with the rail chrome
     TopBarWnd* topBarWnd = nullptr;

@@ -4707,7 +4707,8 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
                 return;
             }
             delete tab;
-            SetTouchView(win, TouchView::Home);
+            // back to whichever non-document view the user last used
+            SetTouchView(win, win->lastNonDocView);
             SaveSettings();
             return;
         }
