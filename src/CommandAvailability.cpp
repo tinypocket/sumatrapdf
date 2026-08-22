@@ -63,6 +63,12 @@ static UINT_PTR gNoDocWhitelist[] = {
     CmdToggleFullscreen,
     CmdToggleMenuBar,
     CmdToggleToolbar,
+    // application-level chrome settings, not document actions: they were
+    // dropped from the View menu whenever no document was open
+    CmdToggleTabs,
+    CmdTouchSidebarDensityCondensed,
+    CmdTouchSidebarDensityNormal,
+    CmdTouchSidebarDensityExpanded,
     CmdToggleInverseSearch,
     CmdToggleLinks,
     CmdToggleImages,

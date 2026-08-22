@@ -798,11 +798,37 @@ void TouchPreviewWnd::BuildLayout() {
     int cardDx = DpiScale(hwnd, 220);
     int cardDy = DpiScale(hwnd, 202);
     int x = pad;
+    // Cards take their width and position from the tabs, so each card sits
+    // under its own tab. Falls back to the fixed width when there is no tab
+    // strip to measure (tabs turned off).
+    HWND hwndTabs = nullptr;
+    int firstTabX = 0;
+    for (MainWindow* w : gWindows) {
+        if (w->tabsCtrl && w->tabsCtrl->hwnd && HwndIsVisible(w->tabsCtrl->hwnd)) {
+            hwndTabs = w->tabsCtrl->hwnd;
+            break;
+        }
+    }
+    if (hwndTabs) {
+        RECT tr{};
+        if (TabCtrl_GetItemRect(hwndTabs, 0, &tr)) {
+            firstTabX = tr.left;
+        } else {
+            hwndTabs = nullptr;
+        }
+    }
     for (MainWindow* win : gWindows) {
         for (int i = 0; i < win->TabCount(); i++) {
             WindowTab* tab = win->GetTab(i);
             if (!tab || tab->IsNonDocumentTab()) {
                 continue;
+            }
+            if (hwndTabs && win->tabsCtrl && win->tabsCtrl->hwnd == hwndTabs) {
+                RECT tr{};
+                if (TabCtrl_GetItemRect(hwndTabs, i, &tr)) {
+                    x = pad + (tr.left - firstTabX);
+                    cardDx = std::max(DpiScale(hwnd, 80), (int)(tr.right - tr.left));
+                }
             }
             PreviewCard card;
             card.win = win;
