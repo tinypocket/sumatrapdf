@@ -734,6 +734,19 @@ static void TbCleanupDownloads(TouchBrowser* tb) {
            MB_OK | MB_ICONINFORMATION);
 }
 
+// make the page in the active tab the browser's home page
+static void TbSetHomePage(TouchBrowser* tb) {
+    TbTab* at = TbActiveTab(tb);
+    Str url = at ? at->url : Str{};
+    if (!url) {
+        return;
+    }
+    str::ReplaceWithCopy(&gGlobalPrefs->browserHomePage, url);
+    SaveSettings();
+    MsgBox(tb->win ? tb->win->hwndFrame : nullptr, fmt("Home page set to:\n\n%s", url), StrL("Home page"),
+           MB_OK | MB_ICONINFORMATION);
+}
+
 // the "..." overflow menu
 static void TbOnMenu(TouchBrowser* tb) {
     HMENU menu = CreatePopupMenu();
@@ -742,6 +755,9 @@ static void TbOnMenu(TouchBrowser* tb) {
     }
     constexpr UINT kCmdCleanup = 1;
     constexpr UINT kCmdInfo = 2;
+    constexpr UINT kCmdSetHome = 3;
+    AppendMenuW(menu, MF_STRING, kCmdSetHome, L"Set this page as home page");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCmdCleanup, L"Clean up downloaded files...");
     AppendMenuW(menu, MF_STRING, kCmdInfo, L"Where do downloads go?");
     Rect r = tb->btnMenu ? HwndWindowRect(tb->btnMenu->hwnd) : Rect{};
@@ -753,6 +769,8 @@ static void TbOnMenu(TouchBrowser* tb) {
         TbCleanupDownloads(tb);
     } else if (cmd == (int)kCmdInfo) {
         TbOnInfo(tb);
+    } else if (cmd == (int)kCmdSetHome) {
+        TbSetHomePage(tb);
     }
 }
 
