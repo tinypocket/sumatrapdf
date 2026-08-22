@@ -185,6 +185,7 @@ struct TopBarWnd : Wnd {
     void CommitEdit();
     void CancelEdit();
     void AddCurrentPageBookmark();
+    Rect PreviewAnchorRect(const Rect& slotRect);
     void ShowPreview(HWND anchorHwnd, Rect anchorRect);
     void PinPreview(HWND anchorHwnd, Rect anchorRect);
     void SchedulePreviewClose();
@@ -214,6 +215,9 @@ TopBarWnd::~TopBarWnd() {
 }
 
 constexpr UINT_PTR kPreviewCloseTimerId = 0x51A2;
+// hovering the switcher opens the strip after the same delay as the rail
+constexpr UINT_PTR kPreviewHoverTimerId = 0x51A3;
+constexpr int kPreviewHoverDelayMs = 450;
 constexpr UINT_PTR kSavedPageHoldTimerId = 0x51A3;
 constexpr UINT_PTR kSavedPageRenameTimerId = 0x51A4;
 
@@ -228,6 +232,21 @@ void TopBarWnd::SchedulePreviewClose() {
     if (previewWnd && HwndIsVisible(previewWnd->hwnd)) {
         SetTimer(hwnd, kPreviewCloseTimerId, 300, nullptr);
     }
+}
+
+// The switcher lives in the top bar but its cards correspond to the tabs
+// above it, so drop the strip left-aligned with the tab strip: card i then
+// sits under tab i, instead of under the button.
+Rect TopBarWnd::PreviewAnchorRect(const Rect& slotRect) {
+    if (win && win->tabsCtrl && win->tabsCtrl->hwnd && HwndIsVisible(win->tabsCtrl->hwnd)) {
+        Rect tabs = HwndWindowRect(win->tabsCtrl->hwnd);
+        POINT tl{tabs.x, tabs.y};
+        ScreenToClient(hwnd, &tl);
+        Rect r = slotRect;
+        r.x = tl.x;
+        return r;
+    }
+    return slotRect;
 }
 
 void TopBarWnd::ShowPreview(HWND anchorHwnd, Rect anchorRect) {
@@ -1404,8 +1423,10 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             HwndInvalidate(hwnd, false);
         }
         if (idx == 0 && oldHotIdx != 0 && gTopBarSlots[0].item == TopBarItem::Preview) {
-            ShowPreview(hwnd, slotRects[0]);
+            KillTimer(hwnd, kPreviewHoverTimerId);
+            SetTimer(hwnd, kPreviewHoverTimerId, kPreviewHoverDelayMs, nullptr);
         } else if (oldHotIdx == 0 && idx != 0 && gTopBarSlots[0].item == TopBarItem::Preview) {
+            KillTimer(hwnd, kPreviewHoverTimerId);
             SchedulePreviewClose();
         }
         if (!trackingMouse) {
@@ -1511,6 +1532,14 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             HwndInvalidate(hwnd, false);
             return 0;
         }
+    }
+
+    if (msg == WM_TIMER && wparam == kPreviewHoverTimerId) {
+        KillTimer(hwnd, kPreviewHoverTimerId);
+        if (hotIdx == 0 && gTopBarSlots[0].item == TopBarItem::Preview) {
+            ShowPreview(hwnd, PreviewAnchorRect(slotRects[0]));
+        }
+        return 0;
     }
 
     if (msg == WM_TIMER && wparam == kPreviewCloseTimerId) {
@@ -1641,7 +1670,7 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     BeginEdit(false);
                 }
             } else if (slot.cmdId == kTopBarPreview) {
-                PinPreview(hwnd, slotRects[idx]);
+                PinPreview(hwnd, PreviewAnchorRect(slotRects[idx]));
             } else if (slot.cmdId == kTopBarBookmark) {
                 AddCurrentPageBookmark();
             } else if (slot.cmdId == kTopBarSmartWidth) {

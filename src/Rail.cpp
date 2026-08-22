@@ -627,9 +627,15 @@ LRESULT RailWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     }
 
     if (msg == WM_LBUTTONUP) {
-        CloseTouchDocumentOverlays(win);
         Point pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         int idx = ItemFromPoint(pt);
+        // Closing the overlays first would hide the preview, so the switcher
+        // could never see it as open and always re-opened it instead of
+        // toggling. Leave it alone when the click IS the switcher.
+        bool isPreviewItem = idx >= 0 && gRailItems[idx].cmdId == kRailDocumentPreview;
+        if (!isPreviewItem) {
+            CloseTouchDocumentOverlays(win);
+        }
         if (idx >= 0) {
             const RailItem& item = gRailItems[idx];
             if (IsRailItemEnabled(win, item)) {
