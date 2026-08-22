@@ -122,7 +122,11 @@ static TopBarSlot gTopBarSlots[] = {
     {TopBarItem::ZoomLabel, TbIcon::None, kTopBarZoomEdit, 3, true, false},
     {TopBarItem::Button, TbIcon::ZoomIn, CmdZoomIn, 3, true, false},
     {TopBarItem::Button, TbIcon::SmartWidth, kTopBarSmartWidth, 4, true, false},
-    {TopBarItem::Overflow, TbIcon::Settings, 0, 5, true, false},
+    // dark-mode toggles: Contrast = dark mode on the document pages,
+    // Moon = light/dark theme for the app chrome (kept in both 2a and 4a)
+    {TopBarItem::Button, TbIcon::Contrast, CmdInvertColors, 5, true, false},
+    {TopBarItem::Button, TbIcon::Moon, CmdToggleLightDarkTheme, 5, true, false},
+    {TopBarItem::Overflow, TbIcon::Settings, 0, 6, true, false},
 };
 
 constexpr int kTopBarSlotCount = (int)dimof(gTopBarSlots);
@@ -421,6 +425,13 @@ static TempStr ZoomTextTemp(MainWindow* win) {
 // the view-mode buttons show which mode the document is in, the way the
 // redesign tints the active one
 static bool IsSlotActive(MainWindow* win, const TopBarSlot& slot) {
+    // dark-mode toggles reflect global/theme state, not the document controller
+    switch (slot.cmdId) {
+        case CmdToggleLightDarkTheme:
+            return !IsLightColor(ThemeWindowBackgroundColor());
+        case CmdInvertColors:
+            return GetInvertPageColors();
+    }
     DocController* ctrl = win ? win->ctrl : nullptr;
     if (!ctrl) {
         return false;

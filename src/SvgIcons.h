@@ -45,6 +45,8 @@ enum class TbIcon {
     Folder,
     Document,
     Web,
+    Moon,
+    Contrast,
     kMax
 };
 

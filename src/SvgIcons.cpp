@@ -352,6 +352,21 @@ static const char* gIconWeb =
   <path d="M12.5 3a17 17 0 0 1 0 18" />
 </svg>)";
 
+// crescent moon: toggles the app chrome between the light and dark theme
+static const char* gIconMoon =
+    R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="1.7" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="0" y="0" width="24" height="24" stroke="none"></rect>
+  <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+</svg>)";
+
+// half-filled circle: toggles dark mode on the document pages themselves
+static const char* gIconContrast =
+    R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="1.7" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="0" y="0" width="24" height="24" stroke="none"></rect>
+  <circle cx="12" cy="12" r="9" />
+  <path d="M12 3 a 9 9 0 0 1 0 18 z" fill="currentColor" stroke="none" />
+</svg>)";
+
 // must match order in enum class TbIcon
 // clang-format off
 static const char* gIcons[] = {
@@ -395,6 +410,8 @@ static const char* gIcons[] = {
     gIconFolder,
     gIconDocument,
     gIconWeb,
+    gIconMoon,
+    gIconContrast,
 };
 // clang-format on
 
