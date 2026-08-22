@@ -625,6 +625,7 @@ function sumatrapdf_files()
     "ChangeThemeDialog.*",
     "AppSettings.*",
     "AppTools.*",
+    "BrowserUrlUtil.*",
     "Canvas.*",
     "CanvasAboutUI.*",
     "CaptionGlyphs.*",
@@ -1312,6 +1313,8 @@ function test_util_files()
   })
   files_in_dir("src", {
     --"AppTools.*",
+    "BrowserUrlUtil.*",
+    "BrowserUrlUtil_ut.cpp",
     "Commands.*",
     "CrashHandlerNoOp.cpp",
     "DisplayMode.*",

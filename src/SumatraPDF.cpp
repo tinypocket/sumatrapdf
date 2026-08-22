@@ -6237,7 +6237,10 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     bool showTouchCollapse = false;
     // Canvas stays sized under a Favorites tab (only hidden) so switching back
     // to a document does not SetViewPortSize with a 0x0 canvas (CalcZoomReal assert).
-    HwndSetVisible(win->hwndCanvas, !favAsTab);
+    // Same for the web view: the canvas would otherwise paint the Home page over
+    // the WebView2 control that covers the same content area.
+    bool webAsTab = win->touchView == TouchView::Web && win->touchBrowser;
+    HwndSetVisible(win->hwndCanvas, !favAsTab && !webAsTab);
 
     if (favAsTab) {
         // Favorites tab: full client area for the favorites list (discussion #5820)

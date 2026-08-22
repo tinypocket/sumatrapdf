@@ -27,6 +27,7 @@
 #include "SumatraPDF.h"
 #include "Rail.h"
 #include "Translations.h"
+#include "BrowserUrlUtil.h"
 
 #include "SimpleBrowserWindow.h"
 
@@ -357,6 +358,10 @@ struct TouchBrowser {
     Str currentUrl;
     Vec<TbChip*> bmChips;
     bool bmDirty = true;
+    // WebView2 ignores a Navigate issued before the control has a non-zero size
+    // and a first layout, so the home page is loaded from LayoutTouchWebView
+    // once the webview has real bounds (mirrors SimpleBrowserWindow::Create).
+    bool didInitialNav = false;
 };
 
 static Str TouchBrowserHomeUrl() {
@@ -367,28 +372,24 @@ static Str TouchBrowserHomeUrl() {
     return url;
 }
 
-// a URL points at a document we can open when its path has a supported
-// extension (query string / fragment stripped first)
+// a URL points at a document we can open when its LAST path segment names a
+// supported file type. The engine-free parsing (query/fragment stripping,
+// last-segment + extension extraction) lives in TouchBrowserUrlFileType so the
+// unit tests exercise the exact same logic; here we add the IsSupportedFileType
+// check (which pulls in the engine layer). Only the last segment is inspected so
+// host dots (www.google.com) and extension-less page paths are never mistaken
+// for documents - otherwise navigationStarting would cancel ordinary browsing.
 static bool TouchBrowserUrlIsDoc(Str url, Str* extOut) {
-    if (!url) {
+    FileType ft = FileType::Unknown;
+    Str ext;
+    if (!TouchBrowserUrlFileType(url, &ft, &ext)) {
         return false;
     }
-    Str s = url;
-    int cut = str::IndexOfChar(s, '?');
-    if (cut >= 0) {
-        s = Str(s.s, cut);
-    }
-    cut = str::IndexOfChar(s, '#');
-    if (cut >= 0) {
-        s = Str(s.s, cut);
-    }
-    FileType ft = GuessFileTypeFromName(s);
     if (!IsSupportedFileType(ft, true)) {
         return false;
     }
     if (extOut) {
-        int dot = str::LastIndexOfChar(s, '.');
-        *extOut = (dot >= 0) ? str::DupTemp(Str(s.s + dot, s.len - dot)) : StrL(".dat");
+        *extOut = ext;
     }
     return true;
 }
@@ -507,24 +508,6 @@ static void TbOnChipClick(TbChip* c) {
     }
 }
 
-static TempStr TbChipLabel(Str url) {
-    // show the host (strip scheme + path) so chips stay short
-    Str s = url;
-    if (str::StartsWithI(s, StrL("https://"))) {
-        s = Str(s.s + 8, s.len - 8);
-    } else if (str::StartsWithI(s, StrL("http://"))) {
-        s = Str(s.s + 7, s.len - 7);
-    }
-    int slash = str::IndexOfChar(s, '/');
-    if (slash >= 0) {
-        s = Str(s.s, slash);
-    }
-    if (str::StartsWithI(s, StrL("www."))) {
-        s = Str(s.s + 4, s.len - 4);
-    }
-    return str::DupTemp(s);
-}
-
 static void TbDestroyChips(TouchBrowser* tb) {
     for (TbChip* c : tb->bmChips) {
         delete c->btn;
@@ -598,12 +581,12 @@ static TouchBrowser* CreateTouchBrowser(MainWindow* win) {
     tb->webView->forwardAppAccelerators = true;
     CreateWebViewArgs cargs;
     cargs.parent = frame;
-    cargs.pos = Rect(0, 0, 0, 0);
+    // create at a real size (not 0x0) like SimpleBrowserWindow; the initial
+    // Navigate is deferred to LayoutTouchWebView once the bounds are final.
+    cargs.pos = HwndClientRect(frame);
     if (!tb->webView->Create(cargs)) {
         delete tb->webView;
         tb->webView = nullptr;
-    } else {
-        tb->webView->Navigate(TouchBrowserHomeUrl());
     }
     return tb;
 }
@@ -615,6 +598,12 @@ static void TbShowWnd(HWND h, bool show) {
 }
 
 static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
+    // Hide the canvas while the web view is up: it covers the same content area
+    // and would paint the Home page through/around the browser chrome. Done here
+    // (not only in RelayoutFrame) so it takes effect at switch time.
+    if (tb->win && tb->win->hwndCanvas) {
+        HwndSetVisible(tb->win->hwndCanvas, !show);
+    }
     TbShowWnd(tb->btnBack ? tb->btnBack->hwnd : nullptr, show);
     TbShowWnd(tb->btnForward ? tb->btnForward->hwnd : nullptr, show);
     TbShowWnd(tb->btnHome ? tb->btnHome->hwnd : nullptr, show);
@@ -626,6 +615,13 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
     if (tb->webView) {
         tb->webView->SetIsVisible(show);
         tb->webView->SetControllerVisible(show);
+        // The canvas is a sibling that covers the same content area and sits
+        // above us in z-order, so it would paint the Home page over the page
+        // content. Raise the webview (both have WS_CLIPSIBLINGS) when shown.
+        if (show && tb->webView->hwnd) {
+            SetWindowPos(tb->webView->hwnd, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
     }
 }
 
@@ -643,6 +639,11 @@ void ShowTouchWebView(MainWindow* win, bool show) {
         TbRebuildChips(win->touchBrowser);
     }
     TbSetChildrenVisible(win->touchBrowser, show);
+    // RelayoutFrame's cached layout snapshot records touchView but not whether
+    // the browser exists, so the relayout that ran while switching (before the
+    // browser was created) would make the next one a no-op - and the canvas
+    // would never be hidden. Drop the cache so the next relayout really runs.
+    win->uiState.layout = {};
 }
 
 void LayoutTouchWebView(MainWindow* win, Rect rc) {
@@ -704,6 +705,11 @@ void LayoutTouchWebView(MainWindow* win, Rect rc) {
     if (tb->webView) {
         tb->webView->SetBounds(webRc);
         tb->webView->UpdateWebviewSize();
+        // load the home page once the webview finally has non-zero bounds
+        if (!tb->didInitialNav && !webRc.IsEmpty()) {
+            tb->didInitialNav = true;
+            tb->webView->Navigate(TouchBrowserHomeUrl());
+        }
     }
 }
 
