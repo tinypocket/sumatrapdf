@@ -4,6 +4,7 @@
 #include "base/Base.h"
 #include "base/Win.h"
 #include "base/Dpi.h"
+#include "base/ScopedWin.h"
 
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
@@ -26,6 +27,7 @@
 #include "MainWindow.h"
 #include "SumatraPDF.h"
 #include "Rail.h"
+#include "Theme.h"
 #include "Translations.h"
 #include "BrowserUrlUtil.h"
 
@@ -347,8 +349,20 @@ constexpr int kTbNewTabDx = 28;
 // each tab is a live WebView2 control (its own renderer process), and a
 // plain-button strip stops being readable well before this many anyway
 constexpr int kTbMaxTabs = 10;
+// touch-sized popup metrics (logical px), shared by the "..." menu and the
+// favorites manager. 44 is the usual minimum comfortable finger target.
+constexpr int kTbPopupRowDy = 44;
+constexpr int kTbPopupSepDy = 9;
+constexpr int kTbPopupPad = 6;
+constexpr int kTbMenuDx = 300;
+constexpr int kTbFavMgrDx = 400;
+// a press has to travel this far (logical px) before it counts as a drag
+// rather than a click, so tapping a row still works on a shaky finger
+constexpr int kTbDragSlop = 6;
 
 struct TouchBrowser;
+struct TbMenuWnd;
+struct TbFavMgrWnd;
 
 struct TbChip {
     TouchBrowser* tb = nullptr;
@@ -385,14 +399,21 @@ struct TouchBrowser {
     Button* btnBack = nullptr;
     Button* btnForward = nullptr;
     Button* btnHome = nullptr;
-    Button* btnStar = nullptr;
     Button* btnInfo = nullptr;
     Button* btnMenu = nullptr;
     Button* btnNewTab = nullptr;
+    // "+ Save" at the left of the favorites bar; the bar's own add/remove
+    // control, which is why the nav row no longer carries a "Favorite" button
+    Button* btnBmAdd = nullptr;
     HWND hwndUrl = nullptr;
     HFONT hFont = nullptr;
     Vec<TbChip*> bmChips;
     bool bmDirty = true;
+    // touch popups, created on first use and owned by the browser. They are
+    // top-level WS_POPUP windows, so unlike the chrome buttons they are not
+    // children of hwndFrame and WebView2 can't cover them.
+    TbMenuWnd* menuWnd = nullptr;
+    TbFavMgrWnd* favMgr = nullptr;
 };
 
 static Str TouchBrowserHomeUrl() {
@@ -747,34 +768,8 @@ static void TbSetHomePage(TouchBrowser* tb) {
            MB_OK | MB_ICONINFORMATION);
 }
 
-// the "..." overflow menu
-static void TbOnMenu(TouchBrowser* tb) {
-    HMENU menu = CreatePopupMenu();
-    if (!menu) {
-        return;
-    }
-    constexpr UINT kCmdCleanup = 1;
-    constexpr UINT kCmdInfo = 2;
-    constexpr UINT kCmdSetHome = 3;
-    AppendMenuW(menu, MF_STRING, kCmdSetHome, L"Set this page as home page");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kCmdCleanup, L"Clean up downloaded files...");
-    AppendMenuW(menu, MF_STRING, kCmdInfo, L"Where do downloads go?");
-    Rect r = tb->btnMenu ? HwndWindowRect(tb->btnMenu->hwnd) : Rect{};
-    HWND parent = tb->win ? tb->win->hwndFrame : nullptr;
-    UINT flags = TPM_RIGHTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY;
-    int cmd = (int)TrackPopupMenu(menu, flags, r.x + r.dx, r.y + r.dy, 0, parent, nullptr);
-    DestroyMenu(menu);
-    if (cmd == (int)kCmdCleanup) {
-        TbCleanupDownloads(tb);
-    } else if (cmd == (int)kCmdInfo) {
-        TbOnInfo(tb);
-    } else if (cmd == (int)kCmdSetHome) {
-        TbSetHomePage(tb);
-    }
-}
-
-static void TbOnStar(TouchBrowser* tb) {
+// the favorites bar's "+ Save" button: add (or un-add) the current page
+static void TbOnSaveFav(TouchBrowser* tb) {
     TouchWebToggleBookmark(tb->win);
 }
 // favorites chips navigate the active tab, like typing in the URL bar does
@@ -824,6 +819,659 @@ static Button* TbMakeButton(HWND frame, HFONT font, Str text, const Func0& onCli
     b->Create(ba);
     b->onClick = onClick;
     return b;
+}
+
+// --- touch popups ----------------------------------------------------------
+// The "..." menu and the favorites manager are custom WS_POPUP windows rather
+// than TrackPopupMenu / a dialog: system menu metrics give ~20px rows, which
+// are unusable with a finger. Both draw kTbPopupRowDy-tall rows themselves.
+
+static Kind kindTbMenu = "tbMenu";
+static Kind kindTbFavMgr = "tbFavMgr";
+
+static int TbFavCount() {
+    Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
+    return bm ? len(*bm) : 0;
+}
+
+// after any change to gGlobalPrefs->browserBookmarks: persist it and put the
+// chip row back in sync with it
+static void TbFavRefresh(TouchBrowser* tb) {
+    TbRebuildChips(tb);
+    SaveSettings();
+    if (tb->win && tb->win->touchView == TouchView::Web) {
+        TbSetChildrenVisible(tb, true);
+        ScheduleUiUpdate(tb->win, kUiForceRelayout);
+    }
+}
+
+static void TbFavDelete(TouchBrowser* tb, int idx) {
+    Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
+    if (!bm || idx < 0 || idx >= len(*bm)) {
+        return;
+    }
+    str::Free((*bm)[idx]);
+    bm->RemoveAt(idx);
+    TbFavRefresh(tb);
+}
+
+static void TbFavMove(TouchBrowser* tb, int from, int to) {
+    Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
+    if (!bm) {
+        return;
+    }
+    int n = len(*bm);
+    if (from < 0 || from >= n || to < 0 || to >= n || from == to) {
+        return;
+    }
+    Str s = bm->PopAt(from);
+    bm->InsertAt(to, s);
+    TbFavRefresh(tb);
+}
+
+// rounded filled rect; the popups' one bit of decoration
+static void TbFillRounded(HDC hdc, const Rect& r, int radius, COLORREF fill, COLORREF border = kColorUnset) {
+    if (r.dx <= 0 || r.dy <= 0) {
+        return;
+    }
+    AutoDeleteBrush br = CreateSolidBrush(fill);
+    AutoDeletePen pen = CreatePen(PS_SOLID, 1, border == kColorUnset ? fill : border);
+    ScopedSelectObject selBr(hdc, br);
+    ScopedSelectObject selPen(hdc, pen);
+    RoundRect(hdc, r.x, r.y, r.x + r.dx, r.y + r.dy, radius * 2, radius * 2);
+}
+
+// the "x" of a delete button, drawn rather than typed so it isn't at the mercy
+// of the UI font
+static void TbDrawCross(HDC hdc, const Rect& r, COLORREF col, int arm, int width) {
+    AutoDeletePen pen = CreatePen(PS_SOLID, width, col);
+    ScopedSelectObject selPen(hdc, pen);
+    int cx = r.x + r.dx / 2;
+    int cy = r.y + r.dy / 2;
+    MoveToEx(hdc, cx - arm, cy - arm, nullptr);
+    LineTo(hdc, cx + arm + 1, cy + arm + 1);
+    MoveToEx(hdc, cx + arm, cy - arm, nullptr);
+    LineTo(hdc, cx - arm - 1, cy + arm + 1);
+}
+
+// the grab handle (three lines) that marks a favorites row as draggable
+static void TbDrawGrip(HDC hdc, const Rect& r, COLORREF col) {
+    AutoDeletePen pen = CreatePen(PS_SOLID, 1, col);
+    ScopedSelectObject selPen(hdc, pen);
+    int cx = r.x + r.dx / 2;
+    int cy = r.y + r.dy / 2;
+    int half = r.dx / 4;
+    for (int i = -1; i <= 1; i++) {
+        int y = cy + i * std::max(3, r.dy / 8);
+        MoveToEx(hdc, cx - half, y, nullptr);
+        LineTo(hdc, cx + half + 1, y);
+    }
+}
+
+// --- favorites manager -----------------------------------------------------
+
+struct TbFavMgrWnd : Wnd {
+    TbFavMgrWnd();
+    bool Create(TouchBrowser*);
+    void ShowAt();
+    void Hide();
+    void OnPaint(HDC, PAINTSTRUCT*) override;
+    LRESULT WndProc(HWND, UINT, WPARAM, LPARAM) override;
+
+    int HeaderDy() const;
+    int RowDy() const;
+    Rect RowRect(int idx) const;
+    Rect DeleteRect(int idx) const;
+    int RowAt(Point pt) const;
+
+    TouchBrowser* tb = nullptr;
+    // the row the left button went down on, and whether it went down on that
+    // row's delete button (which suppresses dragging)
+    int pressedIdx = -1;
+    bool pressedDelete = false;
+    Point pressPt;
+    bool dragging = false;
+    int dragTo = -1;
+    int hotIdx = -1;
+    bool tracking = false;
+};
+
+TbFavMgrWnd::TbFavMgrWnd() {
+    kind = kindTbFavMgr;
+}
+
+bool TbFavMgrWnd::Create(TouchBrowser* browser) {
+    tb = browser;
+    CreateCustomArgs args;
+    args.visible = false;
+    args.style = WS_POPUP;
+    args.exStyle = WS_EX_TOOLWINDOW;
+    args.pos = {0, 0, 10, 10};
+    args.bgColor = ThemeControlBackgroundColor();
+    CreateCustom(args);
+    if (!hwnd) {
+        return false;
+    }
+    SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, (LONG_PTR)tb->win->hwndFrame);
+    return true;
+}
+
+int TbFavMgrWnd::HeaderDy() const {
+    return DpiScale(hwnd, 38);
+}
+
+int TbFavMgrWnd::RowDy() const {
+    return DpiScale(hwnd, kTbPopupRowDy);
+}
+
+Rect TbFavMgrWnd::RowRect(int idx) const {
+    int pad = DpiScale(hwnd, kTbPopupPad);
+    int dx = HwndClientRect(hwnd).dx;
+    return {pad, HeaderDy() + idx * RowDy(), std::max(0, dx - 2 * pad), RowDy() - DpiScale(hwnd, 4)};
+}
+
+Rect TbFavMgrWnd::DeleteRect(int idx) const {
+    Rect r = RowRect(idx);
+    int d = r.dy;
+    return {r.x + r.dx - d, r.y, d, d};
+}
+
+int TbFavMgrWnd::RowAt(Point pt) const {
+    int n = TbFavCount();
+    for (int i = 0; i < n; i++) {
+        if (RowRect(i).Contains(pt)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void TbFavMgrWnd::Hide() {
+    if (GetCapture() == hwnd) {
+        ReleaseCapture();
+    }
+    pressedIdx = -1;
+    dragging = false;
+    dragTo = -1;
+    hotIdx = -1;
+    if (hwnd) {
+        ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+void TbFavMgrWnd::ShowAt() {
+    pressedIdx = -1;
+    pressedDelete = false;
+    dragging = false;
+    dragTo = -1;
+    hotIdx = -1;
+    int n = TbFavCount();
+    int pad = DpiScale(hwnd, kTbPopupPad);
+    int dx = DpiScale(hwnd, kTbFavMgrDx);
+    int dy = HeaderDy() + std::max(1, n) * RowDy() + pad;
+
+    HWND anchorHwnd = tb->btnMenu ? tb->btnMenu->hwnd : tb->win->hwndFrame;
+    Rect ar = HwndWindowRect(anchorHwnd);
+    int x = ar.x + ar.dx - dx;
+    int y = ar.y + ar.dy + DpiScale(hwnd, 4);
+
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    HMONITOR monitor = MonitorFromPoint(POINT{ar.x, ar.y}, MONITOR_DEFAULTTONEAREST);
+    GetMonitorInfoW(monitor, &mi);
+    Rect work = ToRect(mi.rcWork);
+    x = std::clamp(x, work.x, std::max(work.x, work.x + work.dx - dx));
+    if (y + dy > work.y + work.dy) {
+        y = std::max(work.y, work.y + work.dy - dy);
+    }
+    SetWindowPos(hwnd, HWND_TOP, x, y, dx, dy, SWP_SHOWWINDOW);
+    SetForegroundWindow(hwnd);
+    HwndInvalidate(hwnd, true);
+}
+
+void TbFavMgrWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
+    Rect rc = HwndClientRect(hwnd);
+    HdcFillRect(hdc, ToRect(ps->rcPaint), ThemeControlBackgroundColor());
+    SetBkMode(hdc, TRANSPARENT);
+    {
+        AutoDeletePen border = CreatePen(PS_SOLID, 1, ThemeEdgeColor());
+        ScopedSelectObject selPen(hdc, border);
+        ScopedSelectObject selBr(hdc, GetStockBrush(NULL_BRUSH));
+        int radius = DpiScale(hwnd, 10);
+        RoundRect(hdc, 0, 0, rc.dx, rc.dy, radius * 2, radius * 2);
+    }
+
+    int pad = DpiScale(hwnd, kTbPopupPad);
+    Rect header{pad + DpiScale(hwnd, 6), DpiScale(hwnd, 6), rc.dx - 2 * pad, HeaderDy() - DpiScale(hwnd, 8)};
+    SetTextColor(hdc, ThemeWindowDarkerTextColor());
+    HdcDrawText(hdc, StrL("Favorites - drag to reorder"), header,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX, HdcGetUiFont(hdc, 13, FW_MEDIUM));
+
+    int n = TbFavCount();
+    if (n == 0) {
+        Rect r = RowRect(0);
+        SetTextColor(hdc, ThemeWindowDarkerTextColor());
+        HdcDrawText(hdc, StrL("No favorites yet. Use '+ Save' to add this page."), r,
+                    DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX, HdcGetUiFont(hdc, 13));
+        return;
+    }
+
+    Vec<Str>* bm = gGlobalPrefs->browserBookmarks;
+    int radius = DpiScale(hwnd, 8);
+    for (int i = 0; i < n; i++) {
+        Rect r = RowRect(i);
+        bool isDragged = dragging && i == pressedIdx;
+        COLORREF bg = (i == hotIdx || isDragged) ? ThemeHotBackgroundColor() : ThemeWindowControlBackgroundColor();
+        TbFillRounded(hdc, r, radius, bg, ThemeEdgeColor());
+
+        Rect grip{r.x + DpiScale(hwnd, 4), r.y, DpiScale(hwnd, 20), r.dy};
+        TbDrawGrip(hdc, grip, ThemeWindowDarkerTextColor());
+
+        Rect del = DeleteRect(i);
+        TbDrawCross(hdc, del, ThemeWindowTextColor(), DpiScale(hwnd, 5), DpiScale(hwnd, 2));
+
+        Rect label{grip.x + grip.dx + DpiScale(hwnd, 6), r.y, del.x - grip.x - grip.dx - DpiScale(hwnd, 12), r.dy};
+        Str url = (*bm)[i];
+        Rect top = label;
+        top.dy = label.dy / 2;
+        Rect bot = label;
+        bot.y += label.dy / 2;
+        bot.dy = label.dy / 2;
+        SetTextColor(hdc, ThemeWindowTextColor());
+        HdcDrawText(hdc, TbChipLabel(url), top, DT_SINGLELINE | DT_BOTTOM | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
+        SetTextColor(hdc, ThemeWindowDarkerTextColor());
+        HdcDrawText(hdc, url, bot, DT_SINGLELINE | DT_TOP | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, 11));
+    }
+    // insertion marker: where the dragged row would land on mouse-up
+    if (dragging && dragTo >= 0 && dragTo != pressedIdx) {
+        Rect r = RowRect(dragTo);
+        int y = (dragTo > pressedIdx) ? (r.y + r.dy) : r.y;
+        HdcFillRect(hdc, Rect{r.x, y - DpiScale(hwnd, 1), r.dx, DpiScale(hwnd, 3)}, ThemeWindowTextColor());
+    }
+}
+
+LRESULT TbFavMgrWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_ERASEBKGND) {
+        return TRUE;
+    }
+    if (msg == WM_LBUTTONDOWN) {
+        Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        int row = RowAt(pt);
+        pressedIdx = row;
+        pressedDelete = (row >= 0) && DeleteRect(row).Contains(pt);
+        pressPt = pt;
+        dragging = false;
+        dragTo = row;
+        if (row >= 0) {
+            SetCapture(hw);
+        }
+        HwndInvalidate(hw, false);
+        return 0;
+    }
+    if (msg == WM_MOUSEMOVE) {
+        Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (pressedIdx >= 0 && GetCapture() == hw) {
+            if (!dragging && !pressedDelete && std::abs(pt.y - pressPt.y) > DpiScale(hw, kTbDragSlop)) {
+                dragging = true;
+            }
+            if (dragging) {
+                int n = TbFavCount();
+                int idx = (pt.y - HeaderDy()) / std::max(1, RowDy());
+                dragTo = std::clamp(idx, 0, std::max(0, n - 1));
+                HwndInvalidate(hw, false);
+            }
+            return 0;
+        }
+        int row = RowAt(pt);
+        if (row != hotIdx) {
+            hotIdx = row;
+            HwndInvalidate(hw, false);
+        }
+        if (!tracking) {
+            TRACKMOUSEEVENT tme{};
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hw;
+            TrackMouseEvent(&tme);
+            tracking = true;
+        }
+        return 0;
+    }
+    if (msg == WM_MOUSELEAVE) {
+        tracking = false;
+        if (hotIdx != -1) {
+            hotIdx = -1;
+            HwndInvalidate(hw, false);
+        }
+        return 0;
+    }
+    if (msg == WM_LBUTTONUP) {
+        Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        int idx = pressedIdx;
+        bool wasDelete = pressedDelete;
+        bool wasDrag = dragging;
+        int to = dragTo;
+        pressedIdx = -1;
+        pressedDelete = false;
+        dragging = false;
+        dragTo = -1;
+        if (GetCapture() == hw) {
+            ReleaseCapture();
+        }
+        if (idx < 0) {
+            return 0;
+        }
+        if (wasDelete) {
+            // only a press and release on the same delete button deletes
+            if (DeleteRect(idx).Contains(pt)) {
+                TbFavDelete(tb, idx);
+                if (TbFavCount() == 0) {
+                    Hide();
+                    return 0;
+                }
+                ShowAt(); // the popup got one row shorter
+            }
+        } else if (wasDrag && to >= 0 && to != idx) {
+            TbFavMove(tb, idx, to);
+        }
+        HwndInvalidate(hw, true);
+        return 0;
+    }
+    if (msg == WM_CAPTURECHANGED) {
+        pressedIdx = -1;
+        pressedDelete = false;
+        dragging = false;
+        dragTo = -1;
+        HwndInvalidate(hw, false);
+        return 0;
+    }
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
+        Hide();
+        return 0;
+    }
+    if (msg == WM_ACTIVATE && LOWORD(wp) == WA_INACTIVE) {
+        Hide();
+        return 0;
+    }
+    return WndProcDefault(hw, msg, wp, lp);
+}
+
+// --- the "..." menu --------------------------------------------------------
+
+constexpr int kTbCmdNone = 0;
+constexpr int kTbCmdManageFavs = 1;
+constexpr int kTbCmdSetHome = 2;
+constexpr int kTbCmdCleanup = 3;
+constexpr int kTbCmdInfo = 4;
+
+struct TbMenuItemDef {
+    const char* label; // nullptr = separator
+    int cmd;
+};
+
+static const TbMenuItemDef gTbMenuItems[] = {
+    {"Manage favorites...", kTbCmdManageFavs},
+    {"Set this page as home page", kTbCmdSetHome},
+    {nullptr, kTbCmdNone},
+    {"Clean up downloaded files...", kTbCmdCleanup},
+    {"Where do downloads go?", kTbCmdInfo},
+};
+constexpr int kTbMenuItemCount = (int)dimof(gTbMenuItems);
+
+static void TbShowFavMgr(TouchBrowser* tb) {
+    if (!tb->favMgr) {
+        auto* w = new TbFavMgrWnd();
+        if (!w->Create(tb)) {
+            delete w;
+            return;
+        }
+        tb->favMgr = w;
+    }
+    tb->favMgr->ShowAt();
+}
+
+// A menu command may put up a modal MsgBox, and the fav manager takes over the
+// activation the closing menu just gave back, so commands run from the message
+// loop rather than from inside the menu's WndProc. The browser is re-found via
+// the window in case it went away in between.
+struct TbMenuCmdReq {
+    MainWindow* win = nullptr;
+    int cmd = kTbCmdNone;
+};
+
+static void TbRunMenuCmd(TbMenuCmdReq* req) {
+    MainWindow* win = req->win;
+    int cmd = req->cmd;
+    delete req;
+    if (!IsMainWindowValid(win) || !win->touchBrowser) {
+        return;
+    }
+    TouchBrowser* tb = win->touchBrowser;
+    switch (cmd) {
+        case kTbCmdManageFavs:
+            TbShowFavMgr(tb);
+            break;
+        case kTbCmdSetHome:
+            TbSetHomePage(tb);
+            break;
+        case kTbCmdCleanup:
+            TbCleanupDownloads(tb);
+            break;
+        case kTbCmdInfo:
+            TbOnInfo(tb);
+            break;
+        default:
+            break;
+    }
+}
+
+struct TbMenuWnd : Wnd {
+    TbMenuWnd();
+    bool Create(TouchBrowser*);
+    void ShowAt();
+    void Hide();
+    void OnPaint(HDC, PAINTSTRUCT*) override;
+    LRESULT WndProc(HWND, UINT, WPARAM, LPARAM) override;
+
+    Rect ItemRect(int idx) const;
+    int ItemAt(Point pt) const;
+    int TotalDy() const;
+
+    TouchBrowser* tb = nullptr;
+    int hotIdx = -1;
+    int pressedIdx = -1;
+    bool tracking = false;
+};
+
+TbMenuWnd::TbMenuWnd() {
+    kind = kindTbMenu;
+}
+
+bool TbMenuWnd::Create(TouchBrowser* browser) {
+    tb = browser;
+    CreateCustomArgs args;
+    args.visible = false;
+    args.style = WS_POPUP;
+    args.exStyle = WS_EX_TOOLWINDOW;
+    args.pos = {0, 0, 10, 10};
+    args.bgColor = ThemeControlBackgroundColor();
+    CreateCustom(args);
+    if (!hwnd) {
+        return false;
+    }
+    SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, (LONG_PTR)tb->win->hwndFrame);
+    return true;
+}
+
+Rect TbMenuWnd::ItemRect(int idx) const {
+    int pad = DpiScale(hwnd, kTbPopupPad);
+    int rowDy = DpiScale(hwnd, kTbPopupRowDy);
+    int sepDy = DpiScale(hwnd, kTbPopupSepDy);
+    int dx = HwndClientRect(hwnd).dx;
+    int y = pad;
+    for (int i = 0; i < idx; i++) {
+        y += gTbMenuItems[i].label ? rowDy : sepDy;
+    }
+    int dy = gTbMenuItems[idx].label ? rowDy : sepDy;
+    return {pad, y, std::max(0, dx - 2 * pad), dy};
+}
+
+int TbMenuWnd::TotalDy() const {
+    int pad = DpiScale(hwnd, kTbPopupPad);
+    Rect last = ItemRect(kTbMenuItemCount - 1);
+    return last.y + last.dy + pad;
+}
+
+int TbMenuWnd::ItemAt(Point pt) const {
+    for (int i = 0; i < kTbMenuItemCount; i++) {
+        if (gTbMenuItems[i].label && ItemRect(i).Contains(pt)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void TbMenuWnd::Hide() {
+    hotIdx = -1;
+    pressedIdx = -1;
+    if (hwnd) {
+        ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+void TbMenuWnd::ShowAt() {
+    hotIdx = -1;
+    pressedIdx = -1;
+    int dx = DpiScale(hwnd, kTbMenuDx);
+    // TotalDy reads the client width only for the item rects' dx, so it is safe
+    // to compute before the window has its final size
+    int dy = TotalDy();
+    HWND anchorHwnd = tb->btnMenu ? tb->btnMenu->hwnd : tb->win->hwndFrame;
+    Rect ar = HwndWindowRect(anchorHwnd);
+    int x = ar.x + ar.dx - dx;
+    int y = ar.y + ar.dy + DpiScale(hwnd, 4);
+
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    HMONITOR monitor = MonitorFromPoint(POINT{ar.x, ar.y}, MONITOR_DEFAULTTONEAREST);
+    GetMonitorInfoW(monitor, &mi);
+    Rect work = ToRect(mi.rcWork);
+    x = std::clamp(x, work.x, std::max(work.x, work.x + work.dx - dx));
+    if (y + dy > work.y + work.dy) {
+        y = std::max(work.y, ar.y - dy - DpiScale(hwnd, 4));
+    }
+    SetWindowPos(hwnd, HWND_TOP, x, y, dx, dy, SWP_SHOWWINDOW);
+    SetForegroundWindow(hwnd);
+    HwndInvalidate(hwnd, true);
+}
+
+void TbMenuWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
+    Rect rc = HwndClientRect(hwnd);
+    HdcFillRect(hdc, ToRect(ps->rcPaint), ThemeControlBackgroundColor());
+    SetBkMode(hdc, TRANSPARENT);
+    {
+        AutoDeletePen border = CreatePen(PS_SOLID, 1, ThemeEdgeColor());
+        ScopedSelectObject selPen(hdc, border);
+        ScopedSelectObject selBr(hdc, GetStockBrush(NULL_BRUSH));
+        int radius = DpiScale(hwnd, 10);
+        RoundRect(hdc, 0, 0, rc.dx, rc.dy, radius * 2, radius * 2);
+    }
+    int radius = DpiScale(hwnd, 8);
+    for (int i = 0; i < kTbMenuItemCount; i++) {
+        Rect r = ItemRect(i);
+        if (!gTbMenuItems[i].label) {
+            int y = r.y + r.dy / 2;
+            HdcFillRect(hdc, Rect{r.x + DpiScale(hwnd, 8), y, std::max(0, r.dx - DpiScale(hwnd, 16)), 1},
+                        ThemeEdgeColor());
+            continue;
+        }
+        if (i == hotIdx || i == pressedIdx) {
+            TbFillRounded(hdc, r, radius, ThemeHotBackgroundColor());
+        }
+        Rect text = r;
+        text.x += DpiScale(hwnd, 14);
+        text.dx -= DpiScale(hwnd, 22);
+        SetTextColor(hdc, ThemeWindowTextColor());
+        HdcDrawText(hdc, Str(gTbMenuItems[i].label), text,
+                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, 14, FW_MEDIUM));
+    }
+}
+
+LRESULT TbMenuWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_ERASEBKGND) {
+        return TRUE;
+    }
+    if (msg == WM_MOUSEMOVE) {
+        Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        int idx = ItemAt(pt);
+        if (idx != hotIdx) {
+            hotIdx = idx;
+            HwndInvalidate(hw, false);
+        }
+        if (!tracking) {
+            TRACKMOUSEEVENT tme{};
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hw;
+            TrackMouseEvent(&tme);
+            tracking = true;
+        }
+        return 0;
+    }
+    if (msg == WM_MOUSELEAVE) {
+        tracking = false;
+        if (hotIdx != -1) {
+            hotIdx = -1;
+            HwndInvalidate(hw, false);
+        }
+        return 0;
+    }
+    if (msg == WM_LBUTTONDOWN) {
+        pressedIdx = ItemAt(Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+        HwndInvalidate(hw, false);
+        return 0;
+    }
+    if (msg == WM_LBUTTONUP) {
+        int idx = ItemAt(Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+        int pressed = pressedIdx;
+        pressedIdx = -1;
+        // a tap that started on a different item (or outside) doesn't fire
+        if (idx < 0 || (pressed >= 0 && pressed != idx)) {
+            HwndInvalidate(hw, false);
+            return 0;
+        }
+        Hide();
+        auto* req = new TbMenuCmdReq();
+        req->win = tb->win;
+        req->cmd = gTbMenuItems[idx].cmd;
+        uitask::Post(MkFunc0<TbMenuCmdReq>(TbRunMenuCmd, req), "TbRunMenuCmd");
+        return 0;
+    }
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
+        Hide();
+        return 0;
+    }
+    if (msg == WM_ACTIVATE && LOWORD(wp) == WA_INACTIVE) {
+        Hide();
+        return 0;
+    }
+    return WndProcDefault(hw, msg, wp, lp);
+}
+
+// the "..." overflow button
+static void TbOnMenu(TouchBrowser* tb) {
+    if (!tb->menuWnd) {
+        auto* w = new TbMenuWnd();
+        if (!w->Create(tb)) {
+            delete w;
+            return;
+        }
+        tb->menuWnd = w;
+    }
+    tb->menuWnd->ShowAt();
 }
 
 // --- tab strip -------------------------------------------------------------
@@ -1038,7 +1686,7 @@ static TouchBrowser* CreateTouchBrowser(MainWindow* win) {
     tb->btnForward = TbMakeButton(frame, tb->hFont, StrL("Fwd"), MkFunc0<TouchBrowser>(TbOnForward, tb));
     tb->btnForward->SetIsEnabled(false);
     tb->btnHome = TbMakeButton(frame, tb->hFont, StrL("Home"), MkFunc0<TouchBrowser>(TbOnHome, tb));
-    tb->btnStar = TbMakeButton(frame, tb->hFont, StrL("Favorite"), MkFunc0<TouchBrowser>(TbOnStar, tb));
+    tb->btnBmAdd = TbMakeButton(frame, tb->hFont, StrL("+ Save"), MkFunc0<TouchBrowser>(TbOnSaveFav, tb));
     tb->btnInfo = TbMakeButton(frame, tb->hFont, StrL("i"), MkFunc0<TouchBrowser>(TbOnInfo, tb));
     tb->btnMenu = TbMakeButton(frame, tb->hFont, StrL("..."), MkFunc0<TouchBrowser>(TbOnMenu, tb));
     tb->btnNewTab = TbMakeButton(frame, tb->hFont, StrL("+"), MkFunc0<TouchBrowser>(TbOnNewTab, tb));
@@ -1062,6 +1710,16 @@ static void TbShowWnd(HWND h, bool show) {
 }
 
 static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
+    if (!show) {
+        // the popups are top-level windows, so leaving the browser would
+        // otherwise leave them floating over the document view
+        if (tb->menuWnd) {
+            tb->menuWnd->Hide();
+        }
+        if (tb->favMgr) {
+            tb->favMgr->Hide();
+        }
+    }
     // Hide the canvas while the web view is up: it covers the same content area
     // and would paint the Home page through/around the browser chrome. Done here
     // (not only in RelayoutFrame) so it takes effect at switch time.
@@ -1071,7 +1729,7 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
     TbShowWnd(tb->btnBack ? tb->btnBack->hwnd : nullptr, show);
     TbShowWnd(tb->btnForward ? tb->btnForward->hwnd : nullptr, show);
     TbShowWnd(tb->btnHome ? tb->btnHome->hwnd : nullptr, show);
-    TbShowWnd(tb->btnStar ? tb->btnStar->hwnd : nullptr, show);
+    TbShowWnd(tb->btnBmAdd ? tb->btnBmAdd->hwnd : nullptr, show);
     TbShowWnd(tb->btnInfo ? tb->btnInfo->hwnd : nullptr, show);
     TbShowWnd(tb->btnMenu ? tb->btnMenu->hwnd : nullptr, show);
     TbShowWnd(tb->btnNewTab ? tb->btnNewTab->hwnd : nullptr, show);
@@ -1112,7 +1770,7 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
         raise(tb->btnBack ? tb->btnBack->hwnd : nullptr);
         raise(tb->btnForward ? tb->btnForward->hwnd : nullptr);
         raise(tb->btnHome ? tb->btnHome->hwnd : nullptr);
-        raise(tb->btnStar ? tb->btnStar->hwnd : nullptr);
+        raise(tb->btnBmAdd ? tb->btnBmAdd->hwnd : nullptr);
         raise(tb->btnInfo ? tb->btnInfo->hwnd : nullptr);
         raise(tb->btnMenu ? tb->btnMenu->hwnd : nullptr);
         raise(tb->hwndUrl);
@@ -1162,8 +1820,15 @@ void LayoutTouchWebView(MainWindow* win, Rect rc) {
     int bmDy = DpiScale(frame, kTbBmDy);
     int btnDy = navDy - 2 * pad;
 
+    // rows, top to bottom: tab strip, favorites bar, nav row, then the webview.
+    // The favorites bar sits directly above the address bar (and is always
+    // present: it carries the "+ Save" button even with no favorites yet).
+    int tabsTop = rc.y;
+    int bmTop = tabsTop + tabsDy;
+    int navTop = bmTop + bmDy;
+
     int x = rc.x + pad;
-    int y = rc.y + pad;
+    int y = navTop + pad;
     auto place = [&](Button* b) {
         if (b) {
             MoveWindow(b->hwnd, x, y, btnDx, btnDy, TRUE);
@@ -1173,8 +1838,7 @@ void LayoutTouchWebView(MainWindow* win, Rect rc) {
     place(tb->btnBack);
     place(tb->btnForward);
     place(tb->btnHome);
-    // Bookmark button sits at the right edge of the nav row
-    // right-aligned cluster: [Favorite] [i] [...]
+    // right-aligned cluster: [i] [...]
     int miniDx = DpiScale(frame, 30);
     int menuX = rc.x + rc.dx - pad - miniDx;
     if (tb->btnMenu) {
@@ -1184,14 +1848,9 @@ void LayoutTouchWebView(MainWindow* win, Rect rc) {
     if (tb->btnInfo) {
         MoveWindow(tb->btnInfo->hwnd, infoX, y, miniDx, btnDy, TRUE);
     }
-    int starDx = btnDx + DpiScale(frame, 30);
-    int starX = infoX - gap - starDx;
-    if (tb->btnStar) {
-        MoveWindow(tb->btnStar->hwnd, starX, y, starDx, btnDy, TRUE);
-    }
     if (tb->hwndUrl) {
         int urlX = x;
-        int urlDx = std::max(0, starX - gap - urlX);
+        int urlDx = std::max(0, infoX - gap - urlX);
         MoveWindow(tb->hwndUrl, urlX, y, urlDx, btnDy, TRUE);
     }
 
@@ -1203,7 +1862,7 @@ void LayoutTouchWebView(MainWindow* win, Rect rc) {
         int newDx = DpiScale(frame, kTbNewTabDx);
         int maxTabDx = DpiScale(frame, kTbTabMaxDx);
         int minTabDx = DpiScale(frame, kTbTabMinDx);
-        int tabY = rc.y + navDy + DpiScale(frame, 2);
+        int tabY = tabsTop + DpiScale(frame, 2);
         int tabDy = std::max(0, tabsDy - DpiScale(frame, 5));
         int right = rc.x + rc.dx - pad;
         int tabsLeft = rc.x + pad;
@@ -1235,25 +1894,32 @@ void LayoutTouchWebView(MainWindow* win, Rect rc) {
         }
     }
 
-    // bookmarks row (chips)
-    int bmY = rc.y + navDy + tabsDy;
-    bool hasChips = len(tb->bmChips) > 0;
-    if (hasChips) {
+    // favorites bar: "+ Save" first, then a chip per favorite
+    {
         int cx = rc.x + pad;
-        int cy = bmY + DpiScale(frame, 3);
+        int cy = bmTop + DpiScale(frame, 3);
         int chipDy = bmDy - DpiScale(frame, 6);
+        int right = rc.x + rc.dx - pad;
+        if (tb->btnBmAdd) {
+            int addDx = DpiScale(frame, 58);
+            MoveWindow(tb->btnBmAdd->hwnd, cx, cy, addDx, chipDy, TRUE);
+            cx += addDx + gap * 2;
+        }
         for (TbChip* c : tb->bmChips) {
             Size ideal = c->btn->GetIdealSize();
             int cdx = std::min(ideal.dx + DpiScale(frame, 12), DpiScale(frame, 160));
-            if (cx + cdx > rc.x + rc.dx - pad) {
-                break; // one row of chips; overflow is dropped
+            if (cx + cdx > right) {
+                // one row of chips; the overflow is parked off-layout (and so
+                // unclickable) rather than left overlapping the last chip
+                MoveWindow(c->btn->hwnd, cx, cy, 0, 0, TRUE);
+                continue;
             }
             MoveWindow(c->btn->hwnd, cx, cy, cdx, chipDy, TRUE);
             cx += cdx + gap;
         }
     }
 
-    int webTop = rc.y + navDy + tabsDy + (hasChips ? bmDy : 0);
+    int webTop = navTop + navDy;
     Rect webRc{rc.x, webTop, rc.dx, std::max(0, rc.y + rc.dy - webTop)};
     // every tab gets the bounds, so switching to one doesn't show a stale size
     for (TbTab* t : tb->tabs) {
@@ -1332,10 +1998,12 @@ void DestroyTouchWebView(MainWindow* win) {
     delete tb->btnBack;
     delete tb->btnForward;
     delete tb->btnHome;
-    delete tb->btnStar;
+    delete tb->btnBmAdd;
     delete tb->btnInfo;
     delete tb->btnMenu;
     delete tb->btnNewTab;
+    delete tb->menuWnd;
+    delete tb->favMgr;
     if (tb->hwndUrl) {
         DestroyWindow(tb->hwndUrl);
     }

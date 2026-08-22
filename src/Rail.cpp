@@ -182,11 +182,28 @@ static bool IsRailItemActive(MainWindow* win, const RailItem& item) {
            (!win->touchSidebarCollapsed && win->uiState.tocVisible && win->touchPanelMode == item.mode);
 }
 
+// Is a real document open? NOT MainWindow::HasDocsLoaded(): that returns true
+// when there are zero tabs, which is exactly the no-document case here, so the
+// document-only rail icons never greyed out.
+static bool RailHasDocument(MainWindow* win) {
+    if (!win) {
+        return false;
+    }
+    for (int i = 0; i < win->TabCount(); i++) {
+        WindowTab* tab = win->GetTab(i);
+        if (tab && !tab->IsAboutTab()) {
+            return true;
+        }
+    }
+    // tabless mode: no tabs at all, but a document may still be loaded
+    return win->ctrl != nullptr;
+}
+
 static bool IsRailItemEnabled(MainWindow* win, const RailItem& item) {
     if (!win) {
         return false;
     }
-    return item.cmdId || item.view != TouchView::Doc || win->HasDocsLoaded();
+    return item.cmdId || item.view != TouchView::Doc || RailHasDocument(win);
 }
 
 void SetTouchSidebarCollapsed(MainWindow* win, bool collapsed) {
