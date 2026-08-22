@@ -5,6 +5,7 @@
 #include "base/File.h"
 #include "base/FileWatcher.h"
 #include "base/GuessFileType.h"
+#include "base/Win.h"
 
 #include "wingui/UIModels.h"
 
@@ -90,6 +91,8 @@ WindowTab::~WindowTab() {
     displayName = {};
     str::Free(frameTitle);
     frameTitle = {};
+    delete touchHomeThumbnail;
+    touchHomeThumbnail = nullptr;
     str::Free(readAloudText);
     readAloudText = {};
     if (readAloudHighlight) {

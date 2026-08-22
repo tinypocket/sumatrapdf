@@ -863,7 +863,15 @@ const globalPrefs: Field[] = [
     "if true, store display settings for each document separately (i.e. everything " +
       "after UseDefaultState in FileStates)",
   ),
-  field("RestoreSession", Bool, true, "if true and SessionData isn't empty, that session will be restored at startup"),
+  field("RestoreSession", Bool, false, "if true and SessionData isn't empty, that session will be restored at startup"),
+  field(
+    "RestoreSessionDefaultMigrated",
+    Bool,
+    false,
+    "whether the SumatraPDF+ no-session-restore default has been applied",
+  )
+    .ver("3.8")
+    .internal(),
   field(
     "ReuseInstance",
     Bool,
@@ -914,6 +922,29 @@ const globalPrefs: Field[] = [
       "instead of the compact toolbar overlay",
   ).ver("3.7"),
   field("ShowFavorites", Bool, false, "if true, show the Favorites sidebar"),
+  field(
+    "ShowRail",
+    Bool,
+    true,
+    "if true, show the icon rail: the strip of large icon buttons along the left edge that " +
+      "switches what the sidebar shows. On by default for the touch redesign",
+  ).ver("3.8"),
+  field(
+    "TouchChrome",
+    Bool,
+    true,
+    "if true, use the touch-friendly chrome: a custom-drawn toolbar of grouped buttons with " +
+      "finger-sized targets, and a sidebar to match. If false, the classic Windows toolbar is used",
+  ).ver("3.8"),
+  field(
+    "TouchSidebarDensity",
+    Str,
+    "normal",
+    'vertical spacing for touch sidebar rows: "condensed", "normal", or "expanded"',
+  ).ver("3.8"),
+  compactArray("LibraryFolders", Str, null, "folders imported into the Library view").ver("3.8"),
+  compactArray("LibraryPinnedFolders", Str, null, "folders pinned in the Library view").ver("3.8"),
+  compactArray("LibraryHiddenFolders", Str, null, "folders hidden in the Library view").ver("3.8"),
   field(
     "SortFavoritesByName",
     Bool,
@@ -1007,14 +1038,14 @@ const globalPrefs: Field[] = [
     "",
     "the name of the theme to use. System follows the Windows light/dark app mode " +
       "and switches between LastLightTheme and LastDarkTheme. Built-in themes: " +
-      "Light, Dark, Light Warm, Dark from 3.5, Charcoal, Solarized Light, " +
+      "Light, Dark, Light Warm, Touch Paper, Dark from 3.5, Charcoal, Solarized Light, " +
       "Solarized Dark, Dracula, Nebula, Greeny, Choco, Purpy, One Dark, Monokai, " +
       "Nord, GitHub Dark, Catppuccin Mocha, Tokyo Night, Gruvbox, Night Owl, Ayu, " +
       "Palenight, System (custom Themes[] entries can add more)",
   )
     .ver("3.5")
     .doc(
-      "valid themes: Light, Dark, Light Warm, Dark from 3.5, Charcoal, Solarized Light, " +
+      "valid themes: Light, Dark, Light Warm, Touch Paper, Dark from 3.5, Charcoal, Solarized Light, " +
         "Solarized Dark, Dracula, Nebula, Greeny, Choco, Purpy, One Dark, Monokai, Nord, " +
         "GitHub Dark, Catppuccin Mocha, Tokyo Night, Gruvbox, Night Owl, Ayu, Palenight, System",
     ),
@@ -1056,7 +1087,7 @@ const globalPrefs: Field[] = [
   field(
     "ToolbarSize",
     Int,
-    18,
+    24,
     "size of the toolbar icons in pixels at 100% display scaling (8-64); the toolbar itself " +
       "is a few pixels taller",
   ).ver("3.4"),
@@ -1107,7 +1138,7 @@ const globalPrefs: Field[] = [
     false,
     "if true, use the Windows system colors for the document background and text. Overrides other color settings",
   ),
-  field("UseTabs", Bool, true, "if true, documents are opened in tabs instead of new windows").ver("3.0"),
+  field("UseTabs", Bool, false, "if true, documents are opened in tabs instead of new windows").ver("3.0"),
   field(
     "SelectionToolbar",
     Bool,
@@ -1295,9 +1326,15 @@ const globalPrefs: Field[] = [
   ).notSaved(),
   field("DefaultZoomFloat", Float, -1, "value of DefaultZoom for internal usage").notSaved(),
   compactStruct("PropWinPos", pointPos, "position of the document properties window").structName("Point"),
+  field(
+    "UpdateFeedURL",
+    Str,
+    "https://github.com/tinypocket/sumatrapdf/releases/latest/download/update-check.txt",
+    "private update manifest URL; when set, it replaces the public update feed and update installers must use the same URL origin. SumatraPDF+ defaults it to this fork's GitHub releases so update checks are self-hosted",
+  ).ver("3.8"),
   // saved & honored, but hidden from the advanced settings dialog (edited via
   // the "Automatically check for updates" checkbox in Options instead)
-  field("CheckForUpdates", Bool, true, "if true, check once a day whether an update is available").internal(),
+  field("CheckForUpdates", Bool, true, "if true, check at startup whether an update is available").internal(),
   emptyLine(),
   comment("Settings below are not recognized by the current version"),
 ];
@@ -1563,6 +1600,7 @@ constexpr float kZoomFitContent = -3.F;
 constexpr float kZoomShrinkToFit = -4.F;
 constexpr float kZoomFitByOrientation = -5.F;
 constexpr float kZoomFitHeight = -6.F;
+constexpr float kZoomSmartWidth = -7.F;
 constexpr float kZoomActualSize = 100.0F;
 constexpr float kZoomMax = 6400.F; /* max zoom in % */
 constexpr float kZoomMin = 8.33F;  /* min zoom in % */
@@ -1852,8 +1890,8 @@ body {
 <p>You can change the look and behavior of
 <a href="https://www.sumatrapdfreader.org/">SumatraPDF</a>
 by editing the file <code>SumatraPDF-settings.txt</code>. The file is stored in
-<code>%LOCALAPPDATA%\\SumatraPDF</code> directory for the installed version or in the
-same directory as <code>SumatraPDF.exe</code> executable for the portable version.</p>
+<code>%LOCALAPPDATA%\\SumatraPDF+</code> directory for the installed version or in the
+same directory as <code>SumatraPDF+.exe</code> executable for the portable version.</p>
 
 <p>Use the menu item <code>Settings -> Advanced Settings...</code> to open the settings file
 with your default text editor.</p>

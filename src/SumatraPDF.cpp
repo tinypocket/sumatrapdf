@@ -57,6 +57,7 @@
 #include "ProgressUpdateUI.h"
 #include "TextSelection.h"
 #include "TextSearch.h"
+#include "Version.h"
 #include "SumatraPDF.h"
 #include "Notifications.h"
 #include "MainWindow.h"
@@ -93,6 +94,9 @@
 #include "TableOfContents.h"
 #include "Tabs.h"
 #include "Toolbar.h"
+#include "TouchMetrics.h"
+#include "Rail.h"
+#include "TopBar.h"
 #include "FindBar.h"
 #include "FindWindow.h"
 #include "Translations.h"
@@ -124,8 +128,8 @@ using Gdiplus::SolidBrush;
 
 constexpr const char* kRestrictionsFileName = "sumatrapdfrestrict.ini";
 
-constexpr const char* kSumatraWindowTitle = "SumatraPDF";
-constexpr const WCHAR* kSumatraWindowTitleW = L"SumatraPDF";
+constexpr const char* kSumatraWindowTitle = kAppName;
+constexpr const WCHAR* kSumatraWindowTitleW = kAppNameW;
 
 // Text-to-speech/read-aloud helpers are implemented together near the end of this file.
 static void ReadAloudClearSourceTab();
@@ -154,6 +158,15 @@ bool NeedsWindowEmbeddingHacks() {
 
 bool SettingsUseTabs() {
     return gGlobalPrefs->useTabs && !gMyWindowWasEmbedded;
+}
+
+// The touch chrome draws its own caption (the slim title strip, or tab pills)
+// and hides the classic menu bar, so it needs the custom-caption frame even
+// when tabs are off - each window then just holds one document. This is the
+// caption decision only; whether opening a file makes a tab or a new window
+// still follows SettingsUseTabs().
+bool WantTabsInTitlebar() {
+    return SettingsUseTabs() || (gGlobalPrefs->touchChrome && !gMyWindowWasEmbedded);
 }
 
 bool SettingsRestoreSession() {
@@ -906,6 +919,11 @@ static void UpdateWindowRtlLayout(MainWindow* win) {
 }
 
 static bool IsMenubarVisible() {
+    // the touch chrome hides the classic menu bar (4a has none); its commands
+    // live on the rail, the settings button and the right-click context menu
+    if (gGlobalPrefs->touchChrome) {
+        return false;
+    }
     if (SettingsUseTabs()) {
         return gGlobalPrefs->showMenubarWithTabs;
     }
@@ -1103,49 +1121,78 @@ void ControllerCallbackHandler::RenderThumbnail(DisplayModel* dm, Size size, con
 
 struct CreateThumbnailFromFileData {
     Str filePath;
+    int pageNo = 1;
+    const OnBitmapRendered* onRendered = nullptr;
     Pixmap* bmp = nullptr;
     ~CreateThumbnailFromFileData() { str::Free(filePath); }
 };
 
 static void CreateThumbnailFromFileFinish(CreateThumbnailFromFileData* d) {
-    if (d->bmp) {
+    RenderedBitmap* thumbnail = RenderedBitmapFromPixmap(d->bmp);
+    d->bmp = nullptr;
+    if (d->onRendered) {
+        d->onRendered->Call(thumbnail);
+        delete d->onRendered;
+    } else {
         FileState* fs = gFileHistory.FindByPath(d->filePath);
-        SetThumbnail(fs, RenderedBitmapFromPixmap(d->bmp));
+        SetThumbnail(fs, thumbnail);
     }
     delete d;
+}
+
+static void QueueThumbnailFromFileFinish(CreateThumbnailFromFileData* d) {
+    auto fn = MkFunc0<CreateThumbnailFromFileData>(CreateThumbnailFromFileFinish, d);
+    uitask::Post(fn, "SetThumbnailFromFile");
 }
 
 static void CreateThumbnailFromFileThread(CreateThumbnailFromFileData* d) {
     HwndPasswordUI pwdUI(nullptr);
     EngineBase* engine = CreateEngineFromFile(d->filePath, &pwdUI, true);
     if (!engine) {
-        delete d;
+        QueueThumbnailFromFileFinish(d);
         return;
     }
-    RectF pageRect = engine->PageMediabox(1);
+    int pageCount = engine->PageCount();
+    if (pageCount < 1) {
+        engine->Release();
+        QueueThumbnailFromFileFinish(d);
+        return;
+    }
+    int pageNo = std::clamp(d->pageNo, 1, pageCount);
+    RectF pageRect = engine->PageMediabox(pageNo);
     if (pageRect.IsEmpty()) {
         engine->Release();
-        delete d;
+        QueueThumbnailFromFileFinish(d);
         return;
     }
-    pageRect = engine->Transform(pageRect, 1, 1.0f, 0);
-    float zoom = (float)kThumbnailDx / pageRect.dx;
-    pageRect.dy = std::min(pageRect.dy, (float)kThumbnailDy / zoom);
-    pageRect = engine->Transform(pageRect, 1, 1.0f, 0, true);
-    RenderPageArgs args(1, zoom, 0, &pageRect);
+    pageRect = engine->Transform(pageRect, pageNo, 1.0f, 0);
+    float zoom = (float)kThumbnailRenderDx / pageRect.dx;
+    pageRect.dy = std::min(pageRect.dy, (float)kThumbnailRenderDy / zoom);
+    pageRect = engine->Transform(pageRect, pageNo, 1.0f, 0, true);
+    RenderPageArgs args(pageNo, zoom, 0, &pageRect);
     d->bmp = engine->RenderPage(args);
     engine->Release();
-    auto fn = MkFunc0<CreateThumbnailFromFileData>(CreateThumbnailFromFileFinish, d);
-    uitask::Post(fn, "SetThumbnailFromFile");
+    QueueThumbnailFromFileFinish(d);
 }
 
 // create a thumbnail by loading the file with a temporary engine
 // used for lazy-loaded files that don't have a loaded controller
-static void CreateThumbnailFromFileAsync(FileState* ds) {
+void CreateThumbnailFromFileAsync(FileState* ds) {
     auto* d = new CreateThumbnailFromFileData();
     d->filePath = str::Dup(ds->filePath);
     auto fn = MkFunc0<CreateThumbnailFromFileData>(CreateThumbnailFromFileThread, d);
     RunAsync(fn, "CreateThumbnailFromFile");
+}
+
+// Renders an arbitrary page without adding the document to file history. The
+// UI-thread callback owns the resulting bitmap and is called even on failure.
+void CreateThumbnailFromFileAsync(Str filePath, int pageNo, const OnBitmapRendered* onRendered) {
+    auto* d = new CreateThumbnailFromFileData();
+    d->filePath = str::Dup(filePath);
+    d->pageNo = pageNo;
+    d->onRendered = onRendered;
+    auto fn = MkFunc0<CreateThumbnailFromFileData>(CreateThumbnailFromFileThread, d);
+    RunAsync(fn, "CreateThumbnailFromFilePage");
 }
 
 static void CreateThumbnailForFile(MainWindow* win, FileState* ds) {
@@ -1731,6 +1778,7 @@ void ControllerCallbackHandler::PageNoChanged(DocController* ctrl, int pageNo) {
 
     UpdateTocSelection(win, pageNo);
     win->currPageNo = pageNo;
+    UpdateTopBarForWindow(win);
 
     if (!wnd) {
         return;
@@ -2428,10 +2476,16 @@ void ReloadDocument(MainWindow* win, bool autoRefresh) {
 }
 
 static void CreateSidebar(MainWindow* win) {
+    // the rail sits left of the sidebar splitter, so create it first
+    CreateRail(win);
+    CreateTopBar(win);
     {
         Splitter::CreateArgs args;
         args.parent = win->hwndFrame;
         args.type = SplitterType::Vert;
+        args.paintThickness = gGlobalPrefs->touchChrome ? kSidebarSplitterVisualDx : 0;
+        args.transparentBackground = gGlobalPrefs->touchChrome;
+        args.dragThreshold = gGlobalPrefs->touchChrome ? DpiScale(win->hwndFrame, kSidebarSplitterDragThreshold) : 0;
         win->sidebarSplitter = new Splitter();
         win->sidebarSplitter->onMove = MkFunc1Void(OnSidebarSplitterMove);
         win->sidebarSplitter->Create(args);
@@ -2635,7 +2689,7 @@ static MainWindow* CreateMainWindow() {
     // is deferred to ShowMainWindow so the shell sees a normal frame during
     // the first ShowWindow and creates the taskbar button.
     {
-        bool inTitleBar = SettingsUseTabs();
+        bool inTitleBar = WantTabsInTitlebar();
         win->tabsInTitlebar = inTitleBar;
         win->tabsCtrl->inTitleBar = inTitleBar;
         if (inTitleBar) {
@@ -2781,10 +2835,14 @@ void UpdateAfterThemeChange() {
     for (auto* win : gWindows) {
         DeleteObject(win->brControlBgColor);
         win->brControlBgColor = CreateSolidBrush(ThemeControlBackgroundColor());
+        DeleteObject(win->brHomeSearchBg);
+        win->brHomeSearchBg = CreateSolidBrush(ThemeHotBackgroundColor());
 
         UpdateControlsColors(win);
         RebuildMenuBarForWindow(win);
         UpdateToolbarAfterThemeChange(win);
+        UpdateRailAfterThemeChange(win);
+        UpdateTopBarAfterThemeChange(win);
         RecreateFindBar(win);
         UpdateFindWindowTheme(win);
         UpdateAIChatTheme(win);
@@ -3772,6 +3830,18 @@ void LoadModelIntoTab(WindowTab* tab) {
     win->currentTabTemp = tab;
     win->ctrl = tab->ctrl;
 
+    if (IsTouchChrome(win)) {
+        if (tab->IsAboutTab()) {
+            Str title = tab->GetTabTitle();
+            win->touchView = str::EqI(title, StrL("Library")) ? TouchView::Library : TouchView::Home;
+            win->uiState.tocVisible = false;
+            win->uiState.favVisible = false;
+        } else if (!tab->IsNonDocumentTab()) {
+            win->touchView = TouchView::Doc;
+        }
+        UpdateRailForWindow(win);
+    }
+
     if (tab->loadState == WindowTab::LoadState::LoadedPending) {
         LoadArgs* args = tab->pendingLoadArgs;
         tab->pendingLoadArgs = nullptr;
@@ -3873,7 +3943,9 @@ void LoadModelIntoTab(WindowTab* tab) {
         }
     }
     HwndInvalidate(win->hwndCanvas);
-    UpdateWindow(win->hwndCanvas);
+    // Painting a newly selected document synchronously here makes the tab input
+    // wait for GDI and any page-cache work. Let the normal paint queue render it
+    // after the selection and chrome state have committed.
 
     // show/hide notifications that are tied to a specific tab
     ShowNotificationsForActiveTab(win->hwndCanvas, tab);
@@ -4612,6 +4684,34 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
 
     // Stop eventual TTS reading
     StopReadAloudIfSourceTab(tab);
+
+    // Under touch chrome, closing the only open document returns to the Recent
+    // (Home) view instead of closing the window, so a single-file window always
+    // has somewhere to land. quitIfLast still closes the app (e.g. File > Exit).
+    if (!quitIfLast && !tab->IsAboutTab() && IsTouchChrome(win)) {
+        bool hasOtherDoc = false;
+        for (int i = 0; i < win->TabCount(); i++) {
+            WindowTab* t = win->GetTab(i);
+            if (t && t != tab && !t->IsAboutTab()) {
+                hasOtherDoc = true;
+                break;
+            }
+        }
+        if (!hasOtherDoc) {
+            RemoveTab(tab);
+            if (!IsMainWindowValid(win)) {
+                if (tab->ctrl) {
+                    tab->ctrl->cb = nullptr;
+                }
+                delete tab;
+                return;
+            }
+            delete tab;
+            SetTouchView(win, TouchView::Home);
+            SaveSettings();
+            return;
+        }
+    }
 
     int tabCount = win->TabCount();
     if (tabCount == 1 || (tabCount == 0 && quitIfLast)) {
@@ -5873,6 +5973,14 @@ constexpr int kSplitterDy = 4;
 constexpr int kSidebarMinDx = 150;
 constexpr int kTocMinDy = 100;
 
+static int SidebarMaxDx(MainWindow* win, int contentDx) {
+    int maxDx = contentDx - 200;
+    if (IsTouchChrome(win)) {
+        maxDx = std::min(DpiScale(win->hwndFrame, kPanelMaxDx), contentDx * kPanelMaxPercent / 100);
+    }
+    return std::max(kSidebarMinDx, maxDx);
+}
+
 constexpr int kFrameBorderSize = 1;
 // size (DIP) of the min/max/restore/close caption glyphs
 constexpr int kCaptionGlyphDip = 10;
@@ -5880,11 +5988,13 @@ constexpr int kCaptionGlyphDip = 10;
 using UILayout = MainWindow::UIState::Layout;
 
 static bool IsUiLayoutEq(UILayout* s1, UILayout* s2) {
-    return s1->rc == s2->rc && s1->presentation == s2->presentation && s1->tabsInTitlebar == s2->tabsInTitlebar &&
+    return s1->rc == s2->rc && s1->dpi == s2->dpi && s1->presentation == s2->presentation &&
+           s1->touchView == s2->touchView && s1->tabsInTitlebar == s2->tabsInTitlebar &&
            s1->isFullScreen == s2->isFullScreen && s1->tabsVisible == s2->tabsVisible &&
            s1->isToolbarVisible == s2->isToolbarVisible && s1->tocVisible == s2->tocVisible &&
            s1->showFavorites == s2->showFavorites && s1->favoritesAsTab == s2->favoritesAsTab &&
-           s1->showMenuBarRebar == s2->showMenuBarRebar && s1->aiChatVisible == s2->aiChatVisible &&
+           s1->showMenuBarRebar == s2->showMenuBarRebar && s1->railVisible == s2->railVisible &&
+           s1->touchSidebarCollapsed == s2->touchSidebarCollapsed && s1->aiChatVisible == s2->aiChatVisible &&
            s1->aiChatDx == s2->aiChatDx;
 }
 
@@ -5897,7 +6007,9 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     // build a snapshot of all state that affects layout
     UILayout curState;
     curState.rc = rc;
+    curState.dpi = win->frameDpi > 0 ? win->frameDpi : DpiGet(win->hwndFrame);
     curState.presentation = (int)win->presentation;
+    curState.touchView = (int)win->touchView;
     curState.tabsInTitlebar = win->tabsInTitlebar;
     curState.isFullScreen = win->isFullScreen;
     curState.tabsVisible = win->tabsVisible;
@@ -5910,6 +6022,8 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     curState.showFavorites = win->uiState.favVisible || favAsTabNow;
     curState.favoritesAsTab = favAsTabNow;
     curState.showMenuBarRebar = IsShowingMenuBarRebar(win);
+    curState.railVisible = IsRailVisible(win);
+    curState.touchSidebarCollapsed = win->touchSidebarCollapsed;
     curState.aiChatVisible = win->uiState.aiChatVisible;
     curState.aiChatDx = win->aiChatDx;
 
@@ -5989,12 +6103,15 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
             bool showingMenuBar = IsShowingMenuBarRebar(win);
             // Add a visible gap above the caption for window dragging.
             // Skip when menu bar is showing (it goes all the way to the top).
-            if (!IsZoomed(win->hwndFrame) && !showingMenuBar) {
+            if (!IsTouchChrome(win) && !IsZoomed(win->hwndFrame) && !showingMenuBar) {
                 rc.y += kCaptionTopPadding;
                 rc.dy -= kCaptionTopPadding;
             }
             int tabHeight = GetTabbarHeight(win->hwndFrame);
             int captionHeight = tabHeight + 2;
+            if (IsTouchChrome(win)) {
+                captionHeight = DpiScale(win->hwndFrame, SettingsUseTabs() ? kTitleBarTabsDy : kTitleBarDy);
+            }
             if (showingMenuBar) {
                 int menuBarDy = GetMenuBarRebarHeight(win);
                 // check if there are actual file tabs to show. IsNonDocumentTab,
@@ -6008,8 +6125,16 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
                         break;
                     }
                 }
-                // menu bar row + optional tabs row
-                captionHeight = menuBarDy + (hasFileTabs ? tabHeight : 0);
+                if (IsTouchChrome(win)) {
+                    // Tabs stay inside the title strip, exactly as they do
+                    // while the menu is hidden. Revealing the classic menu
+                    // adds only its own 32px row.
+                    int touchTitleDy = SettingsUseTabs() ? kTitleBarTabsDy : kTitleBarDy;
+                    captionHeight = DpiScale(win->hwndFrame, touchTitleDy) + menuBarDy;
+                } else {
+                    // menu bar row + optional tabs row
+                    captionHeight = menuBarDy + (hasFileTabs ? tabHeight : 0);
+                }
             }
             win->captionRect = {rc.x, rc.y, rc.dx, captionHeight};
             if (IsRunningOnWine()) {
@@ -6047,27 +6172,61 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
         rc.y += menuBarDy;
         rc.dy -= menuBarDy;
     }
-    if (win->isToolbarVisible) {
-        Rect rcRebar = HwndWindowRect(win->hwndReBar);
-        int rebarDy = rcRebar.dy;
-        bool atBottom = ToolbarAtBottom();
-        int rebarY = atBottom ? (rc.y + rc.dy - rebarDy) : rc.y;
-        if (updateToolbars) {
-            dh.SetWindowPos(win->hwndReBar, nullptr, rc.x, rebarY, rc.dx, rebarDy, SWP_NOZORDER);
-        }
-        // reserve the toolbar's space; from the bottom of the content area when
-        // placed at the bottom, otherwise from the top
-        rc.dy -= rebarDy;
-        if (!atBottom) {
-            rc.y += rebarDy;
-        }
-    }
     // in overlay mode the toolbar floats over the canvas and is positioned
     // separately (see PositionOverlayToolbar below); don't touch its visibility
     // here so a relayout doesn't flash it on/off
     if (updateToolbars && !win->isToolbarOverlay) {
-        ShowWindow(win->hwndReBar, win->isToolbarVisible ? SW_SHOW : SW_HIDE);
+        bool showRebar = win->isToolbarVisible && !IsTopBarVisible(win);
+        ShowWindow(win->hwndReBar, showRebar ? SW_SHOW : SW_HIDE);
     }
+
+    // The toolbar spans the document area only, not the whole window: the rail
+    // and the panel beside it are full height and the toolbar starts to their
+    // right. So it can't be placed until they have taken their width, but the
+    // Favorites tab returns before that and places it itself.
+    auto placeToolbar = [&](Rect& r) {
+        // the redesigned chrome uses the custom top bar instead of the rebar
+        int topBarDy = GetTopBarDy(win);
+        if (win->hwndTopBar) {
+            HwndSetVisible(win->hwndTopBar, topBarDy > 0);
+        }
+        if (topBarDy > 0) {
+            dh.SetWindowPos(win->hwndTopBar, nullptr, r.x, r.y, r.dx, topBarDy, SWP_NOZORDER);
+            r.y += topBarDy;
+            r.dy -= topBarDy;
+            return;
+        }
+        if (!win->isToolbarVisible) {
+            return;
+        }
+        Rect rcRebar = HwndWindowRect(win->hwndReBar);
+        int rebarDy = rcRebar.dy;
+        bool atBottom = ToolbarAtBottom();
+        int rebarY = atBottom ? (r.y + r.dy - rebarDy) : r.y;
+        if (updateToolbars) {
+            dh.SetWindowPos(win->hwndReBar, nullptr, r.x, rebarY, r.dx, rebarDy, SWP_NOZORDER);
+        }
+        // reserve the toolbar's space; from the bottom of the content area when
+        // placed at the bottom, otherwise from the top
+        r.dy -= rebarDy;
+        if (!atBottom) {
+            r.y += rebarDy;
+        }
+    };
+
+    // the icon rail owns the left edge, outside the sidebar and the canvas
+    int railDx = GetRailDx(win);
+    if (railDx > 0) {
+        Rect rRail(rc.x, rc.y, railDx, rc.dy);
+        dh.MoveWindow(win->hwndRail, rRail);
+        rc.x += railDx;
+        rc.dx -= railDx;
+    }
+    if (win->hwndRail) {
+        HwndSetVisible(win->hwndRail, railDx > 0);
+    }
+    int touchPanelX = rc.x;
+    int touchPanelY = rc.y;
 
     // ToC and Favorites sidebars at the left (or full-area Favorites tab)
     // desired state, normalized by SetSidebarVisibility
@@ -6075,16 +6234,17 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     bool favAsTab = curTab && curTab->IsFavoritesTab();
     bool favVisible = favAsTab || win->uiState.favVisible;
     bool tocVisible = !favAsTab && win->uiState.tocVisible;
-    // leave at least this much canvas for the document when sidebar is open
-    constexpr int kMinDocCanvasDx = 200;
+    bool showTouchCollapse = false;
     // Canvas stays sized under a Favorites tab (only hidden) so switching back
     // to a document does not SetViewPortSize with a 0x0 canvas (CalcZoomReal assert).
     HwndSetVisible(win->hwndCanvas, !favAsTab);
 
     if (favAsTab) {
         // Favorites tab: full client area for the favorites list (discussion #5820)
+        placeToolbar(rc);
         HwndHide(win->sidebarSplitter->hwnd);
         HwndHide(win->hwndTocBox);
+        HwndHide(win->hwndTouchSidebarCollapse);
         HwndHide(win->favSplitter->hwnd);
         HwndShow(win->hwndFavBox);
         // hide AI chat over the favorites tab for a clean full-width list
@@ -6120,11 +6280,14 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
             toc.dx = HwndClientRect(win->hwndTocBox).dx;
         }
         if (0 == toc.dx) {
-            toc.dx = rc.dx / 4;
+            // the touch chrome's sidebar is a fixed panel width rather than a
+            // fraction of the window (kPanelDx in TouchMetrics.h)
+            toc.dx = IsTouchChrome(win) ? DpiScale(win->hwndFrame, kPanelDx) : (rc.dx / 4);
         }
-        // never too narrow; max leaves kMinDocCanvasDx for the document
-        // (was hard-capped at half the frame, which cut long favorite names)
-        int maxSidebarDx = std::max(kSidebarMinDx, rc.dx - kMinDocCanvasDx);
+        // Keep the document as the primary surface in a snapped or otherwise
+        // narrow touch window. A persisted or dragged pane may not consume
+        // more than 45% of the post-rail content area.
+        int maxSidebarDx = SidebarMaxDx(win, rc.dx);
         toc.dx = limitValue(toc.dx, kSidebarMinDx, maxSidebarDx);
         win->sidebarDx = toc.dx; // remember what's applied
 
@@ -6149,6 +6312,7 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
         if (tocVisible) {
             Rect rToc(rc.TL(), toc);
             dh.MoveWindow(win->hwndTocBox, rToc);
+            showTouchCollapse = IsTouchChrome(win) && win->touchView == TouchView::Doc && win->isFullScreen;
             if (favVisible) {
                 Rect rSplitV(rc.x, rc.y + toc.dy, toc.dx, kSplitterDy);
                 dh.MoveWindow(win->favSplitter->hwnd, rSplitV);
@@ -6159,12 +6323,30 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
             Rect rFav(rc.x, rc.y + toc.dy, toc.dx, rc.dy - toc.dy);
             dh.MoveWindow(win->hwndFavBox, rFav);
         }
-        Rect rSplitH(rc.x + toc.dx, rc.y, kSplitterDx, rc.dy);
+        int splitterHitDx = IsTouchChrome(win) ? DpiScale(win->hwndFrame, kSidebarSplitterHitDx) : kSplitterDx;
+        int splitterX = rc.x + toc.dx - (splitterHitDx - kSplitterDx) / 2;
+        Rect rSplitH(splitterX, rc.y, splitterHitDx, rc.dy);
         dh.MoveWindow(win->sidebarSplitter->hwnd, rSplitH);
 
         rc.x += toc.dx + kSplitterDx;
         rc.dx -= toc.dx + kSplitterDx;
     }
+
+    if (win->hwndTouchSidebarCollapse) {
+        // Relayout suppresses redraw on the frame above. IsWindowVisible() is
+        // therefore false for every child while this code runs, so the
+        // HwndSetVisible() no-op optimization cannot be used to hide a stale
+        // edge control: update its own WS_VISIBLE bit unconditionally.
+        ShowWindow(win->hwndTouchSidebarCollapse, showTouchCollapse ? SW_SHOW : SW_HIDE);
+        if (showTouchCollapse) {
+            int dy = DpiScale(win->hwndFrame, kSidebarCollapseDy);
+            Rect toggle{touchPanelX + win->sidebarDx - dy / 2,
+                        touchPanelY + DpiScale(win->hwndFrame, kSidebarToggleTop), dy, dy};
+            dh.MoveWindow(win->hwndTouchSidebarCollapse, toggle);
+        }
+    }
+
+    placeToolbar(rc);
 
     if (win->uiState.aiChatVisible && win->hwndAiChatBox) {
         int aiChatDx = win->aiChatDx;
@@ -6185,6 +6367,24 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     dh.MoveWindow(win->hwndCanvas, rc);
 
     dh.End();
+
+    // Keep the redesigned toolbar above the canvas on every architecture.
+    // Their rectangles do not overlap in a healthy layout, but promoting the
+    // bar also prevents a stale canvas rectangle from obscuring it while a DPI
+    // or menu-bar relayout settles.
+    if (IsTopBarVisible(win)) {
+        SetWindowPos(win->hwndTopBar, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+
+    // CreateToc() and the canvas are later siblings, so keep the wide touch
+    // splitter above both. Otherwise only the uncovered half of its nominal
+    // hit target receives input, which makes touch resizing seem intermittent.
+    if (IsTouchChrome(win) && (tocVisible || favVisible)) {
+        SetWindowPos(win->sidebarSplitter->hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    if (showTouchCollapse) {
+        SetWindowPos(win->hwndTouchSidebarCollapse, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
 
     // Canvas size/position may have changed (e.g. first open shows the ToC via
     // deferred ScheduleUiUpdate after "Errors in document" was created against
@@ -6269,6 +6469,22 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
         if (win->toolbarOverlayShown) {
             RedrawWindow(win->hwndReBar, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
         }
+    }
+
+    // The edge controls overlap independently-painted siblings. Finish any
+    // pending sibling paint first, then paint the control synchronously so its
+    // panel-side half and centered chevron cannot be covered again.
+    if (showTouchCollapse) {
+        RedrawWindow(win->hwndTocBox, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        RedrawWindow(win->sidebarSplitter->hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        SetWindowPos(win->hwndTouchSidebarCollapse, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        RedrawWindow(win->hwndTouchSidebarCollapse, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
+    }
+    if (railDx > 0 && win->hwndRail) {
+        // Paint the rail only after its final size is known. On an empty Home
+        // startup its first WM_PAINT can otherwise carry the tiny pre-layout
+        // update region, leaving most icons absent until the first hover.
+        RedrawWindow(win->hwndRail, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
     }
     return true;
 }
@@ -7818,8 +8034,7 @@ static void OnSidebarSplitterMove(Splitter::MoveEvent* ev) {
     HWND hwnd = splitter->hwnd;
     MainWindow* win = FindMainWindowByHwnd(hwnd);
 
-    Point pcur = HwndGetCursorPos(win->hwndFrame);
-    int sidebarDx = pcur.x; // without splitter
+    int sidebarDx = ev->splitterPos - GetRailDx(win);
 
     // make sure to keep this in sync with the calculations in RelayoutFrame
     // note: without the min/max(..., curDx), the sidebar will be
@@ -7827,9 +8042,8 @@ static void OnSidebarSplitterMove(Splitter::MoveEvent* ev) {
     Rect rFrame = HwndClientRect(win->hwndFrame);
     int curDx = win->sidebarDx; // don't read the toc box rect, it can be stale
     int minDx = std::min(kSidebarMinDx, curDx);
-    // match RelayoutFrame: allow wider than half window (long Favorites names)
-    constexpr int kMinDocCanvasDx = 200;
-    int maxDx = std::max(rFrame.dx - kMinDocCanvasDx, curDx);
+    int contentDx = rFrame.dx - GetRailDx(win);
+    int maxDx = std::max(SidebarMaxDx(win, contentDx), curDx);
     if (sidebarDx < minDx || sidebarDx > maxDx) {
         ev->resizeAllowed = false;
         return;
@@ -8157,7 +8371,7 @@ static void TransitionToNoTabs() {
     if (!hasFiles) {
         for (MainWindow* w : gWindows) {
             DestroyMenuBarRebar(w);
-            SetTabsInTitlebar(w, false);
+            SetTabsInTitlebar(w, WantTabsInTitlebar());
             ApplyMenuBarVisibility(w);
             ShowOrHideToolbar(w);
             ScheduleUiUpdate(w, kUiForceRelayout | kUiToolbarDirty | kUiTabsDirty);
@@ -8175,7 +8389,7 @@ static void TransitionToNoTabs() {
         if (i == 0 && surviving) {
             win = surviving;
             DestroyMenuBarRebar(win);
-            SetTabsInTitlebar(win, false);
+            SetTabsInTitlebar(win, WantTabsInTitlebar());
             ApplyMenuBarVisibility(win);
             ShowOrHideToolbar(win);
             ScheduleUiUpdate(win, kUiForceRelayout | kUiToolbarDirty | kUiTabsDirty);
@@ -9426,6 +9640,45 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
                 OnMenuViewShowHideToolbar(win);
             }
             break;
+
+        case CmdToggleTabs: {
+            bool show = !gGlobalPrefs->useTabs;
+            if (GetCommandArg(cmd, kCmdArgState)) {
+                show = GetCommandBoolArg(cmd, kCmdArgState, true);
+            }
+            gGlobalPrefs->useTabs = show;
+            for (MainWindow* w : gWindows) {
+                UpdateTabWidth(w);
+                w->uiState.layout = {};
+                ScheduleUiUpdate(w, kUiForceRelayout);
+            }
+            SaveSettings();
+            break;
+        }
+
+        case CmdTouchSidebarDensityCondensed:
+        case CmdTouchSidebarDensityNormal:
+        case CmdTouchSidebarDensityExpanded: {
+            Str density = StrL("normal");
+            if (cmdId == CmdTouchSidebarDensityCondensed) {
+                density = StrL("condensed");
+            } else if (cmdId == CmdTouchSidebarDensityExpanded) {
+                density = StrL("expanded");
+            }
+            str::ReplaceWithCopy(&gGlobalPrefs->touchSidebarDensity, density);
+            for (MainWindow* w : gWindows) {
+                if (w->tocTreeView) {
+                    TempStr filter = w->tocFilterEdit ? HwndGetTextTemp(w->tocFilterEdit->hwnd) : TempStr{};
+                    int rowDy = filter ? 52 : TouchSidebarRowDy();
+                    TreeView_SetItemHeight(w->tocTreeView->hwnd, DpiScale(w->tocTreeView->hwnd, rowDy));
+                }
+                if (w->hwndTocBox) {
+                    HwndInvalidate(w->hwndTocBox, true);
+                }
+            }
+            SaveSettings();
+            break;
+        }
 
         case CmdToggleToolbarShowReadAloud: {
             bool show = !gGlobalPrefs->toolbarShowReadAloud;
@@ -10679,7 +10932,22 @@ static void HandleCaptionClick(MainWindow* win, int btnIdx) {
         case CB_CLOSE:
             PostMessageW(win->hwndFrame, WM_SYSCOMMAND, SC_CLOSE, 0);
             break;
+        case CB_UPDATE:
+            DownloadAndInstallPendingUpdate(win);
+            break;
         case CB_MENU:
+            if (IsTouchChrome(win)) {
+                if (IsShowingMenuBarRebar(win)) {
+                    DestroyMenuBarRebar(win);
+                } else {
+                    CreateMenuBarRebar(win);
+                    ShowMenuBarRebar(win);
+                }
+                win->uiState.layout = {};
+                ScheduleUiUpdate(win, kUiForceRelayout);
+                HwndSetFocus(win->hwndFrame);
+                break;
+            }
             if (!KillTimer(win->hwndFrame, DO_NOT_REOPEN_MENU_TIMER_ID) && !win->isMenuOpen) {
                 Rect r = win->captionBtn[CB_MENU].rect;
                 win->isMenuOpen = true;
@@ -10698,6 +10966,24 @@ static void HandleCaptionClick(MainWindow* win, int btnIdx) {
 }
 
 constexpr int kTabsButtonGapX = 32;
+constexpr int kUpdateCaptionButtonDx = 88;
+
+// With the touch chrome and a single document there are no tabs worth showing,
+// so the caption becomes the redesign's slim title strip: the document name
+// and the window buttons, nothing else (4a). More than one document still gets
+// the tab strip - the tabs have to live somewhere.
+bool UseSlimCaption(MainWindow* win) {
+    if (!win || !win->tabsInTitlebar) {
+        return false;
+    }
+    if (!IsTouchChrome(win)) {
+        return false;
+    }
+    if (IsShowingMenuBarRebar(win)) {
+        return false; // the menu bar owns the caption's first row
+    }
+    return !SettingsUseTabs();
+}
 
 void RelayoutCaption(MainWindow* win) {
     for (int i = CB_BTN_FIRST; i < CB_BTN_COUNT; i++) {
@@ -10708,12 +10994,63 @@ void RelayoutCaption(MainWindow* win) {
     bool showingMenuBar = IsShowingMenuBarRebar(win);
     int tabHeight = GetTabbarHeight(win->hwndFrame);
     bool isRtl = IsUIRtl();
+    bool showUpdate = IsUpdateAvailable();
+    int updateDx = DpiScale(win->hwndFrame, kUpdateCaptionButtonDx);
+    win->captionBtn[CB_UPDATE].visible = false;
     if (IsRunningOnWine()) {
         logf("RelayoutCaption: captionRect=(%d,%d,%d,%d) tabHeight=%d showingMenuBar=%d maximized=%d\n", rc.x, rc.y,
              rc.dx, rc.dy, tabHeight, (int)showingMenuBar, (int)maximized);
     }
 
-    if (showingMenuBar) {
+    if (showingMenuBar && IsTouchChrome(win)) {
+        // 4a keeps the 36px title strip intact and reveals a separate 32px
+        // menu row beneath it. The hamburger remains in the title strip so it
+        // can hide the row again.
+        int titleDy = DpiScale(win->hwndFrame, kTitleBarDy);
+        int menuDy = GetMenuBarRebarHeight(win);
+        int btnDx = DpiScale(win->hwndFrame, kTitleBarBtnDx);
+        int x = rc.x;
+        int right = rc.x + rc.dx;
+
+        win->captionBtn[CB_SYSTEM_MENU].visible = false;
+        win->captionBtn[CB_MENU].rect = {x, rc.y, titleDy, titleDy};
+        win->captionBtn[CB_MENU].visible = true;
+        x += titleDy;
+
+        right -= btnDx;
+        win->captionBtn[CB_CLOSE].rect = {right, rc.y, btnDx, titleDy};
+        win->captionBtn[CB_CLOSE].visible = true;
+        right -= btnDx;
+        win->captionBtn[CB_RESTORE].rect = {right, rc.y, btnDx, titleDy};
+        win->captionBtn[CB_RESTORE].visible = maximized;
+        win->captionBtn[CB_MAXIMIZE].rect = {right, rc.y, btnDx, titleDy};
+        win->captionBtn[CB_MAXIMIZE].visible = !maximized;
+        right -= btnDx;
+        win->captionBtn[CB_MINIMIZE].rect = {right, rc.y, btnDx, titleDy};
+        win->captionBtn[CB_MINIMIZE].visible = true;
+        if (showUpdate) {
+            right -= updateDx;
+            win->captionBtn[CB_UPDATE].rect = {right, rc.y, updateDx, titleDy};
+            win->captionBtn[CB_UPDATE].visible = true;
+        }
+        bool showTabs = SettingsUseTabs();
+        win->titleRect = showTabs ? Rect{} : Rect{x + DpiScale(win->hwndFrame, 4), rc.y, right - x, titleDy};
+
+        DeferWinPosHelper dh;
+        int menuX = HwndMapChildXForRtlParent(win->hwndFrame, rc.x, rc.dx);
+        dh.SetWindowPos(win->hwndMenuReBar, nullptr, menuX, rc.y + titleDy, rc.dx, menuDy, SWP_NOZORDER);
+
+        if (showTabs) {
+            int tabX = HwndMapChildXForRtlParent(win->hwndFrame, x, right - x);
+            win->tabsVisible = true;
+            win->tabsCtrl->SetIsVisible(true);
+            dh.SetWindowPos(win->tabsCtrl->hwnd, nullptr, tabX, rc.y, right - x, titleDy, SWP_NOZORDER);
+        } else {
+            win->tabsVisible = false;
+            win->tabsCtrl->SetIsVisible(false);
+        }
+        dh.End();
+    } else if (showingMenuBar) {
         // Two-row layout:
         //   Row 1 (top): CB_SYSTEM_MENU, menu bar rebar, [drag area], min/max/close
         //   Row 2: tabs, [drag area]
@@ -10821,6 +11158,22 @@ void RelayoutCaption(MainWindow* win) {
             }
         }
 
+        if (showUpdate) {
+            if (hasFileTabs) {
+                tabsDx -= updateDx;
+                win->captionBtn[CB_UPDATE].rect = {tabsX + tabsDx, row2Y, updateDx, tabHeight};
+            } else if (isRtl) {
+                win->captionBtn[CB_UPDATE].rect = {row1X, row1Y, updateDx, menuBarDy};
+                row1X += updateDx;
+                row1Dx -= updateDx;
+            } else {
+                row1Dx -= updateDx;
+                win->captionBtn[CB_UPDATE].rect = {row1X + row1Dx, row1Y, updateDx, menuBarDy};
+            }
+            win->captionBtn[CB_UPDATE].visible = true;
+            menuBarWidth = std::min(menuBarWidth, row1Dx);
+        }
+
         DeferWinPosHelper dh;
         int menuBarX = HwndMapChildXForRtlParent(win->hwndFrame, row1X, menuBarWidth);
         dh.SetWindowPos(win->hwndMenuReBar, nullptr, menuBarX, row1Y, menuBarWidth, menuBarDy, SWP_NOZORDER);
@@ -10839,8 +11192,23 @@ void RelayoutCaption(MainWindow* win) {
         dh.End();
     } else {
         // Single-row layout
+        bool slim = UseSlimCaption(win);
+        bool hasDocumentTabs = false;
+        for (WindowTab* tab : win->Tabs()) {
+            if (!tab->IsNonDocumentTab()) {
+                hasDocumentTabs = true;
+                break;
+            }
+        }
+        // Tab Mode applies to documents. Home, Library, and an empty window
+        // retain the prototype's plain title strip at the Tab Mode height.
+        bool titleOnly = slim || (IsTouchChrome(win) && !hasDocumentTabs);
         int btnDy = rc.y + rc.dy;
         int btnDx = btnDy;
+        if (IsTouchChrome(win)) {
+            // the redesign's window buttons are wider than they are tall
+            btnDx = DpiScale(win->hwndFrame, kTitleBarBtnDx);
+        }
 
         // tabs fill the full caption height (rc.dy)
         int tabDy = rc.dy;
@@ -10872,13 +11240,21 @@ void RelayoutCaption(MainWindow* win) {
             x += btnDx;
 
             int right = rc.x + rc.dx;
-            right -= tabDy;
+            bool showSystemMenu = !IsTouchChrome(win);
+            if (showSystemMenu) {
+                right -= tabDy;
+            }
             win->captionBtn[CB_SYSTEM_MENU].rect = {right, tabY, tabDy, tabDy};
-            win->captionBtn[CB_SYSTEM_MENU].visible = true;
+            win->captionBtn[CB_SYSTEM_MENU].visible = showSystemMenu;
             right -= tabDy;
             win->captionBtn[CB_MENU].rect = {right, tabY, tabDy, tabDy};
             win->captionBtn[CB_MENU].visible = true;
-            right -= kTabsButtonGapX;
+            if (showUpdate) {
+                right -= updateDx;
+                win->captionBtn[CB_UPDATE].rect = {right, tabY, updateDx, tabDy};
+                win->captionBtn[CB_UPDATE].visible = true;
+            }
+            right -= IsTouchChrome(win) ? 0 : kTabsButtonGapX;
 
             tabsX = x;
             tabsDx = right - x;
@@ -10898,25 +11274,45 @@ void RelayoutCaption(MainWindow* win) {
             win->captionBtn[CB_MINIMIZE].visible = true;
             rc.dx -= btnDx;
 
+            // The slim caption drops the app-icon (window system menu, still on
+            // right-click) but keeps the hamburger: with the classic menu bar
+            // hidden it's the button that shows/hides the full menu, so it must
+            // be here.
             win->captionBtn[CB_SYSTEM_MENU].rect = {rc.x, tabY, tabDy, tabDy};
-            win->captionBtn[CB_SYSTEM_MENU].visible = true;
-            rc.x += tabDy;
-            rc.dx -= tabDy;
-
+            bool showSystemMenu = !IsTouchChrome(win);
+            win->captionBtn[CB_SYSTEM_MENU].visible = showSystemMenu;
+            if (showSystemMenu) {
+                rc.x += tabDy;
+                rc.dx -= tabDy;
+            }
             win->captionBtn[CB_MENU].rect = {rc.x, tabY, tabDy, tabDy};
             win->captionBtn[CB_MENU].visible = true;
             rc.x += tabDy;
             rc.dx -= tabDy;
 
+            if (showUpdate) {
+                rc.dx -= updateDx;
+                win->captionBtn[CB_UPDATE].rect = {rc.x + rc.dx, tabY, updateDx, tabDy};
+                win->captionBtn[CB_UPDATE].visible = true;
+            }
+
             // leave a gap between the tab bar and the minimize button
-            rc.dx -= kTabsButtonGapX;
+            rc.dx -= IsTouchChrome(win) ? 0 : kTabsButtonGapX;
             tabsX = rc.x;
             tabsDx = rc.dx;
         }
 
         DeferWinPosHelper dh;
-        int tabBarX = HwndMapChildXForRtlParent(win->hwndFrame, tabsX, tabsDx);
-        dh.SetWindowPos(win->tabsCtrl->hwnd, nullptr, tabBarX, tabY, tabsDx, tabDy, SWP_NOZORDER);
+        if (titleOnly) {
+            // no tab strip in the slim caption; the space is the title's
+            win->tabsVisible = false;
+            win->tabsCtrl->SetIsVisible(false);
+            win->titleRect = {tabsX, tabY, tabsDx, tabDy};
+        } else {
+            win->titleRect = {};
+            int tabBarX = HwndMapChildXForRtlParent(win->hwndFrame, tabsX, tabsDx);
+            dh.SetWindowPos(win->tabsCtrl->hwnd, nullptr, tabBarX, tabY, tabsDx, tabDy, SWP_NOZORDER);
+        }
         dh.End();
         if (IsRunningOnWine()) {
             logf("RelayoutCaption: singleRow btnDy=%d tabY=%d tabDy=%d tabsDx=%d\n", btnDy, tabY, tabDy, tabsDx);
@@ -10955,9 +11351,11 @@ static void DrawCaptionButton(MainWindow* win, HDC hdc, ButtonInfo* bi) {
 
     Graphics gfx(hdc);
     gfx.SetSmoothingMode(Gdiplus::SmoothingModeNone);
+    bool touchTitleStrip = IsTouchChrome(win);
+    COLORREF captionBg = touchTitleStrip ? ThemeHotBackgroundColor() : ThemeControlBackgroundColor();
 
     if (isSysButton) {
-        COLORREF bgc = ThemeControlBackgroundColor();
+        COLORREF bgc = captionBg;
         SolidBrush bgBrNormal(GdiRgbFromCOLORREF(bgc));
         gfx.FillRectangle(&bgBrNormal, rButton.x, rButton.y, rButton.dx, rButton.dy);
 
@@ -11017,7 +11415,7 @@ static void DrawCaptionButton(MainWindow* win, HDC hdc, ButtonInfo* bi) {
         int iconPx = DpiScale(win->hwndFrame, kCaptionGlyphDip);
         DrawCaptionSysButtonGlyph(hdc, kind, rc, iconCol, iconPx);
     } else if (button == CB_MENU) {
-        SolidBrush bgBrMenu(GdiRgbFromCOLORREF(ThemeControlBackgroundColor()));
+        SolidBrush bgBrMenu(GdiRgbFromCOLORREF(captionBg));
         gfx.FillRectangle(&bgBrMenu, rButton.x, rButton.y, rButton.dx, rButton.dy);
 
         if (win->isMenuOpen) {
@@ -11031,24 +11429,89 @@ static void DrawCaptionButton(MainWindow* win, HDC hdc, ButtonInfo* bi) {
         }
 
         if (buttonRGB != 1) {
-            if (GetLightness(ThemeWindowTextColor()) > GetLightness(ThemeControlBackgroundColor())) {
+            if (GetLightness(ThemeWindowTextColor()) > GetLightness(captionBg)) {
                 buttonRGB ^= 0xff;
             }
-            u8 buttonAlpha = u8((255 - abs((int)GetLightness(ThemeControlBackgroundColor()) - buttonRGB)) / 2);
+            u8 buttonAlpha = u8((255 - abs((int)GetLightness(captionBg) - buttonRGB)) / 2);
             SolidBrush br(Color(buttonAlpha, buttonRGB, buttonRGB, buttonRGB));
             gfx.FillRectangle(&br, rc.x, rc.y, rc.dx, rc.dy);
         }
         COLORREF c = ThemeWindowTextColor();
         u8 r, g, b;
         UnpackColor(c, r, g, b);
+        if (touchTitleStrip) {
+            gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            float lineWidth = (float)DpiScale(win->hwndFrame, 18) / 10.0f;
+            Pen p(Color(r, g, b), lineWidth);
+            p.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
+            int lineDx = DpiScale(win->hwndFrame, 10);
+            int lineGap = DpiScale(win->hwndFrame, 3);
+            int x1 = rc.x + (rc.dx - lineDx) / 2;
+            int x2 = x1 + lineDx;
+            int cy = rc.y + rc.dy / 2;
+            gfx.DrawLine(&p, x1, cy - lineGap, x2, cy - lineGap);
+            gfx.DrawLine(&p, x1, cy, x2, cy);
+            gfx.DrawLine(&p, x1, cy + lineGap, x2, cy + lineGap);
+            return;
+        }
         float width = floorf((float)rc.dy / 8.0f);
         Pen p(Color(r, g, b), width);
         rc.Inflate(-(int)lroundf((float)rc.dx * 0.2f), -(int)lroundf((float)rc.dy * 0.3f));
         for (int i = 0; i < 3; i++) {
             gfx.DrawLine(&p, rc.x, rc.y + (i * rc.dy / 2), rc.x + rc.dx, rc.y + (i * rc.dy / 2));
         }
+    } else if (button == CB_UPDATE) {
+        int insetX = DpiScale(win->hwndFrame, 4);
+        int maxPillDy = DpiScale(win->hwndFrame, 32);
+        int pillDy = std::min(maxPillDy, rButton.dy - DpiScale(win->hwndFrame, 6));
+        Rect pill{rButton.x + insetX, rButton.y + (rButton.dy - pillDy) / 2, rButton.dx - (2 * insetX), pillDy};
+
+        COLORREF bg = RgbToCOLORREF(0xb4530a);
+        COLORREF fg = RGB(255, 255, 255);
+        if (stateId == CBS_PUSHED) {
+            bg = AccentColor(bg, 18);
+        } else if (stateId == CBS_HOT) {
+            bg = AccentColor(bg, 10);
+        } else if (stateId == CBS_INACTIVE) {
+            bg = AccentColor(bg, 4);
+        }
+
+        int radius = pill.dy / 2;
+        int d = radius * 2;
+        Gdiplus::GraphicsPath path;
+        path.AddArc(pill.x, pill.y, d, d, 180.0f, 90.0f);
+        path.AddArc(pill.x + pill.dx - d, pill.y, d, d, 270.0f, 90.0f);
+        path.AddArc(pill.x + pill.dx - d, pill.y + pill.dy - d, d, d, 0.0f, 90.0f);
+        path.AddArc(pill.x, pill.y + pill.dy - d, d, d, 90.0f, 90.0f);
+        path.CloseFigure();
+        SolidBrush pillBrush(GdiRgbFromCOLORREF(bg));
+        gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        gfx.FillPath(&pillBrush, &path);
+
+        u8 fr, fgreen, fb;
+        UnpackColor(fg, fr, fgreen, fb);
+        Pen iconPen(Color(fr, fgreen, fb), (Gdiplus::REAL)std::max(1, DpiScale(win->hwndFrame, 2)));
+        iconPen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
+        int iconX = pill.x + DpiScale(win->hwndFrame, 10);
+        int iconCy = pill.y + pill.dy / 2;
+        int arm = DpiScale(win->hwndFrame, 3);
+        int stemTop = iconCy - DpiScale(win->hwndFrame, 6);
+        int stemBottom = iconCy + DpiScale(win->hwndFrame, 2);
+        gfx.DrawLine(&iconPen, iconX + arm, stemTop, iconX + arm, stemBottom);
+        gfx.DrawLine(&iconPen, iconX, stemBottom - arm, iconX + arm, stemBottom);
+        gfx.DrawLine(&iconPen, iconX + (2 * arm), stemBottom - arm, iconX + arm, stemBottom);
+        gfx.DrawLine(&iconPen, iconX, iconCy + DpiScale(win->hwndFrame, 6), iconX + (2 * arm),
+                     iconCy + DpiScale(win->hwndFrame, 6));
+
+        Rect label = pill;
+        label.x = iconX + (2 * arm) + DpiScale(win->hwndFrame, 4);
+        label.dx = pill.x + pill.dx - label.x - DpiScale(win->hwndFrame, 7);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, fg);
+        HdcDrawText(hdc, _TRA("Update"), label, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, 12, FW_SEMIBOLD));
     } else if (button == CB_SYSTEM_MENU) {
-        SolidBrush bgBrSys(GdiRgbFromCOLORREF(ThemeControlBackgroundColor()));
+        SolidBrush bgBrSys(GdiRgbFromCOLORREF(captionBg));
         gfx.FillRectangle(&bgBrSys, rButton.x, rButton.y, rButton.dx, rButton.dy);
         int xIcon = DpiGetSystemMetrics(win->hwndFrame, SM_CXSMICON);
         int yIcon = DpiGetSystemMetrics(win->hwndFrame, SM_CYSMICON);
@@ -11129,11 +11592,27 @@ static LRESULT CustomCaptionFrameProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             if (isRtl) {
                 SetLayout(memDC, 0);
             }
+            bool touchTitleStrip = IsTouchChrome(win);
             {
-                HBRUSH brCap = CreateSolidBrush(ThemeControlBackgroundColor());
+                // the slim title strip sits on the same surface as the rail
+                // and the panel, a step back from the toolbar below it
+                COLORREF capBg = touchTitleStrip ? ThemeHotBackgroundColor() : ThemeControlBackgroundColor();
+                HBRUSH brCap = CreateSolidBrush(capBg);
                 RECT rcFill = ToRECT(captionArea);
                 HdcFillRect(memDC, ToRect(rcFill), brCap);
                 DeleteObject(brCap);
+            }
+            if (touchTitleStrip && !win->titleRect.IsEmpty()) {
+                WindowTab* tab = win->CurrentTab();
+                Str title = tab ? tab->GetTabTitle() : Str();
+                Str caption = title ? fmt("%s  —  %s", title, StrL(kAppName)) : StrL(kAppName);
+                SetBkMode(memDC, TRANSPARENT);
+                SetTextColor(memDC, ThemeWindowDarkerTextColor());
+                Rect rTitle = win->titleRect;
+                rTitle.x += DpiScale(win->hwndFrame, kTitleBarPadX);
+                rTitle.dx -= DpiScale(win->hwndFrame, kTitleBarPadX);
+                uint fmtFlags = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX;
+                HdcDrawText(memDC, caption, rTitle, fmtFlags, HdcGetUiFont(memDC, kFontSizeMeta));
             }
             for (int i = CB_BTN_FIRST; i < CB_BTN_COUNT; i++) {
                 DrawCaptionButton(win, memDC, &win->captionBtn[i]);
@@ -11363,6 +11842,7 @@ static LRESULT CustomCaptionFrameProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             break;
 
         case WM_LBUTTONDOWN: {
+            CloseTouchDocumentOverlays(win);
             Point ptd{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             int btnIdx = CaptionButtonAt(win, ptd);
             if (btnIdx >= 0) {

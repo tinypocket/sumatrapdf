@@ -2083,6 +2083,9 @@ Rect ChildPosWithinParent(HWND hwnd) {
 
 constexpr u16 kFontFlagItalic = 0x01;
 constexpr u16 kFontFlagBold = 0x02;
+// keeps HdcGetUiFont's cache entries distinct from the by-name ones, which
+// share the empty name for the default GUI font
+constexpr u16 kFontFlagUi = 0x04;
 
 struct CreatedFontInfo {
     CreatedFontInfo* next = nullptr;
@@ -2152,10 +2155,17 @@ HFONT GetMenuFont() {
 }
 
 HFONT HdcCreateSimpleFont(HDC hdc, Str fontName, int fontSizePt) {
+    return HdcCreateSimpleFontWeight(hdc, fontName, fontSizePt, FW_DONTCARE);
+}
+
+// weight is an FW_* value (FW_SEMIBOLD etc). A design that carries its
+// hierarchy in weight as well as size needs this; the font cache already keys
+// on weight, so repeated calls are cheap.
+HFONT HdcCreateSimpleFontWeight(HDC hdc, Str fontName, int fontSizePt, int weight) {
     int realSize = MulDiv(fontSizePt, GetDeviceCaps(hdc, LOGPIXELSY), USER_DEFAULT_SCREEN_DPI);
 
     u16 flags = 0;
-    auto* f = FindCreatedFont(fontName, realSize, flags, 0);
+    auto* f = FindCreatedFont(fontName, realSize, flags, (u16)weight);
     if (f) {
         return f->font;
     }
@@ -2173,13 +2183,35 @@ HFONT HdcCreateSimpleFont(HDC hdc, Str fontName, int fontSizePt) {
     lf.lfQuality = DEFAULT_QUALITY;
     lf.lfPitchAndFamily = DEFAULT_PITCH;
     wstr::BufSet(WStr(lf.lfFaceName, dimof(lf.lfFaceName)), fontNameW);
-    lf.lfWeight = FW_DONTCARE;
+    lf.lfWeight = weight;
     lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
     lf.lfEscapement = 0;
     lf.lfOrientation = 0;
 
     HFONT res = CreateFontIndirectW(&lf);
-    return RememberCreatedFont(res, fontName, realSize, flags, 0);
+    return RememberCreatedFont(res, fontName, realSize, flags, (u16)weight);
+}
+
+// The UI font (Segoe UI on modern Windows) at a given size and weight. Prefer
+// this over HdcCreateSimpleFont(hdc, "MS Shell Dlg", ...) for anything drawn
+// next to the rest of the UI: "MS Shell Dlg" resolves to MS Sans Serif /
+// Tahoma, so text drawn with it is a different, older typeface than every
+// control around it - and it has no semibold for a weight to resolve to.
+HFONT HdcGetUiFont(HDC hdc, int sizePx, int weight) {
+    int realSize = MulDiv(sizePx, GetDeviceCaps(hdc, LOGPIXELSY), USER_DEFAULT_SCREEN_DPI);
+    auto* f = FindCreatedFont(Str(), realSize, kFontFlagUi, (u16)weight);
+    if (f) {
+        return f->font;
+    }
+    NONCLIENTMETRICS ncm = {};
+    ncm.cbSize = sizeof(ncm);
+    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    ncm.lfMessageFont.lfHeight = -realSize;
+    if (weight != FW_DONTCARE) {
+        ncm.lfMessageFont.lfWeight = weight;
+    }
+    HFONT res = CreateFontIndirectW(&ncm.lfMessageFont);
+    return RememberCreatedFont(res, Str(), realSize, kFontFlagUi, (u16)weight);
 }
 
 HFONT GetDefaultGuiFontOfSize(int size) {
@@ -2234,6 +2266,33 @@ HFONT GetUserGuiFontEx(Str fontName, int size, bool bold, bool italic) {
     }
     HFONT res = CreateFontIndirectW(&ncm.lfMessageFont);
     return RememberCreatedFont(res, fontName, size, flags, 0);
+}
+
+// like GetUserGuiFontEx but takes an explicit FW_* weight, so a caller can ask
+// for semibold (600) instead of only regular/bold. Cached like the others.
+HFONT GetUserGuiFontWeight(Str fontName, int size, int weight, bool italic) {
+    if (str::EqI(fontName, StrL("automatic")) || str::EqI(fontName, StrL("auto"))) {
+        fontName = Str();
+    }
+    u16 flags = italic ? kFontFlagItalic : 0;
+    auto* f = FindCreatedFont(fontName, size, flags, (u16)weight);
+    if (f) {
+        return f->font;
+    }
+    NONCLIENTMETRICS ncm = {};
+    ncm.cbSize = sizeof(ncm);
+    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    if (len(fontName) > 0) {
+        TempWStr nameW = ToWStrTemp(fontName);
+        wstr::BufSet(WStr(ncm.lfMessageFont.lfFaceName, dimof(ncm.lfMessageFont.lfFaceName)), nameW);
+    }
+    ncm.lfMessageFont.lfHeight = -size;
+    ncm.lfMessageFont.lfWeight = weight;
+    if (italic) {
+        ncm.lfMessageFont.lfItalic = TRUE;
+    }
+    HFONT res = CreateFontIndirectW(&ncm.lfMessageFont);
+    return RememberCreatedFont(res, fontName, size, flags, (u16)weight);
 }
 
 HFONT GetDefaultGuiFont(bool bold, bool italic) {
@@ -3679,6 +3738,55 @@ int HdcDrawText(HDC hdc, WStr s, const Rect& r, uint format, HFONT font) {
 
 int HdcDrawText(HDC hdc, Str s, const Rect& r, uint format, HFONT font) {
     return HdcDrawText(hdc, ToWStrTemp(s), r, format, font);
+}
+
+// Draws text with tabular (fixed-advance) digits: every digit takes the width
+// of a '0', so columns of numbers line up. GDI's DrawText can't set the
+// OpenType tabular-nums feature, so the run is spaced by hand with ExtTextOut.
+// Honors DT_LEFT / DT_RIGHT / DT_CENTER and DT_VCENTER; uses the caller's text
+// color and background mode.
+void HdcDrawTextTabular(HDC hdc, Str s, const Rect& r, uint format, HFONT font) {
+    if (len(s) == 0) {
+        return;
+    }
+    ScopedSelectFont f(hdc, font);
+    WStr ws = ToWStrTemp(s);
+    int n = (int)ws.len;
+
+    SIZE zsz{};
+    GetTextExtentPoint32W(hdc, L"0", 1, &zsz);
+    int zeroW = zsz.cx;
+
+    INT* dx = AllocArrayTemp<INT>(n);
+    int total = 0;
+    for (int i = 0; i < n; i++) {
+        WCHAR c = ws.s[i];
+        int w;
+        if (c >= L'0' && c <= L'9') {
+            w = zeroW;
+        } else {
+            SIZE cs{};
+            GetTextExtentPoint32W(hdc, &c, 1, &cs);
+            w = cs.cx;
+        }
+        dx[i] = w;
+        total += w;
+    }
+
+    TEXTMETRICW tm{};
+    GetTextMetricsW(hdc, &tm);
+    int y = r.y;
+    if (format & DT_VCENTER) {
+        y = r.y + ((r.dy - tm.tmHeight) / 2);
+    }
+    int x = r.x;
+    if (format & DT_RIGHT) {
+        x = r.x + r.dx - total;
+    } else if (format & DT_CENTER) {
+        x = r.x + ((r.dx - total) / 2);
+    }
+    RECT clip = ToRECT(r);
+    ExtTextOutW(hdc, x, y, ETO_CLIPPED, &clip, ws.s, n, dx);
 }
 
 int HdcDrawText(HDC hdc, Str s, const Point& pos, uint format, HFONT font) {

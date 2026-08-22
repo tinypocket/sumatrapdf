@@ -30,6 +30,7 @@
 #include "SearchAndDDE.h"
 #include "Selection.h"
 #include "Toolbar.h"
+#include "TopBar.h"
 #include "FindBar.h"
 #include "FindWindow.h"
 #include "Favorites.h"
@@ -877,6 +878,9 @@ static void CountEndTask(CountEndTaskData* d) {
         }
         InvalidateFindMatchPaintCache();
         ShowMatchCount(win);
+        if (win->hwndTocBox && win->touchPanelMode == TouchPanelMode::Search) {
+            HwndInvalidate(win->hwndTocBox, false);
+        }
         // Enable/disable Find Next/Prev once we know whether any matches exist.
         ToolbarUpdateStateForWindow(win, false);
         ScheduleRepaint(win, 0);
@@ -1004,6 +1008,9 @@ static void CountPartialTask(CountPartialTaskData* d) {
         InvalidateFindMatchPaintCache();
         FindWindowRefreshResults(win, false /* allowNavigation */);
         ScheduleRepaint(win, 0);
+        if (win->hwndTocBox && win->touchPanelMode == TouchPanelMode::Search) {
+            HwndInvalidate(win->hwndTocBox, false);
+        }
     }
 }
 
@@ -1172,7 +1179,9 @@ static void StartFindCount(MainWindow* win, Str text, bool matchCase, bool match
     engine->AddRef(); // released in CountThread
     // always build the match list so PaintAllFindMatches can highlight every hit;
     // snippets only when the floating results list is showing
-    bool wantSnippets = gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win);
+    bool embeddedResults =
+        IsTouchChrome(win) && win->uiState.tocVisible && win->touchPanelMode == TouchPanelMode::Search;
+    bool wantSnippets = (gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win)) || embeddedResults;
     bool wantMatchList = true;
     int epoch = AtomicIntInc(&win->findCountEpoch);
     int startPage = win->ctrl ? win->ctrl->CurrentPageNo() : 1;
@@ -1189,7 +1198,9 @@ static void StartFindCount(MainWindow* win, Str text, bool matchCase, bool match
 static void UpdateMatchCount(MainWindow* win, Str text) {
     DisplayModel* dm = win->AsFixed();
     void* engine = dm ? (void*)dm->GetEngine() : nullptr;
-    bool wantSnippets = gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win);
+    bool embeddedResults =
+        IsTouchChrome(win) && win->uiState.tocVisible && win->touchPanelMode == TouchPanelMode::Search;
+    bool wantSnippets = (gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win)) || embeddedResults;
     bool wantMatchList = true;
     bool cacheHit = win->findCountValid && win->findCountText && str::Eq(win->findCountText, text) &&
                     win->findCountMatchCase == win->findMatchCase &&
@@ -1203,6 +1214,14 @@ static void UpdateMatchCount(MainWindow* win, Str text) {
     } else {
         StartFindCount(win, text, win->findMatchCase, win->findMatchWholeWord);
     }
+}
+
+void SearchDocumentFromTouchPanel(MainWindow* win, Str text) {
+    if (!win || !text) {
+        return;
+    }
+    FindTextOnThread(win, TextSearch::Direction::Forward, text, true, false);
+    UpdateMatchCount(win, text);
 }
 
 static void CancelPendingFind(MainWindow* win);
@@ -1242,6 +1261,9 @@ void GoToFindMatch(MainWindow* win, int startPage, int startGlyph, int endPage, 
     ts->StartAt(startPage, startGlyph);
     ts->SelectUpTo(endPage, endGlyph);
     if (ts->result.len == 0) {
+        // The saved glyph range can become stale while a long find-all is
+        // running. A result activation must still navigate to its page.
+        win->ctrl->GoToPage(startPage, true);
         return;
     }
     // navigate to the match while ts->result is still populated. SetLastResult()

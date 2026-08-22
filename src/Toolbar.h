@@ -28,6 +28,10 @@ constexpr int kDelayToolbarHide = 500;
 void UpdateToolbarState(MainWindow*);
 void UpdateToolbarAfterThemeChange(MainWindow*);
 HIMAGELIST BuildStdToolbarImageList(int dx);
+HIMAGELIST BuildTintedToolbarImageList(int dx, COLORREF fgCol, COLORREF bgCol);
+// cached variant; use this for anything drawn per paint
+HIMAGELIST GetTintedToolbarImageList(int dy, COLORREF fg, COLORREF bg);
+void FreeTintedToolbarImageLists();
 Rect GetToolbarButtonScreenRect(MainWindow*, int cmdId);
 
 TempStr ToolbarButtonsResultTemp(int* exitCodeOut);

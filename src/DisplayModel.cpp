@@ -704,14 +704,14 @@ float DisplayModel::ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) co
         zoomVirtual = kZoomFitPage;
     }
     if (zoomVirtual != kZoomFitWidth && zoomVirtual != kZoomFitHeight && zoomVirtual != kZoomFitPage &&
-        zoomVirtual != kZoomFitContent) {
+        zoomVirtual != kZoomFitContent && zoomVirtual != kZoomSmartWidth) {
         return zoomVirtual * 0.01f * dpiFactor;
     }
 
     SizeF row;
     int columns = ColumnsFromDisplayMode(GetDisplayMode());
 
-    bool fitToContent = (kZoomFitContent == zoomVirtual);
+    bool fitToContent = kZoomFitContent == zoomVirtual || kZoomSmartWidth == zoomVirtual;
     if (fitToContent && columns > 1) {
         // Fit the content of all the pages in the same row into the visible area
         // (i.e. don't crop inner margins but just the left-most, right-most, etc.)
@@ -756,7 +756,7 @@ float DisplayModel::ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) co
     float zoomY = (float)areaForPagesDy / row.dy;
     float zoom;
     // NOLINTNEXTLINE(bugprone-branch-clone): distinct fit modes that happen to pick the same axis
-    if (kZoomFitWidth == zoomVirtual) {
+    if (kZoomFitWidth == zoomVirtual || kZoomSmartWidth == zoomVirtual) {
         zoom = zoomX;
     } else if (kZoomFitHeight == zoomVirtual) { // NOLINT(bugprone-branch-clone)
         zoom = zoomY;                           // issue #1714
@@ -846,14 +846,32 @@ void DisplayModel::CalcZoomReal(float newZoomVirtual) {
         }
         ReportIf(minZoom == (float)HUGE_VAL);
         zoomReal = minZoom;
-    } else if (kZoomFitContent == newZoomVirtual) {
-        float newZoom = ZoomRealFromVirtualForPage(newZoomVirtual, CurrentPageNo());
+    } else if (kZoomFitContent == newZoomVirtual || kZoomSmartWidth == newZoomVirtual) {
+        int currentPage = CurrentPageNo();
+        float newZoom = ZoomRealFromVirtualForPage(newZoomVirtual, currentPage);
+        if (kZoomSmartWidth == newZoomVirtual) {
+            // Smart Width looks at nearby pages and uses the widest inked area.
+            // That keeps ordinary page turns from changing scale because one
+            // page happens to have a slightly different crop or margin.
+            int firstPage = std::max(1, currentPage - 2);
+            int lastPage = std::min(nPages, currentPage + 2);
+            for (int pageNo = firstPage; pageNo <= lastPage; pageNo++) {
+                float pageZoom = ZoomRealFromVirtualForPage(newZoomVirtual, pageNo);
+                if (pageZoom > 0) {
+                    newZoom = std::min(newZoom, pageZoom);
+                }
+            }
+        }
         // limit zooming in to 800% on almost empty pages
         newZoom = std::min(newZoom, 8.0f);
-        // don't zoom in by just a few pixels (throwing away a prerendered page)
-        if (newZoom < zoomReal || zoomReal / newZoom < 0.95 ||
-            zoomReal < ZoomRealFromVirtualForPage(kZoomFitPage, CurrentPageNo())) {
+        if (kZoomSmartWidth == newZoomVirtual) {
             zoomReal = newZoom;
+        } else {
+            // don't zoom in by just a few pixels (throwing away a prerendered page)
+            if (newZoom < zoomReal || zoomReal / newZoom < 0.95 ||
+                zoomReal < ZoomRealFromVirtualForPage(kZoomFitPage, currentPage)) {
+                zoomReal = newZoom;
+            }
         }
         ReportIf(zoomReal < 0.01f);
         for (int pageNo = 1; pageNo <= nPages; pageNo++) {
@@ -1291,7 +1309,7 @@ void DisplayModel::SetViewPortSize(Size newViewPortSize) {
 
     if (isDocReady) {
         // when fitting to content, let GoToPage do the necessary scrolling
-        if (zoomVirtual != kZoomFitContent) {
+        if (zoomVirtual != kZoomFitContent && zoomVirtual != kZoomSmartWidth) {
             SetScrollState(ss);
         } else {
             GoToPage(ss.page, 0);
@@ -1357,7 +1375,7 @@ void DisplayModel::GoToPage(int pageNo, int scrollY, bool addNavPt, int scrollX)
         /* in single page mode going to another page involves recalculating
            the size of canvas */
         ChangeStartPage(pageNo);
-    } else if (kZoomFitContent == zoomVirtual) {
+    } else if (kZoomFitContent == zoomVirtual || kZoomSmartWidth == zoomVirtual) {
         // make sure that CalcZoomReal uses the correct page to calculate
         // the zoom level for (visibility will be recalculated below anyway)
         for (int i = PageCount(); i > 0; i--) {
@@ -1368,8 +1386,10 @@ void DisplayModel::GoToPage(int pageNo, int scrollY, bool addNavPt, int scrollX)
     // lf("DisplayModel::GoToPage(pageNo=%d, scrollY=%d)", pageNo, scrollY);
     PageInfo* pageInfo = GetPageInfo(pageNo);
 
-    // intentionally ignore scrollX and scrollY when fitting to content
-    if (kZoomFitContent == zoomVirtual) {
+    bool fitContent = kZoomFitContent == zoomVirtual;
+    bool smartWidth = kZoomSmartWidth == zoomVirtual;
+    // intentionally ignore scrollX and scrollY when fitting to inked content
+    if (fitContent || smartWidth) {
         // scroll down to where the actual content starts
         Point start = GetContentStart(pageNo);
         scrollX = start.x;
@@ -1382,7 +1402,32 @@ void DisplayModel::GoToPage(int pageNo, int scrollY, bool addNavPt, int scrollX)
             Point second = GetContentStart(lastPageNo);
             scrollY = std::min(scrollY, second.y);
         }
-        viewPort.x = scrollX + pageInfo->pos.x - windowMargin.left;
+        if (smartWidth) {
+            int columns = ColumnsFromDisplayMode(GetDisplayMode());
+            int lastPageNo = LastPageInARowNo(pageNo, columns, IsBookView(GetDisplayMode()), PageCount());
+            float contentLeft = (float)HUGE_VAL;
+            float contentRight = (float)-HUGE_VAL;
+            for (int rowPageNo = pageNo; rowPageNo <= lastPageNo; rowPageNo++) {
+                PageInfo* rowPageInfo = GetPageInfo(rowPageNo);
+                if (!rowPageInfo) {
+                    // LastPageInARowNo can name a page past the count in
+                    // book/multi-column layouts; GetPageInfo returns null then
+                    continue;
+                }
+                RectF box = GetContentBox(rowPageNo);
+                if (box.IsEmpty()) {
+                    box = RectF(0, 0, (float)rowPageInfo->pos.dx, (float)rowPageInfo->pos.dy);
+                }
+                contentLeft = std::min(contentLeft, rowPageInfo->pos.x + box.x);
+                contentRight = std::max(contentRight, rowPageInfo->pos.x + box.x + box.dx);
+            }
+            int areaDx = viewPort.dx - windowMargin.left - windowMargin.right;
+            int contentDx = (int)(contentRight - contentLeft + 0.5f);
+            int centeredInset = windowMargin.left + std::max(0, areaDx - contentDx) / 2;
+            viewPort.x = (int)(contentLeft + 0.5f) - centeredInset;
+        } else {
+            viewPort.x = scrollX + pageInfo->pos.x - windowMargin.left;
+        }
     } else if (-1 != scrollX) {
         viewPort.x = scrollX;
     } else if (1 == pageNo && IsBookView(GetDisplayMode())) {
@@ -1393,7 +1438,7 @@ void DisplayModel::GoToPage(int pageNo, int scrollY, bool addNavPt, int scrollX)
         viewPort.x = pageInfo->pos.x;
     }
     // make sure to scroll to the correct page
-    if (-1 != scrollX && scrollToNextPage) {
+    if (-1 != scrollX && scrollToNextPage && !smartWidth) {
         viewPort.x += pageInfo->pos.dx;
     }
 
@@ -1711,7 +1756,7 @@ void DisplayModel::SetZoomVirtual(float zoomLevel, Point* fixPt) {
     }
 
     bool scrollToFitPage = kZoomFitPage == zoomLevel || kZoomFitHeight == zoomLevel || kZoomFitContent == zoomLevel ||
-                           kZoomShrinkToFit == zoomLevel;
+                           kZoomSmartWidth == zoomLevel || kZoomShrinkToFit == zoomLevel;
     if (zoomVirtual == zoomLevel && (fixPt || !scrollToFitPage)) {
         return;
     }
@@ -2178,7 +2223,8 @@ void DisplayModel::ScrollTo(int pageNo, RectF rect, float zoom) {
     // FitContent uses CurrentPageNo() for the content box, so switch page first
     // for virtual modes, then apply zoom, then fine-tune scroll.
     bool isVirtualZoom = zoom == kZoomFitPage || zoom == kZoomFitWidth || zoom == kZoomFitHeight ||
-                         zoom == kZoomFitContent || zoom == kZoomShrinkToFit || zoom == kZoomFitByOrientation;
+                         zoom == kZoomFitContent || zoom == kZoomSmartWidth || zoom == kZoomShrinkToFit ||
+                         zoom == kZoomFitByOrientation;
     bool isAbsZoom = zoom > 0;
 
     if (isVirtualZoom) {

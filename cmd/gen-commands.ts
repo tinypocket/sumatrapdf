@@ -271,6 +271,10 @@ export const commands = [
     "CmdDebugToggleDpiOverride", "Debug: Toggle DPI Override",
     "CmdToggleImages", "Toggle Show Images",
     "CmdSelectTextViaKeyboard", "Select Text With Keyboard",
+    "CmdToggleTabs", "Show Tabs",
+    "CmdTouchSidebarDensityCondensed", "Sidebar Rows: Condensed",
+    "CmdTouchSidebarDensityNormal", "Sidebar Rows: Normal",
+    "CmdTouchSidebarDensityExpanded", "Sidebar Rows: Expanded",
     "CmdNone", "Do nothing",
 ];
 

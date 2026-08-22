@@ -4,6 +4,11 @@
 
 Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 
+- The touch-friendly interface can show or hide browser-style document tabs from **View / Show Tabs**.
+- SumatraPDF checks for updates once at startup and, when one is available, shows a compact **Update** button beside the document tabs. The download starts only after the button is clicked. Private deployments can set `UpdateFeedURL` to use a same-origin, same-signer installer feed from an internal HTTPS or Tailscale server.
+- This fork installs as **SumatraPDF+** under its own application directory and Windows registration, allowing it to coexist with an official SumatraPDF installation.
+- SumatraPDF+ starts with a clean workspace instead of reopening the previous session. Opened documents remain available in **Recent**, and session restoration can still be explicitly enabled with `RestoreSession = true`.
+
 - Navigate Files in Folder is a normal modeless window that stays open (no longer a popup that closes when it loses focus or after opening a file); Esc or the close button dismisses it, and Enter / double-click replaces the document in the current tab, while `Ctrl + Enter` / `Ctrl + double-click` switches to the tab already showing that file, or opens it in a new tab. `Alt + Up` goes to the parent directory (like Explorer), as does the `..` entry. `Del` moves the selected file to the recycle bin without asking (directories are not deleted); if that file is open in a tab, the tab closes first. The window uses the app icon and the regular UI font (fixes #5877). The listing re-reads the directory whenever the window is activated or the command is invoked again, so files renamed (`F2`), added or removed meanwhile show up; `F5` refreshes on demand (fixes #5878). It also works on the home page — there's a **Navigate Files in Folder** link next to **Open a document...** — starting in the folder of the most recently opened document
 - Renamed the companion engine DLL from `libmupdf.dll` to `libsumatrapdf.dll` (through 3.6 the name was `libmupdf.dll`; 3.7 and later use `libsumatrapdf.dll`). Installer upgrades move the old name aside; see [Portable vs installer](SumatraPDF-portable.md) and [Failed to load libsumatrapdf.dll](Failed-to-load-libmupdf.md)
 - Themes can set optional UI colors (`DisabledTextColor`, `DarkerTextColor`, `HotBackgroundColor`, `EdgeColor`, `HotEdgeColor`, `DisabledEdgeColor`, `ErrorBackgroundColor`, and notification highlight colors) so disabled and hover states are not derived only from `TextColor` / backgrounds; built-in themes (including Dracula) set them so tinted foregrounds no longer look muddy yellow (issue #4721)
@@ -156,6 +161,10 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - `CmdZoomFitHeight` : "Zoom: Fit Height" — scale page height to the window (fixes #1714)
 - `CmdSelectTextViaKeyboard` : "Select Text With Keyboard" (`F7`) — caret browsing: move a text caret with the arrows and select without the mouse (fixes #4684, #4116)
 - `CmdToggleKeyboardLinkFollowing` : "Follow Link With Keyboard" (`Shift + F`) — numbers the links on screen 1..9, a digit follows one (fixes #2629)
+- `CmdToggleTabs` : "Show Tabs" — show or hide document tabs in the title bar
+- `CmdTouchSidebarDensityCondensed` : "Sidebar Rows: Condensed"
+- `CmdTouchSidebarDensityNormal` : "Sidebar Rows: Normal"
+- `CmdTouchSidebarDensityExpanded` : "Sidebar Rows: Expanded"
 - `CmdFindToggleMatchWholeWord` : "Find: Toggle Match Whole Word" — Find bar toggle button
 - `CmdGoToNextFavorite` : "Go to Next Favorite"
 - `CmdNavigateFilesInFolder` : "Navigate Files in Folder" (`Ctrl + Shift + Up`) — directory browser for openable files (stays open; Enter/double-click replaces the current tab or enters a directory, `Ctrl + Enter`/`Ctrl + double-click` uses an existing or new tab, `..` goes up, `Del` deletes the selected file, `F5` refreshes, Esc closes)

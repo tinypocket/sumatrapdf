@@ -29,6 +29,21 @@ constexpr const char* kLinkHomeListView = "<HomePage,ListView>";
 constexpr const char* kLinkHomeThumbnailView = "<HomePage,ThumbnailView>";
 constexpr const char* kLinkHomeRemoveFilePrefix = "<HomePage,RemoveFile>";
 constexpr const char* kLinkHomePinFilePrefix = "<HomePage,PinFile>";
+constexpr const char* kLinkHomeOpenTabPrefix = "<HomePage,OpenTab>";
+constexpr const char* kLinkHomeCloseTabPrefix = "<HomePage,CloseTab>";
+constexpr const char* kLinkLibraryFolderPrefix = "<Library,Folder>";
+constexpr const char* kLinkLibraryTogglePrefix = "<Library,Toggle>";
+constexpr const char* kLinkLibraryAddFolder = "<Library,AddFolder>";
+constexpr const char* kLinkLibraryMenuPrefix = "<Library,Menu>";
+constexpr const char* kLinkLibraryPinPrefix = "<Library,Pin>";
+constexpr const char* kLinkLibraryHidePrefix = "<Library,Hide>";
+constexpr const char* kLinkLibraryManage = "<Library,Manage>";
+constexpr const char* kLinkLibraryManageDone = "<Library,ManageDone>";
+constexpr const char* kLinkLibraryRemoveRootPrefix = "<Library,RemoveRoot>";
+constexpr const char* kLinkLibraryUnhidePrefix = "<Library,Unhide>";
+constexpr const char* kLinkLibraryClearSearch = "<Library,ClearSearch>";
+constexpr const char* kLinkLibraryContentView = "<Library,ContentView>";
+constexpr const char* kLinkLibraryListView = "<Library,ListView>";
 
 void SetPromoString(Str s);
 void FreeHomePageTips();
@@ -38,9 +53,19 @@ void HomePageInvalidateLayoutCache();
 void DrawHomePage(MainWindow* win, HDC hdc);
 void PickAnotherRandomPromotion();
 void HomePageOnVScroll(MainWindow* win, WPARAM wp);
-void HomePageOnMouseWheel(MainWindow* win, int delta);
+void HomePageOnMouseWheel(MainWindow* win, int delta, Point canvasPt);
+void HomePageOnMouseHWheel(MainWindow* win, int delta);
+bool HomePageOnLibraryResizeMouse(MainWindow* win, UINT msg, int x, int y);
+bool HomePageSetLibraryResizeCursor(MainWindow* win);
+bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Point* tapPt);
 void HomePageFocusSearch(MainWindow* win);
 void HomePageDestroySearch(MainWindow* win);
+void HomePageInvalidateLibrary();
+void AddTouchLibraryFolder(MainWindow* win);
+bool HandleTouchLibraryLink(MainWindow* win, Str url);
+void SelectTouchLibraryFolder(MainWindow* win, Str folderPath);
+bool CloseTouchLibraryTransientUi(MainWindow* win);
+bool HandleTouchHomeLink(MainWindow* win, Str url);
 
 // keyboard navigation of the file list (issue #1136). dCol/dRow are in grid
 // steps; in list view only dRow matters. Moving up past the first row puts

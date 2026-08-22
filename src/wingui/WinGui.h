@@ -604,6 +604,9 @@ struct Splitter : Wnd {
         SplitterType type = SplitterType::Horiz;
         bool isLive = true;
         COLORREF backgroundColor = kColorUnset;
+        int paintThickness = 0; // 0 paints the full hit target
+        bool transparentBackground = false;
+        int dragThreshold = 0;
     };
 
     // called when user drags the splitter ('finishedDragging' is false) and when drag is finished ('finishedDragging'
@@ -614,12 +617,16 @@ struct Splitter : Wnd {
         bool finishedDragging = false;
         // user can set to false to forbid resizing here
         bool resizeAllowed = true;
+        int splitterPos = 0;
     };
 
     using MoveHandler = Func1<MoveEvent*>;
 
     SplitterType type = SplitterType::Horiz;
     bool isLive = true;
+    int paintThickness = 0;
+    bool transparentBackground = false;
+    int dragThreshold = 0;
     MoveHandler onMove;
 
     HBITMAP bmp = nullptr;
@@ -629,6 +636,10 @@ struct Splitter : Wnd {
     HWND resizeOverlayHwnd = nullptr;
     bool isMouseOver = false;
     bool mouseTracking = false;
+    bool isDragging = false;
+    Point dragStartPos{};
+    int dragStartSplitterPos = 0;
+    UINT32 activePointerId = 0;
 
     Splitter();
     ~Splitter() override;
@@ -648,6 +659,15 @@ struct TreeView : Wnd {
         DWORD exStyle = 0; // additional flags, will be OR with the rest
         bool fullRowSelect = false;
         bool isRtl = false;
+        // if > 0: height of a row in unscaled px. Rows are otherwise as tall as
+        // the font needs, which is too small to hit with a finger.
+        int itemDy = 0;
+        // if > 0: unscaled px each tree level is indented. The default is
+        // cramped for touch; the redesign wants a wider step.
+        int indentDx = 0;
+        // suppress the system +/- disclosure glyph so the owner can draw its
+        // own chevron (see TVS_HASBUTTONS)
+        bool noSystemButtons = false;
     };
 
     struct GetTooltipEvent {
@@ -851,6 +871,12 @@ struct TabsCtrl : Wnd {
     bool draggingTab = false;
     // dx of tab if there's more space available
     int tabDefaultDx = 300;
+    Rect previewButtonRect;
+    Rect addButtonRect;
+    Func0 onPreview;
+    Func0 onNewTab;
+    Func1<bool> onPreviewHover;
+    bool previewHovered = false;
 
     Vec<TabInfo*> tabs;
 

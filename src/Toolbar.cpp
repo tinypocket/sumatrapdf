@@ -22,6 +22,8 @@ extern "C" {
 #include "DisplayModel.h"
 #include "ImageReader.h"
 #include "GlobalPrefs.h"
+#include "TouchMetrics.h"
+#include "TopBar.h"
 #include "ProgressUpdateUI.h"
 #include "TextSelection.h"
 #include "TextSearch.h"
@@ -490,6 +492,11 @@ void SetToolbarButtonEnableState(MainWindow* win, int cmdId, bool isEnabled) {
 // toolbar at all, independent of the show/hide/overlay mode
 static bool ToolbarContextAllows(MainWindow* win) {
     if (win->presentation) {
+        return false;
+    }
+    // Home and Library provide their own 64px headers in the touch shell. The
+    // legacy document toolbar must not reserve a second row above them.
+    if (IsTouchChrome(win) && win->touchView != TouchView::Doc) {
         return false;
     }
     return true;
@@ -1291,7 +1298,7 @@ static void ClearIconSlot(u8* dstSamples, ptrdiff_t dstStride, int dx, int dy, i
     }
 }
 
-static HBITMAP BuildIconsBitmap(int dx, int dy, Str* customSvgs, int customCount) {
+static HBITMAP BuildIconsBitmap(int dx, int dy, Str* customSvgs, int customCount, COLORREF fgCol, COLORREF bgCol) {
     fz_context* ctx = fz_new_context_windows();
     int nBuiltIn = (int)TbIcon::kMax;
     int nIcons = nBuiltIn + customCount;
@@ -1326,8 +1333,6 @@ static HBITMAP BuildIconsBitmap(int dx, int dy, Str* customSvgs, int customCount
         hbmp = CreateDIBSection(nullptr, bmi, usage, (void**)&hbmpData, nullptr, 0);
     }
 
-    COLORREF fgCol = ThemeWindowTextColor();
-    COLORREF bgCol = ThemeControlBackgroundColor();
     for (int i = 0; i < nBuiltIn; i++) {
         Str svgData = GetSvgIcon((TbIcon)i);
         fz_pixmap* pixmap = RenderSvgIconPixmap(ctx, svgData, dx, dy, fgCol, bgCol);
@@ -1383,7 +1388,8 @@ static int SetToolbarIconsImageList(MainWindow* win) {
 
     // assume square icons
     HIMAGELIST himl = ImageList_Create(dx, dx, ILC_COLOR32, nBuiltIn + customCount, 0);
-    HBITMAP hbmp = BuildIconsBitmap(dx, dx, customSvgs, customCount);
+    HBITMAP hbmp =
+        BuildIconsBitmap(dx, dx, customSvgs, customCount, ThemeWindowTextColor(), ThemeControlBackgroundColor());
     ImageList_Add(himl, hbmp, nullptr);
     DeleteObject(hbmp);
     // Replace (and free) the previous list so theme / size changes do not leak
@@ -1403,8 +1409,57 @@ void UpdateToolbarAfterThemeChange(MainWindow* win) {
 // this for its own small toolbar (chevrons, match-case, close). Caller owns
 // the returned HIMAGELIST.
 HIMAGELIST BuildStdToolbarImageList(int dx) {
+    return BuildTintedToolbarImageList(dx, ThemeWindowTextColor(), ThemeControlBackgroundColor());
+}
+
+// Cached tinted icon lists. Building one rasterizes every svg icon, so callers
+// that draw an icon per paint (the home cards' badges, the sidebar's filter
+// magnifier, the accent button) must not build one each time. A handful of
+// color pairs are in use at once, hence a small multi-entry cache rather than
+// a single slot - alternating pairs would thrash one slot.
+constexpr int kTintedImlCacheCount = 4;
+static HIMAGELIST gTintedIml[kTintedImlCacheCount];
+static int gTintedImlDy[kTintedImlCacheCount];
+static COLORREF gTintedImlFg[kTintedImlCacheCount];
+static COLORREF gTintedImlBg[kTintedImlCacheCount];
+static int gTintedImlNext = 0;
+
+HIMAGELIST GetTintedToolbarImageList(int dy, COLORREF fg, COLORREF bg) {
+    if (dy <= 0) {
+        return nullptr;
+    }
+    for (int i = 0; i < kTintedImlCacheCount; i++) {
+        if (gTintedIml[i] && gTintedImlDy[i] == dy && gTintedImlFg[i] == fg && gTintedImlBg[i] == bg) {
+            return gTintedIml[i];
+        }
+    }
+    int idx = gTintedImlNext;
+    gTintedImlNext = (gTintedImlNext + 1) % kTintedImlCacheCount;
+    if (gTintedIml[idx]) {
+        ImageList_Destroy(gTintedIml[idx]);
+    }
+    gTintedIml[idx] = BuildTintedToolbarImageList(dy, fg, bg);
+    gTintedImlDy[idx] = dy;
+    gTintedImlFg[idx] = fg;
+    gTintedImlBg[idx] = bg;
+    return gTintedIml[idx];
+}
+
+void FreeTintedToolbarImageLists() {
+    for (int i = 0; i < kTintedImlCacheCount; i++) {
+        if (gTintedIml[i]) {
+            ImageList_Destroy(gTintedIml[i]);
+            gTintedIml[i] = nullptr;
+        }
+    }
+}
+
+// Same icons in a caller-chosen color pair. The icons are opaque (they are
+// blitted onto bgCol), so a caller drawing them over a different background
+// has to pass that background in or the icon shows a square around it.
+HIMAGELIST BuildTintedToolbarImageList(int dx, COLORREF fgCol, COLORREF bgCol) {
     HIMAGELIST himl = ImageList_Create(dx, dx, ILC_COLOR32, (int)TbIcon::kMax, 0);
-    HBITMAP hbmp = BuildIconsBitmap(dx, dx, nullptr, 0);
+    HBITMAP hbmp = BuildIconsBitmap(dx, dx, nullptr, 0, fgCol, bgCol);
     ImageList_Add(himl, hbmp, nullptr);
     DeleteObject(hbmp);
     return himl;
@@ -1526,7 +1581,11 @@ void CreateToolbar(MainWindow* win) {
     // tbMetrics.dwMask = TBMF_PAD;
     tbMetrics.dwMask = TBMF_BUTTONSPACING;
     TbGetMetrics(hwndToolbar, &tbMetrics);
-    int yPad = DpiScale(win->hwndFrame, 2);
+    // pad the icon out to a kTopBarBtnDy touch target. The button is
+    // iconSize + ~6px of built-in padding, so only make up the difference.
+    int btnDy = DpiScale(win->hwndFrame, kTopBarBtnDy);
+    int yPad = (btnDy - iconSize - DpiScale(win->hwndFrame, 6)) / 2;
+    yPad = std::max(yPad, DpiScale(win->hwndFrame, 2));
     tbMetrics.cxPad += DpiScale(win->hwndFrame, 14);
     tbMetrics.cyPad += yPad;
     tbMetrics.cxButtonSpacing += DpiScale(win->hwndFrame, kButtonSpacingX);
@@ -1551,7 +1610,7 @@ void CreateToolbar(MainWindow* win) {
         buttons[i] = TbButtonFromButtonInfo(tbi, true);
     }
     TbAddButtons(hwndToolbar, gCustomButtonsCount, buttons);
-    TbSetButtonSize(hwndToolbar, Size(iconSize, iconSize));
+    TbSetButtonSize(hwndToolbar, Size(std::max(iconSize, btnDy), std::max(iconSize, btnDy)));
 
     Rect rc = TbGetItemRect(hwndToolbar, 0);
 
@@ -1621,6 +1680,9 @@ static int MenuBarToolbarIdealDy(MainWindow* win) {
     HFONT font = GetAppMenuFont(win->hwndFrame);
     int dy = FontDyPx(win->hwndFrame, font) + DpiScale(win->hwndFrame, 4);
     int minDy = DpiScale(win->hwndFrame, kTabBarDy);
+    if (IsTouchChrome(win)) {
+        minDy = DpiScale(win->hwndFrame, kTouchMenuBarDy);
+    }
     return std::max(dy, minDy);
 }
 
@@ -1857,6 +1919,9 @@ void RebuildMenuBarButtons(MainWindow* win) {
         if (rc.dy > 0) {
             menuBarDy = rc.dy + (2 * rc.y);
         }
+        if (IsTouchChrome(win)) {
+            menuBarDy = std::max(menuBarDy, DpiScale(win->hwndFrame, kTouchMenuBarDy));
+        }
         REBARBANDINFOW rbBand{};
         rbBand.cbSize = sizeof(REBARBANDINFOW);
         rbBand.fMask = RBBIM_CHILDSIZE;
@@ -1924,6 +1989,9 @@ void CreateMenuBarRebar(MainWindow* win) {
     int menuBarDy = rc.dy + (2 * rc.y);
     if (menuBarDy <= 0) {
         menuBarDy = MenuBarToolbarIdealDy(win);
+    }
+    if (IsTouchChrome(win)) {
+        menuBarDy = std::max(menuBarDy, DpiScale(win->hwndFrame, kTouchMenuBarDy));
     }
 
     ShowWindow(win->hwndMenuToolbar, SW_SHOW);

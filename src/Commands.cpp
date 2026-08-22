@@ -277,6 +277,10 @@ static SeqStrings gCommandNames =
     "CmdDebugToggleDpiOverride\0"
     "CmdToggleImages\0"
     "CmdSelectTextViaKeyboard\0"
+    "CmdToggleTabs\0"
+    "CmdTouchSidebarDensityCondensed\0"
+    "CmdTouchSidebarDensityNormal\0"
+    "CmdTouchSidebarDensityExpanded\0"
     "CmdNone\0"
     "\0";
 
@@ -543,6 +547,10 @@ static i32 gCommandIds[] = {
     CmdDebugToggleDpiOverride,
     CmdToggleImages,
     CmdSelectTextViaKeyboard,
+    CmdToggleTabs,
+    CmdTouchSidebarDensityCondensed,
+    CmdTouchSidebarDensityNormal,
+    CmdTouchSidebarDensityExpanded,
     CmdNone,
 };
 
@@ -809,6 +817,10 @@ SeqStrings gCommandDescriptions =
     "Debug: Toggle DPI Override\0"
     "Toggle Show Images\0"
     "Select Text With Keyboard\0"
+    "Show Tabs\0"
+    "Sidebar Rows: Condensed\0"
+    "Sidebar Rows: Normal\0"
+    "Sidebar Rows: Expanded\0"
     "Do nothing\0"
     "\0";
 // clang-format on

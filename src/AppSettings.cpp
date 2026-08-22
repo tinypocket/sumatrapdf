@@ -23,6 +23,7 @@
 #include "SumatraConfig.h"
 #include "FileHistory.h"
 #include "GlobalPrefs.h"
+#include "TouchMetrics.h"
 #include "SumatraPDF.h"
 #include "WindowTab.h"
 #include "MainWindow.h"
@@ -356,6 +357,16 @@ bool LoadSettings() {
         migratedDocumentColorsFollowTheme = true;
     }
 
+    // SumatraPDF+ keeps opened documents in FileStates for the Recent view, but
+    // starts each new app session without reopening the prior tabs. Existing
+    // profiles serialized the old RestoreSession=true default, so migrate them
+    // once; after the marker is saved an explicit user change remains honored.
+    bool migratedRestoreSessionDefault = !gprefs->restoreSessionDefaultMigrated;
+    if (migratedRestoreSessionDefault) {
+        gprefs->restoreSession = false;
+        gprefs->restoreSessionDefaultMigrated = true;
+    }
+
     // takes effect for PDFs loaded after this (startup, and on settings reload)
     EngineMupdfSetDisableJavaScript(gGlobalPrefs->disableJavaScript);
     EngineMupdfSetAllowExternalImages(gGlobalPrefs->allowExternalImages);
@@ -428,7 +439,7 @@ bool LoadSettings() {
     setMin(gprefs->tocDy, 0);
     setMin(gprefs->treeFontSize, 0);
     if (gprefs->toolbarSize == 0) {
-        gprefs->toolbarSize = 18; // same as the ToolbarSize default in gen-settings.ts
+        gprefs->toolbarSize = kTopBarIconDy; // touch-sized icon; see TouchMetrics.h
     }
     setMinMax(gprefs->toolbarSize, 8, 64);
     setMinMax(gprefs->annotations.freeTextOpacity, 0, 100);
@@ -497,7 +508,8 @@ bool LoadSettings() {
     ApplySettingsToOpenWindows();
     bool readAloudVoiceCleared = ApplyReadAloudVoiceFromSettings();
 
-    bool needsSave = !file::Exists(settingsPath) || readAloudVoiceCleared || migratedDocumentColorsFollowTheme;
+    bool needsSave = !file::Exists(settingsPath) || readAloudVoiceCleared || migratedDocumentColorsFollowTheme ||
+                     migratedRestoreSessionDefault;
     if (needsSave) {
         SaveSettings();
     }
@@ -929,19 +941,37 @@ HFONT GetAppBiggerFont(HWND hwnd) {
     return GetAppBiggerFontForDpi(DpiGet(hwnd));
 }
 
+static int GetTreeFontSizeForDpi(int dpi) {
+    int fntSize = gGlobalPrefs->treeFontSize;
+    if (fntSize >= kMinFontSize) {
+        return fntSize; // user's explicit choice wins
+    }
+    // The touch chrome's 52px rows want 4a's 15px body; the system menu font
+    // (~12px) leaves them looking sparse. DPI-scale it like the row height.
+    if (gGlobalPrefs->touchChrome) {
+        return MulDiv(kPanelRowFontSize, dpi, USER_DEFAULT_SCREEN_DPI);
+    }
+    fntSize = gGlobalPrefs->uIFontSize;
+    if (fntSize < kMinFontSize) {
+        fntSize = GetAppMenuFontSizeForDpi(dpi);
+    }
+    return fntSize;
+}
+
+// the configured tree font at an explicit FW_* weight (e.g. FW_SEMIBOLD for
+// redesigned headings, which want 600 rather than the bold variant's 700)
+HFONT GetAppTreeFontWeight(HWND hwnd, int weight) {
+    int dpi = DpiGet(hwnd);
+    return GetUserGuiFontWeight(gGlobalPrefs->treeFontName, GetTreeFontSizeForDpi(dpi), weight, false);
+}
+
 HFONT GetAppTreeFontExForDpi(int dpi, bool bold, bool italic) {
     int idx = (bold ? 1 : 0) | (italic ? 2 : 0);
     UiFontsAtDpi* fonts = GetUiFontsAtDpi(dpi);
     if (fonts->treeFontEx[idx]) {
         return fonts->treeFontEx[idx];
     }
-    int fntSize = gGlobalPrefs->treeFontSize;
-    if (fntSize < kMinFontSize) {
-        fntSize = gGlobalPrefs->uIFontSize;
-    }
-    if (fntSize < kMinFontSize) {
-        fntSize = GetAppMenuFontSizeForDpi(dpi);
-    }
+    int fntSize = GetTreeFontSizeForDpi(dpi);
     Str fntNameUser = gGlobalPrefs->treeFontName;
     fonts->treeFontEx[idx] = GetUserGuiFontEx(fntNameUser, fntSize, bold, italic);
     return fonts->treeFontEx[idx];

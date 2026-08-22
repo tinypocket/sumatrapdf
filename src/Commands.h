@@ -271,7 +271,11 @@ enum {
     CmdDebugToggleDpiOverride = 460,
     CmdToggleImages = 461,
     CmdSelectTextViaKeyboard = 462,
-    CmdNone = 463,
+    CmdToggleTabs = 463,
+    CmdTouchSidebarDensityCondensed = 464,
+    CmdTouchSidebarDensityNormal = 465,
+    CmdTouchSidebarDensityExpanded = 466,
+    CmdNone = 467,
 
     /* range for file history */
     CmdFileHistoryFirst,

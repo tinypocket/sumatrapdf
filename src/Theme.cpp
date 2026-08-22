@@ -165,6 +165,24 @@ static Str themesTxt = StrL(R"(Themes [
         ColorizeControls = true
     ]
     [
+        Name = Touch Paper
+        TextColor = #1c1a17
+        BackgroundColor = #e7e3dd
+        ControlBackgroundColor = #faf8f5
+        LinkColor = #b4530a
+        DisabledTextColor = #bdb5a8
+        DarkerTextColor = #6d6659
+        HotBackgroundColor = #f3f0eb
+        EdgeColor = #ded8d0
+        HotEdgeColor = #b4530a
+        DisabledEdgeColor = #eae5de
+        ErrorBackgroundColor = #f7ddd2
+        NotificationBackgroundColor = #faf8f5
+        NotificationHighlightColor = #fbeee2
+        NotificationHighlightTextColor = #b4530a
+        ColorizeControls = true
+    ]
+    [
         Name = Dark from 3.5
         TextColor = #bac9d0
         BackgroundColor = #263238
@@ -802,7 +820,14 @@ void UpdateThemeAfterSystemColorChange() {
 
 // call after loading settings
 void SetCurrentThemeFromSettings() {
-    SetTheme(gGlobalPrefs->theme);
+    // The touch redesign's spacing and contrast tokens are authored as a
+    // single system. Keep an explicitly chosen theme, but give a fresh
+    // touch-chrome install the exact paper palette from the handoff.
+    if (gGlobalPrefs->touchChrome && !gGlobalPrefs->theme) {
+        SetTheme(StrL("Touch Paper"));
+    } else {
+        SetTheme(gGlobalPrefs->theme);
+    }
     ParsedColor* bgParsed = GetPrefsColor(gGlobalPrefs->mainWindowBackground);
     bool isDefault = IsDefaultMainWinColor(bgParsed);
     if (isDefault) {
@@ -1004,6 +1029,34 @@ COLORREF ThemeNotificationsTextColor() {
 // in both directions: light themes get the classic yellow, dark themes a muted
 // dark amber. Deriving it from the theme's own accent (as we used to) produced
 // saturated, unrelated hues -- Dracula's warnings came out bright purple.
+static COLORREF BlendColors(COLORREF a, COLORREF b, int pctA) {
+    int r = ((int)GetRValue(a) * pctA + (int)GetRValue(b) * (100 - pctA)) / 100;
+    int g = ((int)GetGValue(a) * pctA + (int)GetGValue(b) * (100 - pctA)) / 100;
+    int bl = ((int)GetBValue(a) * pctA + (int)GetBValue(b) * (100 - pctA)) / 100;
+    return RGB(r, g, bl);
+}
+
+void ThemeAccentSurfaceColors(COLORREF* bgOut, COLORREF* fgOut) {
+    // A tint of the theme's own accent over the control background. It used to
+    // borrow NotificationHighlightColor, which is only an accent tint by
+    // coincidence: on the default Light theme that slot is #ffee70, so every
+    // active button came out notification-yellow.
+    COLORREF ctrlBg = ThemeWindowControlBackgroundColor();
+    COLORREF accent = ThemeWindowLinkColor();
+    // a dark background swallows a light blend, so it needs more of the accent
+    int pct = IsLightColor(ctrlBg) ? 12 : 30;
+    COLORREF bg = BlendColors(accent, ctrlBg, pct);
+    COLORREF fg = accent;
+    // e.g. the Dark theme pairs a brown tint with a grey link color, which is
+    // unreadable; fall back to the normal text color there. GetLightness is on
+    // a 0-255 scale, so this asks for a good part of the range between them
+    if (fabsf(GetLightness(fg) - GetLightness(bg)) < 110.0f) {
+        fg = ThemeWindowTextColor();
+    }
+    *bgOut = bg;
+    *fgOut = fg;
+}
+
 COLORREF ThemeNotificationsHighlightColor() {
     COLORREF fallback;
     if (IsLightColor(ThemeNotificationsBackgroundColor())) {

@@ -199,6 +199,25 @@ static MenuDef menuDefFile[] = {
 //] ACCESSKEY_GROUP File Menu
 
 //[ ACCESSKEY_GROUP View Menu
+static MenuDef menuDefTouchSidebarDensity[] = {
+    {
+        _TRN("Condensed"),
+        CmdTouchSidebarDensityCondensed,
+    },
+    {
+        _TRN("Normal"),
+        CmdTouchSidebarDensityNormal,
+    },
+    {
+        _TRN("Expanded"),
+        CmdTouchSidebarDensityExpanded,
+    },
+    {
+        nullptr,
+        0,
+    },
+};
+
 static MenuDef menuDefView[] = {
     {
         _TRN("Command Palette"),
@@ -264,6 +283,14 @@ static MenuDef menuDefView[] = {
     {
         _TRN("Show &Toolbar"),
         CmdToggleToolbar,
+    },
+    {
+        _TRN("Show Tabs"),
+        CmdToggleTabs,
+    },
+    {
+        _TRN("Sidebar Row Height"),
+        (UINT_PTR)menuDefTouchSidebarDensity,
     },
     {
         kMenuSeparator,
@@ -1771,6 +1798,13 @@ static void MenuUpdateStateForWindow(MainWindow* win) {
         MenuSetChecked(win->menu, CmdToggleToolbar, toolbarOn);
     }
     MenuSetChecked(win->menu, CmdToggleMenuBar, gGlobalPrefs->showMenubar);
+    MenuSetChecked(win->menu, CmdToggleTabs, gGlobalPrefs->useTabs);
+    MenuSetChecked(win->menu, CmdTouchSidebarDensityCondensed,
+                   str::EqI(gGlobalPrefs->touchSidebarDensity, StrL("condensed")));
+    MenuSetChecked(win->menu, CmdTouchSidebarDensityNormal,
+                   str::EqI(gGlobalPrefs->touchSidebarDensity, StrL("normal")));
+    MenuSetChecked(win->menu, CmdTouchSidebarDensityExpanded,
+                   str::EqI(gGlobalPrefs->touchSidebarDensity, StrL("expanded")));
     // CmdChangeScrollbar doesn't need a check mark - it opens a dialog
     MenuUpdateDisplayMode(win);
     MenuUpdateZoom(win);

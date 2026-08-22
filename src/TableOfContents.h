@@ -10,6 +10,9 @@ void ExpandTocToCurrentPage(MainWindow*);
 void UpdateTocExpansionState(Vec<int>& tocState, TreeView*, TocTree*);
 void UnsubclassToc(MainWindow*);
 void TocFilterChanged(MainWindow*);
+void UpdateTouchPanelMode(MainWindow*);
+void SetTouchPanelModeAndRestoreSearch(MainWindow*, TouchPanelMode);
+int TouchSidebarRowDy();
 
 // When true (default), the bookmarks pane highlights every TOC entry that
 // matches the current page (same page number as the best match, plus the

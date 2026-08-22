@@ -11,6 +11,8 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate = fa
 void TabsOnCloseWindow(MainWindow*);
 void TabsOnChangedDoc(MainWindow*);
 void TabsSelect(MainWindow* win, int tabIndex);
+bool SelectTouchHomeTab(MainWindow* win);
+bool SelectTouchDocumentTab(MainWindow* win);
 void TabsOnCtrlTab(MainWindow* win, bool reverse);
 // also shows/hides the tabbar when necessary
 void UpdateTabWidth(MainWindow*);

@@ -1,0 +1,6 @@
+[SumatraPDF]
+Latest: 3.7
+Installer64: https://github.com/tinypocket/sumatrapdf/releases/latest/download/SumatraPDF+-private-64-install.exe
+InstallerArm64: https://github.com/tinypocket/sumatrapdf/releases/latest/download/SumatraPDF+-private-arm64-install.exe
+PortableExe64: https://github.com/tinypocket/sumatrapdf/releases/latest/download/SumatraPDF+-private-64-portable.exe
+PortableExeArm64: https://github.com/tinypocket/sumatrapdf/releases/latest/download/SumatraPDF+-private-arm64-portable.exe

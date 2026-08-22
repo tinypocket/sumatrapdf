@@ -58,6 +58,7 @@
 #include "TextToSpeech.h"
 #include "HomePage.h"
 #include "Toolbar.h"
+#include "TopBar.h"
 #include "Translations.h"
 
 #include "RefHover.h"
@@ -2205,7 +2206,23 @@ static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& pageRect, bool 
     Rectangle(hdc, frame.x, frame.y, frame.x + frame.dx, frame.y + frame.dy);
 }
 #else
-static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& /*pageRect*/, bool /*presentation*/, COLORREF bgCol) {
+static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& /*pageRect*/, bool presentation, COLORREF bgCol) {
+    // The redesign lifts the page off the canvas with a soft shadow. Stacked
+    // rects rather than a blur: this runs on every canvas repaint, and a few
+    // FillRects are far cheaper than compositing a blurred surface.
+    if (gGlobalPrefs->touchChrome && !presentation) {
+        COLORREF canvasCol = ThemeMainWindowBackgroundColor();
+        constexpr int kLayers = 4;
+        for (int i = kLayers; i >= 1; i--) {
+            int spread = DpiScale(hdc, i);
+            Rect sr = bounds;
+            sr.Inflate(spread, spread);
+            sr.y += DpiScale(hdc, 1); // cast downward
+            COLORREF col = AccentColor(canvasCol, 4 * (kLayers - i + 1));
+            AutoDeleteBrush shadowBr = CreateSolidBrush(col);
+            HdcFillRect(hdc, sr, shadowBr);
+        }
+    }
     AutoDeletePen pen(CreatePen(PS_NULL, 0, 0));
     AutoDeleteBrush brush(CreateSolidBrush(bgCol));
     ScopedSelectPen restorePen(hdc, pen);
@@ -3533,6 +3550,7 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
             return 0;
 
         case WM_LBUTTONDOWN:
+            CloseTouchDocumentOverlays(win);
             OnMouseLeftButtonDown(win, x, y, wp);
             return 0;
 

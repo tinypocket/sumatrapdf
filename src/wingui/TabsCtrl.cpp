@@ -11,6 +11,7 @@
 #include "wingui/WinGui.h"
 
 #include "Theme.h"
+#include "TouchMetrics.h"
 
 // Forward declaration - defined in MainWindow.cpp
 struct MainWindow;
@@ -65,8 +66,13 @@ void TabsCtrl::ScheduleRepaint() {
 void TabsCtrl::LayoutTabs() {
     Rect rect = HwndClientRect(hwnd);
     int dy = rect.dy;
-    int nTabs = TabCount();
+    // The native tab control and our TabInfo vector are updated by separate
+    // operations. Either operation can synchronously pump mouse/paint messages,
+    // so use only the entries present in both collections during that brief gap.
+    int nTabs = std::min(TabCount(), len(tabs));
     if (nTabs == 0) {
+        previewButtonRect = {};
+        addButtonRect = {};
         // Do not ScheduleRepaint here: an empty bar with a forced repaint can
         // re-enter layout/paint forever if something keeps calling LayoutTabs
         // (issue #5861). The parent hides the control when there are no tabs.
@@ -76,8 +82,13 @@ void TabsCtrl::LayoutTabs() {
     if (tabWidthFrozen && frozenTabDx > 0) {
         dx = frozenTabDx;
     } else {
-        auto maxDx = (rect.dx - 5) / nTabs;
-        dx = std::min(tabDefaultDx, maxDx);
+        int controlReserve = inTitleBar ? DpiScale(hwnd, 68) : 5;
+        auto maxDx = (rect.dx - controlReserve) / nTabs;
+        if (inTitleBar) {
+            dx = std::clamp(maxDx, DpiScale(hwnd, kTabPillMinDx), DpiScale(hwnd, kTabPillMaxDx));
+        } else {
+            dx = std::min(tabDefaultDx, maxDx);
+        }
     }
     Size newTabSize = {dx, dy};
     bool sizeChanged = (newTabSize.dx != tabSize.dx || newTabSize.dy != tabSize.dy);
@@ -96,7 +107,10 @@ void TabsCtrl::LayoutTabs() {
     int closePad = 8; // padding between close circle and tab edge
 
     HFONT hfont = GetFont();
-    int x = isRtl ? rect.dx : 0;
+    int titleControlDx = inTitleBar ? DpiScale(hwnd, 28) : 0;
+    int titleControlGap = inTitleBar ? DpiScale(hwnd, 4) : 0;
+    previewButtonRect = inTitleBar ? Rect{0, (dy - titleControlDx) / 2, titleControlDx, titleControlDx} : Rect{};
+    int x = isRtl ? rect.dx - titleControlDx - titleControlGap : titleControlDx + titleControlGap;
     int xEnd;
     TooltipInfo* tools = AllocArrayTemp<TooltipInfo>(nTabs);
     for (int i = 0; i < nTabs; i++) {
@@ -134,6 +148,9 @@ void TabsCtrl::LayoutTabs() {
         }
         x = xEnd;
     }
+    addButtonRect = inTitleBar ? Rect{isRtl ? x - titleControlGap - titleControlDx : x + titleControlGap,
+                                      (dy - titleControlDx) / 2, titleControlDx, titleControlDx}
+                               : Rect{};
     if (withToolTips) {
         HWND ttHwnd = GetToolTipsHwnd();
         TooltipRemoveAll(ttHwnd);
@@ -154,7 +171,7 @@ TabsCtrl::MouseState TabsCtrl::TabStateFromMousePosition(const Point& p) {
     if (pt.x < 0 || pt.y < 0) {
         return res;
     }
-    int nTabs = TabCount();
+    int nTabs = std::min(TabCount(), len(tabs));
     for (int i = 0; i < nTabs; i++) {
         TabInfo* ti = tabs[i];
         Rect r = ti->r;
@@ -191,7 +208,43 @@ static COLORREF TabTextColorForBackground(COLORREF tabBg) {
 }
 
 bool TabsCtrl::IsValidIdx(int idx) {
-    return idx >= 0 && idx < TabCount();
+    return idx >= 0 && idx < TabCount() && idx < len(tabs);
+}
+
+// a tab is drawn as a pill: a rounded rect whose radius is half its height
+static void FillPill(Graphics& gfx, const Rect& r, COLORREF col, int requestedRadius = -1) {
+    // a narrow tab (many tabs open) is narrower than it is tall; without the
+    // clamp the corner arcs overlap and the tab is drawn as a circle
+    int radius = requestedRadius >= 0 ? std::min(requestedRadius, std::min(r.dy, r.dx) / 2) : std::min(r.dy, r.dx) / 2;
+    int d = radius * 2;
+    if (d <= 0) {
+        return;
+    }
+    Gdiplus::GraphicsPath path;
+    path.AddArc(r.x, r.y, d, d, 180.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y, d, d, 270.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y + r.dy - d, d, d, 0.0f, 90.0f);
+    path.AddArc(r.x, r.y + r.dy - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+    SolidBrush br(GdipCol(col));
+    auto prevSmooth = gfx.GetSmoothingMode();
+    auto prevComp = gfx.GetCompositingMode();
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gfx.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+    gfx.FillPath(&br, &path);
+    gfx.SetSmoothingMode(prevSmooth);
+    gfx.SetCompositingMode(prevComp);
+}
+
+static void DrawRoundedOutline(Graphics& gfx, Pen& pen, int x, int y, int dx, int dy, int radius) {
+    int d = std::min(radius * 2, std::min(dx, dy));
+    GraphicsPath path;
+    path.AddArc(x, y, d, d, 180.0f, 90.0f);
+    path.AddArc(x + dx - d, y, d, d, 270.0f, 90.0f);
+    path.AddArc(x + dx - d, y + dy - d, d, d, 0.0f, 90.0f);
+    path.AddArc(x, y + dy - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+    gfx.DrawPath(&pen, &path);
 }
 
 void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
@@ -220,9 +273,13 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
     gfx.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
     gfx.SetPageUnit(UnitPixel);
 
-    SolidBrush br(GdipCol(ThemeControlBackgroundColor()));
+    COLORREF tabBarBg = inTitleBar ? ThemeHotBackgroundColor() : ThemeControlBackgroundColor();
+    SolidBrush br(GdipCol(tabBarBg));
 
-    Font f(hdc, GetFont());
+    HFONT normalFont = inTitleBar ? HdcGetUiFont(hdc, 12) : GetFont();
+    HFONT selectedFont = inTitleBar ? HdcGetUiFont(hdc, 12, FW_SEMIBOLD) : GetFont();
+    Font fNormal(hdc, normalFont);
+    Font fSelected(hdc, selectedFont);
 
     Gdiplus::Rect gr = ToGdipRect(rc);
     gfx.FillRectangle(&br, gr);
@@ -236,14 +293,14 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
     }
 
     TabInfo* ti;
-    int n = TabCount();
+    int n = std::min(TabCount(), len(tabs));
     Rect r;
     Gdiplus::RectF rTxt;
-    COLORREF tabBgSelected = ThemeControlBackgroundColor();
-    COLORREF tabBgHighlight;
-    COLORREF tabBgBackground;
-    tabBgBackground = AccentColor(tabBgSelected, 25);
-    tabBgHighlight = AccentColor(tabBgSelected, 35);
+    // the bar itself is the control background and an unselected tab is just
+    // bar (no pill), so the selected pill has to be the darker shade
+    COLORREF tabBgSelected = inTitleBar ? ThemeControlBackgroundColor() : AccentColor(tabBarBg, 25);
+    COLORREF tabBgBackground = tabBarBg;
+    COLORREF tabBgHighlight = AccentColor(tabBarBg, 12);
 
     COLORREF tabBgCol;
     for (int i = 0; i < n; i++) {
@@ -269,14 +326,21 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             }
         }
 
-        COLORREF textColor = TabTextColorForBackground(tabBgCol);
+        COLORREF textColor = inTitleBar ? (isSelected ? ThemeWindowTextColor() : ThemeWindowDarkerTextColor())
+                                        : TabTextColorForBackground(tabBgCol);
 
         gfx.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
 
-        // draw background
-        br.SetColor(GdipCol(tabBgCol));
-        gr = ToGdipRect(ti->r);
-        gfx.FillRectangle(&br, gr);
+        // draw background. An unselected tab that isn't hovered has the same
+        // color as the bar, so drawing a pill for it would just be a no-op
+        // shape with antialiased edges over the bar; skip it.
+        if (tabBgCol != tabBarBg) {
+            Rect rPill = ti->r;
+            int gap = DpiScale(hwnd, kTabPillGap);
+            rPill.x += gap / 2;
+            rPill.dx -= gap;
+            FillPill(gfx, rPill, tabBgCol, inTitleBar ? DpiScale(hwnd, 7) : -1);
+        }
 
         // debug: paint close hit area in light green
         if (false && ti->canClose && (i == tabUnderMouse)) {
@@ -298,14 +362,15 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
         rTxt.Width -= (Gdiplus::REAL)(8 + r.dx + 8);
         br.SetColor(GdipCol(textColor));
         WCHAR* ws = CWStrTemp(ti->text);
-        gfx.DrawString(ws, -1, &f, rTxt, &sf, &br);
+        Font* font = isSelected ? &fSelected : &fNormal;
+        gfx.DrawString(ws, -1, font, rTxt, &sf, &br);
 
         // draw red dot after tab text for dirty (unsaved) tabs
         if (ti->isDirty) {
             gfx.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
             // measure actual rendered text width (may be truncated with ellipsis)
             Gdiplus::RectF bounds;
-            gfx.MeasureString(ws, -1, &f, rTxt, &sf, &bounds);
+            gfx.MeasureString(ws, -1, font, rTxt, &sf, &bounds);
             int dotRadius = DpiScale(hwnd, 3);
             int dotX = (int)(bounds.X + bounds.Width) + dotRadius;
             // clamp to not exceed the text area
@@ -316,7 +381,8 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             gfx.FillEllipse(&redBr, dotX, dotY, dotRadius * 2, dotRadius * 2);
             gfx.SetSmoothingMode(Gdiplus::SmoothingModeNone);
         }
-        bool closeVisible = ti->canClose && (isSelected || (isUnderMouse && ti->r.dx >= kMinTabWidthForClose));
+        bool closeVisible =
+            ti->canClose && (inTitleBar || isSelected || (isUnderMouse && ti->r.dx >= kMinTabWidthForClose));
         if (closeVisible) {
             DrawCloseButtonArgs closeArgs;
             closeArgs.hdc = hdc;
@@ -325,6 +391,27 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             closeArgs.colBg = tabBgCol;
             DrawCloseButton(closeArgs);
         }
+    }
+
+    if (inTitleBar && n > 0) {
+        Pen iconPen(GdipCol(ThemeWindowDarkerTextColor()), (Gdiplus::REAL)std::max(1, DpiScale(hwnd, 1)));
+        iconPen.SetStartCap(Gdiplus::LineCapRound);
+        iconPen.SetEndCap(Gdiplus::LineCapRound);
+        gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Rect p = previewButtonRect;
+        int ix = p.x + (p.dx - DpiScale(hwnd, 14)) / 2;
+        int iy = p.y + (p.dy - DpiScale(hwnd, 12)) / 2;
+        int iw = DpiScale(hwnd, 11);
+        int ih = DpiScale(hwnd, 8);
+        DrawRoundedOutline(gfx, iconPen, ix + DpiScale(hwnd, 3), iy, iw, ih, DpiScale(hwnd, 2));
+        DrawRoundedOutline(gfx, iconPen, ix, iy + DpiScale(hwnd, 3), iw, ih, DpiScale(hwnd, 2));
+
+        Rect a = addButtonRect;
+        int cx = a.x + a.dx / 2;
+        int cy = a.y + a.dy / 2;
+        int arm = DpiScale(hwnd, 5);
+        gfx.DrawLine(&iconPen, cx - arm, cy, cx + arm, cy);
+        gfx.DrawLine(&iconPen, cx, cy - arm, cx, cy + arm);
     }
 }
 
@@ -451,8 +538,8 @@ static void TriggerTabDragged(TabsCtrl* tabs, int tab1, int tab2) {
 
 static void UpdateAfterDrag(TabsCtrl* tabsCtrl, int tabIdxFrom, int tabIdxTo) {
     int nTabs = tabsCtrl->TabCount();
-    bool badState =
-        (tabIdxFrom == tabIdxTo) || (tabIdxFrom < 0) || (tabIdxTo < 0) || (tabIdxFrom >= nTabs) || (tabIdxTo > nTabs);
+    bool badState = (tabIdxFrom == tabIdxTo) || (tabIdxFrom < 0) || (tabIdxTo < 0) || (tabIdxFrom >= nTabs) ||
+                    (tabIdxTo > nTabs) || (tabIdxFrom >= len(tabsCtrl->tabs)) || (tabIdxTo > len(tabsCtrl->tabs));
     if (badState) {
         logfa("tabIdxFrom: %d, tabIdxTo: %d, nTabs: %d\n", tabIdxFrom, tabIdxTo, nTabs);
         ReportDebugIf(true);
@@ -528,11 +615,12 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // Check if mouse has moved beyond system drag threshold
     bool beyondDragThreshold = false;
     if (msg == WM_MOUSEMOVE && GetCapture() == hwnd && !draggingTab) {
-        if (tabHighlighted >= 0 && tabHighlighted < TabCount()) {
+        TabInfo* highlighted = GetTab(tabHighlighted);
+        if (highlighted) {
             int cxDrag = GetSystemMetrics(SM_CXDRAG);
             int cyDrag = GetSystemMetrics(SM_CYDRAG);
-            beyondDragThreshold = (abs(mousePos.x - grabLocation.x - GetTab(tabHighlighted)->r.x) > cxDrag) ||
-                                  (abs(mousePos.y - grabLocation.y - GetTab(tabHighlighted)->r.y) > cyDrag);
+            beyondDragThreshold = (abs(mousePos.x - grabLocation.x - highlighted->r.x) > cxDrag) ||
+                                  (abs(mousePos.y - grabLocation.y - highlighted->r.y) > cyDrag);
         }
     }
 
@@ -546,6 +634,9 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return HTCLIENT;
             }
             mousePos = HwndScreenToClient(hwnd, mousePos);
+            if (previewButtonRect.Contains(mousePos) || addButtonRect.Contains(mousePos)) {
+                return HTCLIENT;
+            }
             tabState = TabStateFromMousePosition(mousePos);
             if (tabState.tabIdx >= 0) {
                 return HTCLIENT;
@@ -558,6 +649,10 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
 
         case WM_MOUSELEAVE:
+            if (previewHovered) {
+                previewHovered = false;
+                onPreviewHover.Call(false);
+            }
             if (tabWidthFrozen) {
                 tabWidthFrozen = false;
                 LayoutTabs();
@@ -571,6 +666,11 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_MOUSEMOVE: {
             TrackMouseLeave(hwnd);
+            bool overPreview = inTitleBar && previewButtonRect.Contains(mousePos);
+            if (overPreview != previewHovered) {
+                previewHovered = overPreview;
+                onPreviewHover.Call(overPreview);
+            }
             bool isDragging = (GetCapture() == hwnd);
             int hl = tabHighlighted;
             if (isDragging && beyondDragThreshold) {
@@ -626,6 +726,9 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_LBUTTONDOWN: {
+            if (inTitleBar && (previewButtonRect.Contains(mousePos) || addButtonRect.Contains(mousePos))) {
+                return 0;
+            }
             tabHighlighted = tabUnderMouse;
             if (overClose) {
                 HwndScheduleRepaint(hwnd);
@@ -662,6 +765,18 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_LBUTTONUP: {
+            if (inTitleBar && previewButtonRect.Contains(mousePos)) {
+                if (onPreview.IsValid()) {
+                    onPreview.Call();
+                }
+                return 0;
+            }
+            if (inTitleBar && addButtonRect.Contains(mousePos)) {
+                if (onNewTab.IsValid()) {
+                    onNewTab.Call();
+                }
+                return 0;
+            }
             bool isDragging = (GetCapture() == hwnd);
             if (isDragging) {
                 ReleaseCapture();
@@ -704,7 +819,8 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (dstIdx == selectedTab) {
                 return 0;
             }
-            if ((dstIdx < TabCount()) && GetTab(dstIdx)->isPinned) {
+            TabInfo* dstTab = GetTab(dstIdx);
+            if (dstTab && dstTab->isPinned) {
                 return 0;
             }
             TriggerTabDragged(this, selectedTab, dstIdx);
@@ -853,11 +969,19 @@ void TabsCtrl::SetTabDirty(int idx, bool dirty) {
 
 // returns userData because it's not owned by TabsCtrl
 UINT_PTR TabsCtrl::RemoveTab(int idx) {
-    ReportIf(idx < 0);
-    ReportIf(idx >= TabCount());
+    int nNativeTabs = TabCount();
+    bool invalidIdx = idx < 0 || idx >= nNativeTabs || idx >= len(tabs);
+    ReportIf(invalidIdx);
+    if (invalidIdx) {
+        logf("TabsCtrl::RemoveTab(): idx=%d, native tabs=%d, tab data=%d\n", idx, nNativeTabs, len(tabs));
+        return 0;
+    }
     int selectedTab = GetSelected();
     BOOL ok = TabCtrl_DeleteItem(hwnd, idx);
     ReportIf(!ok);
+    if (!ok) {
+        return 0;
+    }
     TabInfo* tab = tabs[idx];
     UINT_PTR userData = tab->userData;
     tabs.RemoveAt(idx);
@@ -876,6 +1000,11 @@ UINT_PTR TabsCtrl::RemoveTab(int idx) {
 }
 
 void TabsCtrl::SwapTabs(int idx1, int idx2) {
+    bool invalidIdx = idx1 < 0 || idx2 < 0 || idx1 >= len(tabs) || idx2 >= len(tabs);
+    ReportIf(invalidIdx);
+    if (invalidIdx) {
+        return;
+    }
     TabInfo* tmp = tabs[idx1];
     tabs[idx1] = tabs[idx2];
     tabs[idx2] = tmp;
@@ -922,10 +1051,11 @@ int TabsCtrl::GetSelected() {
 
 int TabsCtrl::SetSelected(int idx) {
     int nTabs = TabCount();
-    if (idx < 0 || idx >= nTabs) {
-        logf("TabsCtrl::SetSelected(): idx: %d, TabsCount(): %d\n", idx, nTabs);
+    if (idx < 0 || idx >= nTabs || idx >= len(tabs)) {
+        logf("TabsCtrl::SetSelected(): idx: %d, native tabs: %d, tab data: %d\n", idx, nTabs, len(tabs));
+        ReportIf(true);
+        return -1;
     }
-    ReportIf(idx < 0 || idx >= nTabs);
     // Suppress native tab invalidation (LTR item rects); we repaint the full client.
     SendMessageW(hwnd, WM_SETREDRAW, FALSE, 0);
     int prevSelectedIdx = TabCtrl_SetCurSel(hwnd, idx);

@@ -49,9 +49,12 @@ static const Str updateInfoURLs[] = {
 
 #ifndef kWebisteDownloadPageURL
 #if defined(PRE_RELEASE_VER)
-#define kWebisteDownloadPageURL "https://www.sumatrapdfreader.org/prerelease"
+#define kWebisteDownloadPageURL "https://github.com/tinypocket/sumatrapdf/releases/latest"
 #else
-#define kWebisteDownloadPageURL "https://www.sumatrapdfreader.org/download-free-pdf-viewer"
+// SumatraPDF+ fork: the manual-download fallback points at this fork's releases,
+// not upstream, so an unsigned build that can't self-install still lands users
+// on the right download page.
+#define kWebisteDownloadPageURL "https://github.com/tinypocket/sumatrapdf/releases/latest"
 #endif
 #endif
 // clang-format on
@@ -64,9 +67,6 @@ static bool gUpdateCheckInProgress = false;
 // installs (set when the user clicks "Download and update" in the pre-release
 // update notification)
 static bool gUpdateAutoInstall = false;
-
-// the bottom-left "update available" notification (with the download link)
-static Kind kNotifUpdateAvailable = StrL("notifUpdateAvailable").s;
 
 struct UpdateInfo {
     HWND hwndParent = nullptr;
@@ -98,9 +98,34 @@ struct UpdateInfo {
     }
 };
 
-// an available update surfaced by the pre-release startup notification; the
-// "Download and update" link downloads & installs it (owned here until then)
+// An available update found at startup. The caption's Update button remains
+// visible until the user starts the update (owned here until then).
 static UpdateInfo* gPendingUpdate = nullptr;
+
+static Str GetPrivateUpdateFeedURL() {
+    return gGlobalPrefs ? gGlobalPrefs->updateFeedURL : Str{};
+}
+
+bool IsUpdateAvailable() {
+    return gPendingUpdate != nullptr;
+}
+
+static void RefreshUpdateButtons() {
+    for (MainWindow* win : gWindows) {
+        if (!IsMainWindowValid(win)) {
+            continue;
+        }
+        RelayoutCaption(win);
+        HwndInvalidate(win->hwndFrame);
+    }
+}
+
+static void SetPendingUpdate(UpdateInfo* updateInfo) {
+    delete gPendingUpdate;
+    gPendingUpdate = updateInfo;
+    logf("SetPendingUpdate: version '%s'\n", updateInfo->latestVer);
+    RefreshUpdateButtons();
+}
 
 /*
 The format of update information downloaded from the server:
@@ -202,8 +227,8 @@ static bool ShouldCheckForUpdate(UpdateCheck updateCheckType) {
         return true;
     }
 
-    // don't check if the timestamp or version to skip can't be updated
-    // (mainly in plugin mode, stress testing and restricted settings)
+    // Automatic checks remain disabled in plugin mode, stress testing, and
+    // restricted settings where the app isn't allowed to save preferences.
     if (!HasPermission(Perm::SavePreferences)) {
         logf("CheckForUpdate: skipping auto check because no prefs access\n");
         return false;
@@ -213,49 +238,27 @@ static bool ShouldCheckForUpdate(UpdateCheck updateCheckType) {
     if (!gGlobalPrefs->checkForUpdates) {
         return false;
     }
-
-    // don't check for updates at the first start, so that privacy
-    // sensitive users can disable the update check in time
-    FILETIME never{};
-    if (FileTimeEq(gGlobalPrefs->timeOfLastUpdateCheck, never)) {
-        return false;
-    }
-
-    // pre-release builds check on every startup (testers want the newest build);
-    // skip the daily/weekly throttle below
-    if (gIsPreReleaseBuild) {
-        return true;
-    }
-
-    // only check if at least a day passed since last check
-    FILETIME currentTimeFt;
-    GetSystemTimeAsFileTime(&currentTimeFt);
-    int secsSinceLastUpdate = FileTimeDiffInSecs(currentTimeFt, gGlobalPrefs->timeOfLastUpdateCheck);
-
-    constexpr int kSecondsInDay = 60 * 60 * 24;
-    constexpr int kSecondsInWeek = 7 * 60 * 60 * 24;
-
-    int secsBetweenChecks = gIsPreReleaseBuild ? kSecondsInWeek : kSecondsInDay;
-    bool checkUpdate = secsSinceLastUpdate > secsBetweenChecks;
-#if 0
-    logf("CheckForUpdate: secsBetweenChecks: %d, secsSinceLastUpdate: %d, checkUpdate: %d\n", secsBetweenChecks,
-         secsSinceLastUpdate, (int)checkUpdate);
-#endif
-    return checkUpdate;
+    return true;
 }
 
 void StartInstallerAutoUpgrade(Str installerPath) {
-    TempStr expectedSigner = GetExecutableSignerTemp(GetSelfExePathTemp());
-    TempStr installerSigner = GetExecutableSignerTemp(installerPath);
-    if (!expectedSigner || !installerSigner || !str::Eq(expectedSigner, installerSigner) ||
-        !IsPEFileSigned(installerPath)) {
-        logf("StartInstallerAutoUpgrade: refusing an update with an untrusted signature\n");
-        return;
+    bool privateFeed = !!GetPrivateUpdateFeedURL();
+    if (!privateFeed) {
+        TempStr expectedSigner = GetExecutableSignerTemp(GetSelfExePathTemp());
+        TempStr installerSigner = GetExecutableSignerTemp(installerPath);
+        if (!expectedSigner || !installerSigner || !str::Eq(expectedSigner, installerSigner) ||
+            !IsPEFileSigned(installerPath)) {
+            logf("StartInstallerAutoUpgrade: refusing an update with an untrusted signature\n");
+            return;
+        }
     }
     str::Builder cmd;
     if (IsOurExeInstalled()) {
-        // no need for sleep because it shows the installer dialog anyway
-        if (gIsPreReleaseBuild) {
+        // no need for sleep because it shows the installer dialog anyway.
+        // A private feed means the fully-silent SumatraPDF+ auto-update, which
+        // installs without buttons and relaunches (-fast-install), same as the
+        // pre-release one-click path.
+        if (gIsPreReleaseBuild || privateFeed) {
             cmd.Append(" -fast-install");
         } else {
             cmd.Append(" -install");
@@ -424,10 +427,17 @@ static void DownloadUpdateAsync(DownloadUpdateAsyncData* data) {
     constexpr i64 kMaxUpdateDownloadSize = 256LL * 1024 * 1024;
     bool ok = HttpGetToFile(updateInfo->dlURL, installerPath, cb, kMaxUpdateDownloadSize);
     logf("ShowAutoUpdateDialog: HttpGetToFile(): ok=%d, downloaded to '%s'\n", (int)ok, installerPath);
-    TempStr expectedSigner = GetExecutableSignerTemp(GetSelfExePathTemp());
-    TempStr installerSigner = ok ? GetExecutableSignerTemp(installerPath) : TempStr{};
-    ok = ok && expectedSigner && installerSigner && str::Eq(expectedSigner, installerSigner) &&
-         IsPEFileSigned(installerPath);
+    if (ok && GetPrivateUpdateFeedURL()) {
+        // Private feed (SumatraPDF+ fork): the manifest and installer already had
+        // to share the feed's origin and came over HTTPS, so we trust the
+        // download without requiring an Authenticode signature (fork builds are
+        // unsigned). If/when the build is signed the same file still installs.
+    } else {
+        TempStr expectedSigner = GetExecutableSignerTemp(GetSelfExePathTemp());
+        TempStr installerSigner = ok ? GetExecutableSignerTemp(installerPath) : TempStr{};
+        ok = ok && expectedSigner && installerSigner && str::Eq(expectedSigner, installerSigner) &&
+             IsPEFileSigned(installerPath);
+    }
     if (ok) {
         updateInfo->installerPath = str::Dup(installerPath);
     } else {
@@ -439,45 +449,29 @@ static void DownloadUpdateAsync(DownloadUpdateAsyncData* data) {
     uitask::Post(fn, "TaskShowAutoUpdateDialog");
 }
 
-// pre-release builds surface an available update with a bottom-left notification
-// whose "Download and update" link triggers a one-click download + install
-static void ShowUpdateAvailableNotification(MainWindow* win, UpdateInfo* updateInfo) {
-    if (!win || !updateInfo) {
-        return;
-    }
-    TempStr link = fmt("[%s](CmdInstallPrereleaseUpdate)", _TRA("Download and install latest version"));
-    // pre-release "Latest" is a build number (e.g. 17616); show as 3.7.17616
-    TempStr displayVer = updateInfo->latestVer;
-    if (!str::ContainsChar(displayVer, '.')) {
-        displayVer = fmt("%s.%s", StrL(CURR_VERSION_MAJOR_STRA), displayVer);
-    }
-    TempStr msg = fmt(_TRA("Version %s available. %s").s, displayVer, link);
-    NotificationCreateArgs args;
-    args.hwndParent = win->hwndCanvas;
-    args.msg = msg;
-    args.warning = true; // yellowish background so it stands out
-    args.groupId = kNotifUpdateAvailable;
-    args.timeoutMs = 0; // persist until the user clicks the link or closes it
-    args.corner = NotifCorner::BottomLeft;
-    args.xMargin = 2;
-    args.yMargin = 2;
-    ShowNotification(args);
-}
+static Str GetExpectedDownloadOrigin();
 
-// called when the user clicks "Download and update" in the pre-release update
-// notification: download the pending update and (via gUpdateAutoInstall) install
-// it without the confirmation dialog
+// Called when the user clicks the caption's Update button. A manifest without
+// an installer URL falls back to the feed's website instead of attempting an
+// empty download.
 void DownloadAndInstallPendingUpdate(MainWindow* win) {
     if (!win || !gPendingUpdate) {
         return;
     }
     UpdateInfo* updateInfo = gPendingUpdate;
     gPendingUpdate = nullptr;
+    RefreshUpdateButtons();
+
+    if (!updateInfo->dlURL) {
+        Str url = GetPrivateUpdateFeedURL() ? GetExpectedDownloadOrigin() : StrL(kWebisteDownloadPageURL);
+        SumatraLaunchBrowser(url);
+        delete updateInfo;
+        return;
+    }
     gUpdateAutoInstall = true;
 
     HWND hwndForNotif = win->hwndCanvas;
     updateInfo->hwndParent = win->hwndFrame;
-    RemoveNotificationsForGroup(hwndForNotif, kNotifUpdateAvailable);
 
     // progress notification updated by UpdateDownloadProgressNotif (same group)
     NotificationCreateArgs nargs;
@@ -526,7 +520,28 @@ static HRESULT CALLBACK TaskDialogHyperlinkCallback(HWND /*hwnd*/, UINT msg, WPA
 
 static const Str kExpectedDlHost = StrL("https://www.sumatrapdfreader.org/");
 
-static void NotifySuspiciousUpdate(HWND hwndParent, Str dlURL) {
+// Keep the scheme, host, and optional port, including the first slash. Requiring
+// downloads to start with this value prevents a private manifest from silently
+// redirecting updates to another machine.
+static Str GetURLOrigin(Str url) {
+    int authorityStart = str::IndexOfAfter(url, StrL("://"));
+    if (authorityStart <= 0) {
+        return {};
+    }
+    Str authorityAndPath(url.s + authorityStart, len(url) - authorityStart);
+    int slash = str::IndexOfChar(authorityAndPath, '/');
+    if (slash < 0) {
+        return {};
+    }
+    return Str(url.s, authorityStart + slash + 1);
+}
+
+static Str GetExpectedDownloadOrigin() {
+    Str privateFeed = GetPrivateUpdateFeedURL();
+    return privateFeed ? GetURLOrigin(privateFeed) : kExpectedDlHost;
+}
+
+static void NotifySuspiciousUpdate(HWND hwndParent, Str dlURL, Str expectedOrigin) {
     logf("NotifySuspiciousUpdate: suspicious download url '%s'\n", dlURL);
     ReportIfFast(true);
     auto title = _TRA("SumatraPDF Update");
@@ -535,7 +550,7 @@ static void NotifySuspiciousUpdate(HWND hwndParent, Str dlURL) {
 Download link should come from <a href="%s">%s</a> but is %s.
 
 Visit <a href="%s">%s</a> to download the latest version.)",
-                       kExpectedDlHost, kExpectedDlHost, dlURL, kExpectedDlHost, kExpectedDlHost);
+                       expectedOrigin, expectedOrigin, dlURL, expectedOrigin, expectedOrigin);
 
     TASKDIALOGCONFIG dialogConfig{};
     DWORD flags =
@@ -563,7 +578,7 @@ Visit <a href="%s">%s</a> to download the latest version.)",
     int buttonPressedId = 0;
     TaskDialogIndirect(&dialogConfig, &buttonPressedId, nullptr, nullptr);
     if (buttonPressedId == kBtnIdVisitWebsite) {
-        SumatraLaunchBrowser(kExpectedDlHost);
+        SumatraLaunchBrowser(expectedOrigin);
     }
 }
 
@@ -620,6 +635,8 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
 #endif
 
     Str url = rsp->url;
+    logf("MaybeStartUpdateDownload: url '%s', status %d, error %d, bytes %d\n", url, (int)rsp->httpStatusCode,
+         (int)rsp->error, len(rsp->data));
 
     if (rsp->error != 0) {
         logf("ShowAutoUpdateDialog: http get of '%s' failed with %d\n", url, (int)rsp->error);
@@ -630,11 +647,14 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
         return ERROR_INTERNET_INVALID_URL;
     }
 
-    bool isValidURL = false;
-    for (auto updateInfoURL : updateInfoURLs) {
-        if (str::StartsWith(url, updateInfoURL)) {
-            isValidURL = true;
-            break;
+    Str privateFeed = GetPrivateUpdateFeedURL();
+    bool isValidURL = privateFeed && str::StartsWith(url, privateFeed);
+    if (!privateFeed) {
+        for (auto updateInfoURL : updateInfoURLs) {
+            if (str::StartsWith(url, updateInfoURL)) {
+                isValidURL = true;
+                break;
+            }
         }
     }
     if (!isValidURL) {
@@ -675,29 +695,41 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
         return 0;
     }
 
+    Str expectedOrigin = GetExpectedDownloadOrigin();
+    if (updateInfo->dlURL && (!expectedOrigin || !str::StartsWithI(updateInfo->dlURL, expectedOrigin))) {
+        RemoveNotificationsForGroup(win->hwndCanvas, kNotifUpdateCheckInProgress);
+        NotifySuspiciousUpdate(hwndParent, updateInfo->dlURL, expectedOrigin);
+        delete updateInfo;
+        return 0;
+    }
+
+    // Startup checks are intentionally quiet. Keep the parsed manifest and
+    // surface it as a caption action; downloading starts only after a click.
+    // For the SumatraPDF+ private feed we also pop a subtle toast: a 10s window
+    // to tap "Update now" and self-install (download + install + relaunch; a
+    // Program Files install still shows one UAC prompt). Ignore it and the toast
+    // just fades - the caption's Update button remains for later.
+    if (updateCheckType == UpdateCheck::Automatic) {
+        RemoveNotificationsForGroup(hwndForNotif, kNotifUpdateCheckInProgress);
+        SetPendingUpdate(updateInfo);
+        if (GetPrivateUpdateFeedURL() && updateInfo->dlURL) {
+            NotificationCreateArgs nargs;
+            nargs.hwndParent = hwndForNotif;
+            nargs.groupId = kNotifUpdateCheckInProgress;
+            nargs.timeoutMs = 10 * 1000;
+            nargs.corner = NotifCorner::BottomLeft;
+            nargs.msg = fmt("SumatraPDF+ %s is available. [Update now](CmdInstallPrereleaseUpdate)",
+                            updateInfo->latestVer);
+            ShowNotification(nargs);
+        }
+        return 0;
+    }
+
     if (!updateInfo->dlURL) {
-        // currently for release builds we don't set this and redirecto to a website instead
         logf("ShowAutoUpdateDialog: didn't find download url. Auto update data:\n%s\n", ToStr(*data));
         RemoveNotificationsForGroup(win->hwndCanvas, kNotifUpdateCheckInProgress);
         NotifyUserOfUpdate(updateInfo);
         delete updateInfo;
-        return 0;
-    }
-
-    if (!str::StartsWith(updateInfo->dlURL, kExpectedDlHost)) {
-        RemoveNotificationsForGroup(win->hwndCanvas, kNotifUpdateCheckInProgress);
-        NotifySuspiciousUpdate(hwndParent, updateInfo->dlURL);
-        delete updateInfo;
-        return 0;
-    }
-
-    // pre-release automatic check: don't download yet. Show a bottom-left
-    // notification whose "Download and update" link does the download + install.
-    if (updateCheckType == UpdateCheck::Automatic && gIsPreReleaseBuild) {
-        RemoveNotificationsForGroup(hwndForNotif, kNotifUpdateCheckInProgress);
-        delete gPendingUpdate;       // drop any update from a previous check
-        gPendingUpdate = updateInfo; // take ownership (freed when installed/replaced)
-        ShowUpdateAvailableNotification(win, updateInfo);
         return 0;
     }
 
@@ -715,7 +747,7 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
 
 static void BuildUpdateURL(str::Builder& url, Str baseURL, UpdateCheck updateCheckType) {
     url.Reset(baseURL);
-    url.Append("?v=");
+    url.Append(str::ContainsChar(baseURL, '?') ? StrL("&v=") : StrL("?v="));
     url.Append(UPDATE_CHECK_VERA);
     TempStr osVerTemp = GetWindowsVerTemp();
     url.Append("&os=");
@@ -783,17 +815,26 @@ static void UpdateCheckFinish(UpdateCheckAsyncData* data) {
 static void UpdateCheckAsync(UpdateCheckAsyncData* data) {
     auto updateCheckType = data->updateCheckType;
     HttpRsp* rsp = nullptr;
-    for (auto updateInfoURL : updateInfoURLs) {
-        if (rsp) {
-            delete rsp;
-        }
+    bool downloaded = false;
+    auto download = [&](Str updateInfoURL) {
         str::Builder url;
         BuildUpdateURL(url, updateInfoURL, updateCheckType);
         Str uri = ToStr(url);
-        rsp = new HttpRsp;
-        str::ReplaceWithCopy(&rsp->url, uri);
-        if (HttpGet(uri, rsp)) {
-            break;
+        auto* result = new HttpRsp;
+        str::ReplaceWithCopy(&result->url, uri);
+        downloaded = HttpGet(uri, result);
+        return result;
+    };
+    Str privateFeed = GetPrivateUpdateFeedURL();
+    if (privateFeed) {
+        rsp = download(privateFeed);
+    } else {
+        for (auto updateInfoURL : updateInfoURLs) {
+            delete rsp;
+            rsp = download(updateInfoURL);
+            if (downloaded) {
+                break;
+            }
         }
     }
     data->rsp = rsp;

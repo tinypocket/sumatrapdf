@@ -217,6 +217,8 @@ int HdcDrawText(HDC hdc, Str s, const Rect& r, uint format, HFONT font = nullptr
 int HdcDrawText(HDC hdc, WStr s, const Rect& r, uint format, HFONT font = nullptr);
 int HdcDrawText(HDC hdc, Str s, const Point& pos, uint format, HFONT font = nullptr);
 int HdcDrawText(HDC hdc, WStr s, const Point& pos, uint format, HFONT font = nullptr);
+// text with fixed-advance digits so columns of numbers align (see .cpp)
+void HdcDrawTextTabular(HDC hdc, Str s, const Rect& r, uint format, HFONT font = nullptr);
 Rect HdcMeasureWithDrawText(HDC hdc, Str s, Rect r, uint format, HFONT font = nullptr);
 Rect HdcMeasureWithDrawText(HDC hdc, WStr s, Rect r, uint format, HFONT font = nullptr);
 bool HdcExTextOut(HDC hdc, Point pos, uint options, const Rect& rect, Str text);
@@ -236,10 +238,14 @@ int HdcMeasureStringWidth(HDC hdc, WStr str);
 
 HFONT GetMenuFont();
 HFONT HdcCreateSimpleFont(HDC hdc, Str fontName, int fontSize);
+HFONT HdcCreateSimpleFontWeight(HDC hdc, Str fontName, int fontSize, int weight);
+// the system UI font at a size/weight; see the comment on the definition
+HFONT HdcGetUiFont(HDC hdc, int sizePx, int weight = FW_DONTCARE);
 HFONT GetDefaultGuiFont(bool bold = false, bool italic = false);
 HFONT GetDefaultGuiFontOfSize(int size);
 HFONT GetUserGuiFont(Str fontName, int size);
 HFONT GetUserGuiFontEx(Str fontName, int size, bool bold, bool italic);
+HFONT GetUserGuiFontWeight(Str fontName, int size, int weight, bool italic);
 int GetSizeOfDefaultGuiFont();
 bool GetNonClientMetricsForDpi(int dpi, NONCLIENTMETRICS* ncm);
 void DeleteCreatedFonts();

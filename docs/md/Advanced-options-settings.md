@@ -97,7 +97,11 @@ RememberOpenedFiles = true
 RememberStatePerDocument = true
 
 ; if true and SessionData isn't empty, that session will be restored at startup
-RestoreSession = true
+RestoreSession = false
+
+; whether the SumatraPDF+ no-session-restore default has been applied
+; (introduced in version 3.8)
+RestoreSessionDefaultMigrated = false
 
 ; if true, open documents in the already running SumatraPDF instead of starting
 ; a new one
@@ -137,6 +141,29 @@ SearchUIFloating = false
 
 ; if true, show the Favorites sidebar
 ShowFavorites = false
+
+; if true, show the icon rail: the strip of large icon buttons along the left
+; edge that switches what the sidebar shows. On by default for the touch
+; redesign (introduced in version 3.8)
+ShowRail = true
+
+; if true, use the touch-friendly chrome: a custom-drawn toolbar of grouped
+; buttons with finger-sized targets, and a sidebar to match. If false, the
+; classic Windows toolbar is used (introduced in version 3.8)
+TouchChrome = true
+
+; vertical spacing for touch sidebar rows: "condensed", "normal", or "expanded"
+; (introduced in version 3.8)
+TouchSidebarDensity = normal
+
+; folders imported into the Library view (introduced in version 3.8)
+LibraryFolders =
+
+; folders pinned in the Library view (introduced in version 3.8)
+LibraryPinnedFolders =
+
+; folders hidden in the Library view (introduced in version 3.8)
+LibraryHiddenFolders =
 
 ; if true, favorites within each file are sorted alphabetically by name (or page
 ; label); if false (the default), they are sorted by page number (introduced in
@@ -215,10 +242,10 @@ PreventSleepInFullscreen = true
 ; maximum width of a single tab, in pixels at 100% display scaling (at least 60)
 TabWidth = 300
 
-; valid themes: Light, Dark, Light Warm, Dark from 3.5, Charcoal, Solarized
-; Light, Solarized Dark, Dracula, Nebula, Greeny, Choco, Purpy, One Dark,
-; Monokai, Nord, GitHub Dark, Catppuccin Mocha, Tokyo Night, Gruvbox, Night Owl,
-; Ayu, Palenight, System (introduced in version 3.5)
+; valid themes: Light, Dark, Light Warm, Touch Paper, Dark from 3.5, Charcoal,
+; Solarized Light, Solarized Dark, Dracula, Nebula, Greeny, Choco, Purpy, One
+; Dark, Monokai, Nord, GitHub Dark, Catppuccin Mocha, Tokyo Night, Gruvbox,
+; Night Owl, Ayu, Palenight, System (introduced in version 3.5)
 Theme = 
 
 ; the light theme the light/dark toggle and the System theme switch to
@@ -250,7 +277,7 @@ ToolbarShowReadAloud = false
 
 ; size of the toolbar icons in pixels at 100% display scaling (8-64); the
 ; toolbar itself is a few pixels taller (introduced in version 3.4)
-ToolbarSize = 18
+ToolbarSize = 24
 
 ; font name for bookmarks and favorites tree views. automatic means Windows
 ; default
@@ -283,7 +310,7 @@ UseSysColors = false
 
 ; if true, documents are opened in tabs instead of new windows (introduced in
 ; version 3.0)
-UseTabs = true
+UseTabs = false
 
 ; if true, a small floating toolbar with selection actions (copy, read aloud,
 ; highlight etc.) pops up after selecting text. Set to false to disable it
@@ -951,7 +978,13 @@ OpenCountWeek = 0
 ; position of the document properties window
 PropWinPos = 0 0
 
-; if true, check once a day whether an update is available
+; private update manifest URL; when set, it replaces the public update feed and
+; update installers must use the same URL origin. SumatraPDF+ defaults it to
+; this fork's GitHub releases so update checks are self-hosted (introduced in
+; version 3.8)
+UpdateFeedURL = https://github.com/tinypocket/sumatrapdf/releases/latest/download/update-check.txt
+
+; if true, check at startup whether an update is available
 CheckForUpdates = true
 ```
 
