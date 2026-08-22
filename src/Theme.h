@@ -33,6 +33,7 @@ COLORREF ThemeNotificationsHighlightColor();
 // Background and text for an "active"/"selected" surface in the redesigned
 // chrome (rail button, panel row). The accent is used for the text only when
 // it actually reads against the tint; on some themes it doesn't.
+COLORREF ThemeTouchSurfaceColor();
 void ThemeAccentSurfaceColors(COLORREF* bgOut, COLORREF* fgOut);
 COLORREF ThemeNotificationsHighlightTextColor();
 COLORREF ThemeNotificationsHighlightLinkColor();

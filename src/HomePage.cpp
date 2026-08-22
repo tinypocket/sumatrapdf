@@ -3526,7 +3526,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
 
     EnsureHomeSearchCreated(win);
     Rect search{DpiScale(hdc, 12), DpiScale(hdc, 12), leftDx - DpiScale(hdc, 24), DpiScale(hdc, 40)};
-    FillHomeRoundRect(hdc, search, search.dy / 2, ThemeWindowControlBackgroundColor(), ThemeEdgeColor());
+    FillHomeRoundRect(hdc, search, search.dy / 2, ThemeTouchSurfaceColor(), ThemeEdgeColor());
     int searchIconDy = DpiScale(hdc, 16);
     HIMAGELIST searchIcons =
         GetTintedToolbarImageList(searchIconDy, ThemeWindowDarkerTextColor(), ThemeWindowControlBackgroundColor());

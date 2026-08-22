@@ -2217,7 +2217,16 @@ static void PaintTouchFilterChrome(MainWindow* win) {
     int sideMargin = DpiScale(hwnd, 16);
     Rect pill{sideMargin, tl.y, rcClient.dx - (2 * sideMargin), er.dy};
     pill.Inflate(0, DpiScale(hwnd, 8));
-    COLORREF fieldBg = ThemeWindowControlBackgroundColor();
+    // The panel is a WC_STATIC and paints its own background, which is the
+    // control background (pure black on the Dark theme). Everywhere else that
+    // is covered by the header / tree children, but the filter strip is not -
+    // so repaint that band in the panel color before drawing the pill on it.
+    // fill all the way down: the tree / sticky children paint over the rest, so
+    // this can't leave a black sliver between the pill and the tree
+    int bandY = pill.y - DpiScale(hwnd, 8);
+    Rect band{0, bandY, rcClient.dx, std::max(0, rcClient.dy - bandY)};
+    HdcFillRect(hdc, band, ThemeHotBackgroundColor());
+    COLORREF fieldBg = ThemeTouchSurfaceColor();
     FillTocPill(hdc, pill, pill.dy / 2, fieldBg, ThemeEdgeColor());
 
     int iconDy = DpiScale(hwnd, kPanelFilterIconDy);

@@ -955,7 +955,10 @@ void UpdateControlsColors(MainWindow* win) {
 
         win->tocLabelWithClose->SetColors(txtCol, bgCol);
         if (win->tocFilterEdit) {
-            win->tocFilterEdit->SetColors(txtCol, bgCol);
+            // the filter edit sits inside the pill the panel draws behind it, so
+            // it has to match that raised surface, not the panel underneath
+            COLORREF editBg = IsTouchChrome(win) ? ThemeTouchSurfaceColor() : bgCol;
+            win->tocFilterEdit->SetColors(txtCol, editBg);
         }
         win->sidebarSplitter->SetColors(kColorNoChange, splitterCol);
     }

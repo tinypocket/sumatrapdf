@@ -1036,12 +1036,29 @@ static COLORREF BlendColors(COLORREF a, COLORREF b, int pctA) {
     return RGB(r, g, bl);
 }
 
+// A surface meant to sit *above* the panel / rail background: the search and
+// filter pills and the selected-row fill. On light themes the control
+// background is already a step lighter than the panel, so it's used unchanged.
+// But some dark themes (the built-in Dark) use pure black for the control
+// background while the panel is a lighter grey-blue, so those surfaces came out
+// as harsh black boxes - a step *up* from the panel is what reads as raised.
+COLORREF ThemeTouchSurfaceColor() {
+    COLORREF panel = ThemeHotBackgroundColor();
+    COLORREF ctrl = ThemeWindowControlBackgroundColor();
+    if (GetLightness(ctrl) >= GetLightness(panel) + 6.0f) {
+        return ctrl;
+    }
+    return AdjustLightness2(panel, 14.0f);
+}
+
 void ThemeAccentSurfaceColors(COLORREF* bgOut, COLORREF* fgOut) {
     // A tint of the theme's own accent over the control background. It used to
     // borrow NotificationHighlightColor, which is only an accent tint by
     // coincidence: on the default Light theme that slot is #ffee70, so every
     // active button came out notification-yellow.
-    COLORREF ctrlBg = ThemeWindowControlBackgroundColor();
+    // blend over the raised surface, not the raw control background: on the
+    // Dark theme the latter is pure black, so the tint stayed nearly invisible
+    COLORREF ctrlBg = ThemeTouchSurfaceColor();
     COLORREF accent = ThemeWindowLinkColor();
     // a dark background swallows a light blend, so it needs more of the accent
     int pct = IsLightColor(ctrlBg) ? 12 : 30;
