@@ -992,6 +992,10 @@ BrowserHomePage = https://www.google.com
 ; 3.8)
 BrowserBookmarks =
 
+; files downloaded by the in-product web browser, so they can be cleaned up
+; later (introduced in version 3.8)
+BrowserDownloads =
+
 ; if true, check at startup whether an update is available
 CheckForUpdates = true
 ```

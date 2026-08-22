@@ -910,6 +910,9 @@ struct GlobalPrefs {
     Str browserHomePage;
     // bookmarked URLs shown in the in-product web browser
     Vec<Str>* browserBookmarks;
+    // files downloaded by the in-product web browser, so they can be
+    // cleaned up later
+    Vec<Str>* browserDownloads;
     // if true, check at startup whether an update is available
     bool checkForUpdates;
 };
@@ -1537,7 +1540,7 @@ static const StructInfo gPointInfo = {
 
 static const FieldInfo gGlobalPrefsFields[] = {
     {(size_t)-1, SettingType::Comment,
-     (intptr_t)"For documentation, see https://www.sumatrapdfreader.org/settings/settings3-7.html"},
+     (intptr_t)"For documentation, see https://www.sumatrapdfreader.org/settings/settings3-7-2.html"},
     {(size_t)-1, SettingType::Comment, 0},
     {offsetof(GlobalPrefs, defaultDisplayMode), SettingType::String, (intptr_t)"automatic"},
     {offsetof(GlobalPrefs, defaultZoom), SettingType::String, (intptr_t)"fit page"},
@@ -1673,13 +1676,14 @@ static const FieldInfo gGlobalPrefsFields[] = {
      (intptr_t)"https://github.com/tinypocket/sumatrapdf/releases/latest/download/update-check.txt", true},
     {offsetof(GlobalPrefs, browserHomePage), SettingType::String, (intptr_t)"https://www.google.com", true},
     {offsetof(GlobalPrefs, browserBookmarks), SettingType::StringArray, 0, true},
+    {offsetof(GlobalPrefs, browserDownloads), SettingType::StringArray, 0, true},
     {offsetof(GlobalPrefs, checkForUpdates), SettingType::Bool, true, true},
     {(size_t)-1, SettingType::Comment, 0, true},
     {(size_t)-1, SettingType::Comment, (intptr_t)"Settings below are not recognized by the current version", true},
 };
 static const StructInfo gGlobalPrefsInfo = {
     sizeof(GlobalPrefs),
-    138,
+    139,
     gGlobalPrefsFields,
     "\0\0DefaultDisplayMode\0DefaultZoom\0DisableJavaScript\0AllowExternalImages\0EnableTeXEnhancements\0EscToExit\0Ful"
     "lPathInTitle\0InverseSearchCmdLine\0LazyLoading\0MainWindowBackground\0NoHomeTab\0HomePageSortByFrequentlyRead\0Ho"
@@ -1697,7 +1701,7 @@ static const StructInfo gGlobalPrefsInfo = {
     "dSearch\0\0PrinterDefaults\0\0Fullscreen\0\0SelectionHandlers\0\0Shortcuts\0\0Themes\0\0TabGroups\0\0CustomScreenD"
     "PI\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0WindowState\0WindowPos\0SearchUIWindowPos\0FileStates\0Sessio"
     "nData\0ReopenOnce\0TimeOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0UpdateFeedURL\0BrowserHomePage\0BrowserBookma"
-    "rks\0CheckForUpdates\0\0",
+    "rks\0BrowserDownloads\0CheckForUpdates\0\0",
     "\0\0default layout of pages. valid values: automatic, single page, facing, book view, continuous, continuous "
     "facing, continuous book view\0default zoom. valid values: fit page, fit width, fit height, fit content or percent "
     "like 100%\0if true, JavaScript in PDF documents is disabled (e.g. form-field calculations won't run)\0if true, a "
@@ -1801,8 +1805,8 @@ static const StructInfo gGlobalPrefsInfo = {
     "window\0private update manifest URL; when set, it replaces the public update feed and update installers must use "
     "the same URL origin. SumatraPDF+ defaults it to this fork's GitHub releases so update checks are "
     "self-hosted\0home page for the in-product web browser (the rail's globe view)\0bookmarked URLs shown in the "
-    "in-product web browser\0if true, check at startup whether an update is available\0\0Settings below are not "
-    "recognized by the current version",
+    "in-product web browser\0files downloaded by the in-product web browser, so they can be cleaned up later\0if true, "
+    "check at startup whether an update is available\0\0Settings below are not recognized by the current version",
     false};
 static const FieldInfo gTheme_1_Fields[] = {
     {offsetof(Theme, name), SettingType::String, (intptr_t)""},

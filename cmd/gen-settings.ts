@@ -1339,6 +1339,12 @@ const globalPrefs: Field[] = [
     "home page for the in-product web browser (the rail's globe view)",
   ).ver("3.8"),
   compactArray("BrowserBookmarks", Str, null, "bookmarked URLs shown in the in-product web browser").ver("3.8"),
+  compactArray(
+    "BrowserDownloads",
+    Str,
+    null,
+    "files downloaded by the in-product web browser, so they can be cleaned up later",
+  ).ver("3.8"),
   // saved & honored, but hidden from the advanced settings dialog (edited via
   // the "Automatically check for updates" checkbox in Options instead)
   field("CheckForUpdates", Bool, true, "if true, check at startup whether an update is available").internal(),

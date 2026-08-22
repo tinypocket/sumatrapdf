@@ -386,6 +386,8 @@ struct TouchBrowser {
     Button* btnForward = nullptr;
     Button* btnHome = nullptr;
     Button* btnStar = nullptr;
+    Button* btnInfo = nullptr;
+    Button* btnMenu = nullptr;
     Button* btnNewTab = nullptr;
     HWND hwndUrl = nullptr;
     HFONT hFont = nullptr;
@@ -426,6 +428,58 @@ static bool TouchBrowserUrlIsDoc(Str url, Str* extOut) {
     return true;
 }
 
+// the file name a URL points at (query/fragment stripped, last path segment)
+static TempStr TbUrlFileNameTemp(Str url) {
+    Str name = url;
+    int cut = str::IndexOfChar(name, '?');
+    if (cut >= 0) {
+        name = Str(name.s, cut);
+    }
+    cut = str::IndexOfChar(name, '#');
+    if (cut >= 0) {
+        name = Str(name.s, cut);
+    }
+    int slash = str::LastIndexOfChar(name, '/');
+    if (slash >= 0) {
+        name = Str(name.s + slash + 1, name.len - slash - 1);
+    }
+    return name ? str::DupTemp(name) : TempStr{};
+}
+
+// The user's Downloads folder; documents opened from the browser are saved
+// there (like a normal browser) instead of a temp file, so they persist and
+// have a real name.
+static TempStr TbDownloadsDirTemp() {
+    WCHAR* pathW = nullptr;
+    HRESULT hr = SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &pathW);
+    if (FAILED(hr) || !pathW) {
+        CoTaskMemFree(pathW);
+        return {};
+    }
+    TempStr res = ToUtf8Temp(pathW);
+    CoTaskMemFree(pathW);
+    return res;
+}
+
+// remember what we downloaded so "Clean up downloaded files" can remove exactly
+// those and nothing else
+static void TbRecordDownload(Str path) {
+    if (!path) {
+        return;
+    }
+    if (!gGlobalPrefs->browserDownloads) {
+        gGlobalPrefs->browserDownloads = new Vec<Str>();
+    }
+    Vec<Str>* v = gGlobalPrefs->browserDownloads;
+    for (int i = 0; i < len(*v); i++) {
+        if (str::EqI((*v)[i], path)) {
+            return;
+        }
+    }
+    v->Append(str::Dup(path));
+    SaveSettings();
+}
+
 struct TbDocDownload {
     Str url;
     Str destPath;
@@ -436,6 +490,9 @@ struct TbDocDownload {
 };
 
 static void TbDocDownloadFinish(TbDocDownload* d) {
+    if (file::Exists(d->destPath)) {
+        TbRecordDownload(d->destPath);
+    }
     if (IsMainWindowValid(d->win) && file::Exists(d->destPath)) {
         LoadArgs args(d->destPath, d->win);
         if (d->displayName) {
@@ -491,24 +548,19 @@ static bool TbNavigationStarting(void* ctx, Str url, bool newWindow) {
         auto* d = new TbDocDownload();
         d->win = tb->win;
         d->url = str::Dup(url);
-        TempStr base = GetTempFilePathTemp("sumatra-web");
-        d->destPath = str::Dup(str::JoinTemp(base, ext));
-        // label the tab with the file name from the URL, not the temp file's
-        Str name = url;
-        int cut = str::IndexOfChar(name, '?');
-        if (cut >= 0) {
-            name = Str(name.s, cut);
+        // save into Downloads under the URL's own file name; fall back to a
+        // temp file only if the Downloads folder can't be resolved
+        TempStr dir = TbDownloadsDirTemp();
+        Str fileName = TbUrlFileNameTemp(url);
+        if (dir && fileName) {
+            TempStr want = path::JoinTemp(dir, fileName);
+            d->destPath = str::Dup(MakeUniqueFilePathTemp(want));
+        } else {
+            TempStr base = GetTempFilePathTemp("sumatra-web");
+            d->destPath = str::Dup(str::JoinTemp(base, ext));
         }
-        cut = str::IndexOfChar(name, '#');
-        if (cut >= 0) {
-            name = Str(name.s, cut);
-        }
-        int slash = str::LastIndexOfChar(name, '/');
-        if (slash >= 0) {
-            name = Str(name.s + slash + 1, name.len - slash - 1);
-        }
-        if (name) {
-            d->displayName = str::Dup(name);
+        if (fileName) {
+            d->displayName = str::Dup(fileName);
         }
         RunAsync(MkFunc0<TbDocDownload>(TbDocDownloadAsync, d), "TbDocDownloadAsync");
         return false; // cancel the webview navigation
@@ -625,6 +677,85 @@ static void TbOnHome(TouchBrowser* tb) {
         wv->Navigate(TouchBrowserHomeUrl());
     }
 }
+// "i": explain where documents opened from the browser end up
+static void TbOnInfo(TouchBrowser* tb) {
+    TempStr dir = TbDownloadsDirTemp();
+    Str where = dir ? Str(dir) : StrL("(Downloads folder not found)");
+    TempStr msg = fmt(
+        "Documents you open from the browser (PDF, EPUB, MOBI, CBZ, DjVu, XPS, CHM) are "
+        "downloaded and saved to your Downloads folder:\n\n%s\n\n"
+        "They stay there until you delete them. Use the menu button next to this one and "
+        "choose 'Clean up downloaded files' to remove the ones SumatraPDF+ downloaded.",
+        where);
+    MsgBox(tb->win ? tb->win->hwndFrame : nullptr, msg, StrL("Downloads"), MB_OK | MB_ICONINFORMATION);
+}
+
+// delete exactly the files this browser downloaded (tracked in prefs)
+static void TbCleanupDownloads(TouchBrowser* tb) {
+    HWND parent = tb->win ? tb->win->hwndFrame : nullptr;
+    Vec<Str>* v = gGlobalPrefs->browserDownloads;
+    int nExisting = 0;
+    for (int i = 0; v && i < len(*v); i++) {
+        if (file::Exists((*v)[i])) {
+            nExisting++;
+        }
+    }
+    if (nExisting == 0) {
+        MsgBox(parent, StrL("No downloaded files to clean up."), StrL("Clean up downloads"),
+               MB_OK | MB_ICONINFORMATION);
+        if (v) {
+            for (Str p2 : *v) {
+                str::Free(p2);
+            }
+            v->Reset();
+            SaveSettings();
+        }
+        return;
+    }
+    TempStr ask = fmt("Delete %d file%s downloaded by SumatraPDF+ from your Downloads folder?", nExisting,
+                      nExisting == 1 ? StrL("") : StrL("s"));
+    int res = MsgBox(parent, ask, StrL("Clean up downloads"), MB_YESNO | MB_ICONQUESTION);
+    if (res != IDYES) {
+        return;
+    }
+    int nDeleted = 0;
+    for (int i = 0; i < len(*v); i++) {
+        Str fp = (*v)[i];
+        if (file::Exists(fp) && file::Delete(fp)) {
+            nDeleted++;
+        }
+    }
+    for (Str p2 : *v) {
+        str::Free(p2);
+    }
+    v->Reset();
+    SaveSettings();
+    MsgBox(parent, fmt("Deleted %d file%s.", nDeleted, nDeleted == 1 ? StrL("") : StrL("s")), StrL("Clean up downloads"),
+           MB_OK | MB_ICONINFORMATION);
+}
+
+// the "..." overflow menu
+static void TbOnMenu(TouchBrowser* tb) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) {
+        return;
+    }
+    constexpr UINT kCmdCleanup = 1;
+    constexpr UINT kCmdInfo = 2;
+    AppendMenuW(menu, MF_STRING, kCmdCleanup, L"Clean up downloaded files...");
+    AppendMenuW(menu, MF_STRING, kCmdInfo, L"Where do downloads go?");
+    Rect r = tb->btnMenu ? HwndWindowRect(tb->btnMenu->hwnd) : Rect{};
+    HWND parent = tb->win ? tb->win->hwndFrame : nullptr;
+    UINT flags = TPM_RIGHTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY;
+    int cmd = (int)TrackPopupMenu(menu, flags, r.x + r.dx, r.y + r.dy, 0, parent, nullptr);
+    DestroyMenu(menu);
+    if (cmd == (int)kCmdCleanup) {
+        TbCleanupDownloads(tb);
+    } else if (cmd == (int)kCmdInfo) {
+        TbOnInfo(tb);
+    }
+}
+
 static void TbOnStar(TouchBrowser* tb) {
     TouchWebToggleBookmark(tb->win);
 }
@@ -890,6 +1021,8 @@ static TouchBrowser* CreateTouchBrowser(MainWindow* win) {
     tb->btnForward->SetIsEnabled(false);
     tb->btnHome = TbMakeButton(frame, tb->hFont, StrL("Home"), MkFunc0<TouchBrowser>(TbOnHome, tb));
     tb->btnStar = TbMakeButton(frame, tb->hFont, StrL("Favorite"), MkFunc0<TouchBrowser>(TbOnStar, tb));
+    tb->btnInfo = TbMakeButton(frame, tb->hFont, StrL("i"), MkFunc0<TouchBrowser>(TbOnInfo, tb));
+    tb->btnMenu = TbMakeButton(frame, tb->hFont, StrL("..."), MkFunc0<TouchBrowser>(TbOnMenu, tb));
     tb->btnNewTab = TbMakeButton(frame, tb->hFont, StrL("+"), MkFunc0<TouchBrowser>(TbOnNewTab, tb));
 
     HINSTANCE inst = GetInstance();
@@ -921,6 +1054,8 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
     TbShowWnd(tb->btnForward ? tb->btnForward->hwnd : nullptr, show);
     TbShowWnd(tb->btnHome ? tb->btnHome->hwnd : nullptr, show);
     TbShowWnd(tb->btnStar ? tb->btnStar->hwnd : nullptr, show);
+    TbShowWnd(tb->btnInfo ? tb->btnInfo->hwnd : nullptr, show);
+    TbShowWnd(tb->btnMenu ? tb->btnMenu->hwnd : nullptr, show);
     TbShowWnd(tb->btnNewTab ? tb->btnNewTab->hwnd : nullptr, show);
     TbShowWnd(tb->hwndUrl, show);
     for (TbChip* c : tb->bmChips) {
@@ -960,6 +1095,8 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
         raise(tb->btnForward ? tb->btnForward->hwnd : nullptr);
         raise(tb->btnHome ? tb->btnHome->hwnd : nullptr);
         raise(tb->btnStar ? tb->btnStar->hwnd : nullptr);
+        raise(tb->btnInfo ? tb->btnInfo->hwnd : nullptr);
+        raise(tb->btnMenu ? tb->btnMenu->hwnd : nullptr);
         raise(tb->hwndUrl);
         for (TbTab* t : tb->tabs) {
             raise(t->btnLabel ? t->btnLabel->hwnd : nullptr);
@@ -1019,8 +1156,18 @@ void LayoutTouchWebView(MainWindow* win, Rect rc) {
     place(tb->btnForward);
     place(tb->btnHome);
     // Bookmark button sits at the right edge of the nav row
+    // right-aligned cluster: [Favorite] [i] [...]
+    int miniDx = DpiScale(frame, 30);
+    int menuX = rc.x + rc.dx - pad - miniDx;
+    if (tb->btnMenu) {
+        MoveWindow(tb->btnMenu->hwnd, menuX, y, miniDx, btnDy, TRUE);
+    }
+    int infoX = menuX - gap - miniDx;
+    if (tb->btnInfo) {
+        MoveWindow(tb->btnInfo->hwnd, infoX, y, miniDx, btnDy, TRUE);
+    }
     int starDx = btnDx + DpiScale(frame, 30);
-    int starX = rc.x + rc.dx - pad - starDx;
+    int starX = infoX - gap - starDx;
     if (tb->btnStar) {
         MoveWindow(tb->btnStar->hwnd, starX, y, starDx, btnDy, TRUE);
     }
@@ -1168,6 +1315,8 @@ void DestroyTouchWebView(MainWindow* win) {
     delete tb->btnForward;
     delete tb->btnHome;
     delete tb->btnStar;
+    delete tb->btnInfo;
+    delete tb->btnMenu;
     delete tb->btnNewTab;
     if (tb->hwndUrl) {
         DestroyWindow(tb->hwndUrl);
