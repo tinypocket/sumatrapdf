@@ -4660,7 +4660,7 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
     // Same for the floating selection/highlight toolbar: it holds a tab*
     // and would otherwise stay on screen after the tab is gone.
     if (tab == win->CurrentTab()) {
-        HideFindBar(win);
+        HideFindBarForDocumentChange(win);
         HideSelectionToolbar(win);
     }
     RemoveNotificationsForGroup(win->hwndCanvas, kNotifPageInfo);

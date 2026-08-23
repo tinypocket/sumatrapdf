@@ -1876,6 +1876,16 @@ void SetTouchPanelModeAndRestoreSearch(MainWindow* win, TouchPanelMode mode) {
     UpdateTouchPanelMode(win);
 }
 
+// True when the sidebar is showing the touch chrome's Search panel. That panel
+// renders win->findMatches inline, so it is a second live consumer of the find
+// results besides the classic find bar / floating find window.
+bool IsTouchSearchPanelVisible(MainWindow* win) {
+    if (!win || !IsTouchChrome(win)) {
+        return false;
+    }
+    return win->uiState.tocVisible && win->touchPanelMode == TouchPanelMode::Search;
+}
+
 void UpdateTouchPanelMode(MainWindow* win) {
     if (!win || !IsTouchChrome(win) || !win->tocLabelWithClose) {
         return;
@@ -2201,7 +2211,21 @@ static Rect TouchFilterClearRect(MainWindow* win, bool hitTarget) {
     return clear;
 }
 
-static void PaintTouchFilterChrome(MainWindow* win) {
+// Draws the rounded filter/search field around win->tocFilterEdit on the panel
+// itself (the edit is a plain child; the pill, magnifier and clear button are
+// ours). It runs after EndPaint(), on a GetDC() of the panel, so whatever it
+// touches wins over what WM_PAINT just drew.
+//
+// `ownsBodyBelow` says who is responsible for the area under the field. In
+// Bookmarks mode nobody paints it in WM_PAINT - the tree and sticky-header
+// child windows cover it - and a plain erase down to the bottom of the client
+// is the cheapest way to avoid a WC_STATIC-background sliver between the pill
+// and the tree, so pass true. In the self-painted modes (Search) the body under
+// the field is the panel's own content, drawn by PaintTouchPanelMode() during
+// WM_PAINT; erasing down to the bottom there wipes the match count, the
+// prev/next buttons and the whole results list right after they were drawn.
+// Pass false and the erase stops at the bottom of the pill.
+static void PaintTouchFilterChrome(MainWindow* win, bool ownsBodyBelow) {
     Edit* edit = win->tocFilterEdit;
     if (!edit || !edit->hwnd || !HwndIsVisible(edit->hwnd)) {
         return;
@@ -2222,10 +2246,9 @@ static void PaintTouchFilterChrome(MainWindow* win) {
     // control background (pure black on the Dark theme). Everywhere else that
     // is covered by the header / tree children, but the filter strip is not -
     // so repaint that band in the panel color before drawing the pill on it.
-    // fill all the way down: the tree / sticky children paint over the rest, so
-    // this can't leave a black sliver between the pill and the tree
     int bandY = pill.y - DpiScale(hwnd, 8);
-    Rect band{0, bandY, rcClient.dx, std::max(0, rcClient.dy - bandY)};
+    int bandBottom = ownsBodyBelow ? rcClient.dy : pill.y + pill.dy;
+    Rect band{0, bandY, rcClient.dx, std::max(0, bandBottom - bandY)};
     HdcFillRect(hdc, band, ThemeHotBackgroundColor());
     COLORREF fieldBg = ThemeTouchSurfaceColor();
     FillTocPill(hdc, pill, pill.dy / 2, fieldBg, ThemeEdgeColor());
@@ -2337,12 +2360,14 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             PaintTouchPanelMode(win, hdc);
             EndPaint(hwnd, &ps);
             if (win->touchPanelMode == TouchPanelMode::Search) {
-                PaintTouchFilterChrome(win);
+                // false: PaintTouchPanelMode() just drew the results list under
+                // the field, so the chrome must not erase down to the bottom
+                PaintTouchFilterChrome(win, false);
             }
             return 0;
         }
         LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
-        PaintTouchFilterChrome(win);
+        PaintTouchFilterChrome(win, true);
         if (HasTocFilter(win)) {
             HDC hdc = GetDC(hwnd);
             if (hdc) {

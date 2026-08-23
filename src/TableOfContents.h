@@ -11,6 +11,7 @@ void UpdateTocExpansionState(Vec<int>& tocState, TreeView*, TocTree*);
 void UnsubclassToc(MainWindow*);
 void TocFilterChanged(MainWindow*);
 void UpdateTouchPanelMode(MainWindow*);
+bool IsTouchSearchPanelVisible(MainWindow*);
 void SetTouchPanelModeAndRestoreSearch(MainWindow*, TouchPanelMode);
 int TouchSidebarRowDy();
 

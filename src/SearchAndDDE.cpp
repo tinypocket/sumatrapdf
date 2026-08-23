@@ -27,6 +27,7 @@
 #include "WindowTab.h"
 #include "Commands.h"
 #include "AppTools.h"
+#include "TableOfContents.h"
 #include "SearchAndDDE.h"
 #include "Selection.h"
 #include "Toolbar.h"
@@ -1179,8 +1180,7 @@ static void StartFindCount(MainWindow* win, Str text, bool matchCase, bool match
     engine->AddRef(); // released in CountThread
     // always build the match list so PaintAllFindMatches can highlight every hit;
     // snippets only when the floating results list is showing
-    bool embeddedResults =
-        IsTouchChrome(win) && win->uiState.tocVisible && win->touchPanelMode == TouchPanelMode::Search;
+    bool embeddedResults = IsTouchSearchPanelVisible(win);
     bool wantSnippets = (gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win)) || embeddedResults;
     bool wantMatchList = true;
     int epoch = AtomicIntInc(&win->findCountEpoch);
@@ -1198,8 +1198,7 @@ static void StartFindCount(MainWindow* win, Str text, bool matchCase, bool match
 static void UpdateMatchCount(MainWindow* win, Str text) {
     DisplayModel* dm = win->AsFixed();
     void* engine = dm ? (void*)dm->GetEngine() : nullptr;
-    bool embeddedResults =
-        IsTouchChrome(win) && win->uiState.tocVisible && win->touchPanelMode == TouchPanelMode::Search;
+    bool embeddedResults = IsTouchSearchPanelVisible(win);
     bool wantSnippets = (gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win)) || embeddedResults;
     bool wantMatchList = true;
     bool cacheHit = win->findCountValid && win->findCountText && str::Eq(win->findCountText, text) &&
@@ -1220,8 +1219,14 @@ void SearchDocumentFromTouchPanel(MainWindow* win, Str text) {
     if (!win || !text) {
         return;
     }
+    // Only start the interactive find. FindEndTask() kicks the full-document
+    // count -- which is what builds the results list the panel draws -- after
+    // this find thread has exited. Counting from here as well would run the
+    // counting scan *concurrently* with the find thread (mupdf's text
+    // extraction is not safe for that, which is exactly why the count is kicked
+    // from FindEndTask), and would scan the whole document twice per keystroke:
+    // the second scan starts by clearing the list the first one just installed.
     FindTextOnThread(win, TextSearch::Direction::Forward, text, true, false);
-    UpdateMatchCount(win, text);
 }
 
 static void CancelPendingFind(MainWindow* win);

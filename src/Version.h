@@ -10,10 +10,10 @@
 // missing component as 0, so 3.7.1 > 3.7). Bump it for every release, or the
 // update check sees the same version and reports "You have the latest version".
 #ifndef CURR_VERSION
-#define CURR_VERSION 3.7.7
+#define CURR_VERSION 3.7.8
 #endif
 #ifndef CURR_VERSION_COMMA
-#define CURR_VERSION_COMMA 3, 7, 7
+#define CURR_VERSION_COMMA 3, 7, 8
 #endif
 
 // this is sth. like "3.5"
