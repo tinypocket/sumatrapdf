@@ -477,6 +477,9 @@
     <ClInclude Include="..\src\uia\TextRange.h">
       <Filter>src\uia</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\wingui\Anim.h">
+      <Filter>src\wingui</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\wingui\BrowserDocView.h">
       <Filter>src\wingui</Filter>
     </ClInclude>
@@ -1093,6 +1096,9 @@
     </ClCompile>
     <ClCompile Include="..\src\uia\TextRange.cpp">
       <Filter>src\uia</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\wingui\Anim.cpp">
+      <Filter>src\wingui</Filter>
     </ClCompile>
     <ClCompile Include="..\src\wingui\BrowserDocView.cpp">
       <Filter>src\wingui</Filter>

@@ -326,7 +326,7 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             }
         }
 
-        COLORREF textColor = inTitleBar ? (isSelected ? ThemeWindowTextColor() : ThemeWindowDarkerTextColor())
+        COLORREF textColor = inTitleBar ? (isSelected ? ThemeWindowTextColor() : ThemeTabInactiveTextColor())
                                         : TabTextColorForBackground(tabBgCol);
 
         gfx.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);

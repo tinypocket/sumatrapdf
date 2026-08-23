@@ -9,6 +9,7 @@
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
+#include "wingui/Anim.h"
 
 #include "Settings.h"
 #include "GlobalPrefs.h"
@@ -50,6 +51,15 @@ constexpr int kRailDocumentPreview = -1;
 // hovering the document switcher opens the preview strip after this delay
 constexpr UINT_PTR kRailHoverTimerId = 4;
 constexpr int kRailHoverDelayMs = 450;
+// drives the hover / press / active-marker transitions; only runs while one of
+// them is in flight
+constexpr UINT_PTR kRailAnimTimerId = 5;
+// How far along the normal -> pressed color path a plain hover sits, so hover
+// and press are two stops on one path rather than two unrelated colors.
+constexpr float kRailHoverEmphasis = 0.55f;
+constexpr float kRailPressEmphasis = 1.0f - kRailHoverEmphasis;
+// how deep a fully pressed button sinks
+constexpr int kRailPressInset = 2;
 
 static RailItem gRailItems[] = {
     {TbIcon::Document, TouchPanelMode::Bookmarks, TouchView::Doc, 0, false, true},
@@ -95,6 +105,12 @@ struct RailWnd : Wnd {
     int ItemFromPoint(Point pt);
     Rect ItemRect(int idx);
 
+    void SetHot(int idx);
+    void SetPressed(int idx);
+    void SyncActiveMarker(int activeIdx);
+    Rect MarkerBandRect();
+    void OnAnimTick();
+
     MainWindow* win = nullptr;
     // icons in the two colors a rail button can have. Rebuilt on theme change.
     HIMAGELIST imlNormal = nullptr;
@@ -104,6 +120,20 @@ struct RailWnd : Wnd {
     int hotIdx = -1;
     bool trackingMouse = false;
     SidebarToggleWnd* collapseWnd = nullptr;
+
+    AnimTimer animTimer;
+    AnimVal hoverAnim[kRailItemsCount];
+    AnimVal pressAnim[kRailItemsCount];
+    // an item that finished animating still owes one last frame in its settled
+    // state, so remember what we invalidated on the previous tick
+    bool animDirty[kRailItemsCount]{};
+    int pressedIdx = -1;
+    // the accent marker slides from the item that had it to the one that has it
+    AnimVal markerAnim;
+    int markerFromIdx = -1;
+    int markerToIdx = -1;
+    bool markerKnown = false;
+    bool markerDirty = false;
 };
 
 RailWnd::RailWnd() {
@@ -111,6 +141,8 @@ RailWnd::RailWnd() {
 }
 
 RailWnd::~RailWnd() {
+    // before ~Wnd tears the window down, so no timer outlives the object
+    animTimer.Stop();
     delete collapseWnd;
     if (imlNormal) {
         ImageList_Destroy(imlNormal);
@@ -146,6 +178,17 @@ static COLORREF RailActiveFgColor() {
 
 static COLORREF RailFgColor() {
     return ThemeWindowDarkerTextColor();
+}
+
+// The far end of a button's hover/press path. A plain hover only travels
+// kRailHoverEmphasis of the way here, which lands on the same step the
+// un-animated hover used to paint.
+static COLORREF RailEmphBgColor() {
+    return AccentColor(RailBgColor(), 18);
+}
+
+static COLORREF RailActiveEmphBgColor() {
+    return AccentColor(RailActiveBgColor(), 14);
 }
 
 void RailWnd::RebuildImageLists() {
@@ -500,10 +543,61 @@ static void DrawRailCountPill(HDC hdc, HWND hwnd, const Rect& btn, int count) {
     HdcDrawText(hdc, txt, pill, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, font);
 }
 
-void RailWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
+// where the accent marker sits for a given button
+static Rect RailMarkerRect(HWND hwnd, const Rect& btn) {
+    int markerDx = DpiScale(hwnd, kRailMarkerDx);
+    int markerDy = DpiScale(hwnd, kRailMarkerDy);
+    return Rect{0, btn.y + (btn.dy - markerDy) / 2, markerDx, markerDy};
+}
+
+// the strip the marker can be anywhere within while it slides
+Rect RailWnd::MarkerBandRect() {
+    Rect band;
+    if (markerFromIdx >= 0) {
+        band = RailMarkerRect(hwnd, ItemRect(markerFromIdx));
+    }
+    if (markerToIdx >= 0) {
+        Rect to = RailMarkerRect(hwnd, ItemRect(markerToIdx));
+        band = band.IsEmpty() ? to : band.Union(to);
+    }
+    return band;
+}
+
+// The active item is derived state (it depends on the window's view / panel
+// mode), so the marker notices a change where that state is read: at paint.
+void RailWnd::SyncActiveMarker(int activeIdx) {
+    if (markerKnown && activeIdx == markerToIdx) {
+        return;
+    }
+    if (!markerKnown) {
+        // first paint: the marker is simply where it is, it didn't move there
+        markerKnown = true;
+        markerToIdx = activeIdx;
+        markerFromIdx = -1;
+        markerAnim.Set(1.0f);
+        return;
+    }
+    markerFromIdx = markerToIdx;
+    markerToIdx = activeIdx;
+    markerAnim.Set(0.0f);
+    markerAnim.SetTarget(1.0f, kAnimMarkerMs);
+    if (markerAnim.IsAnimating()) {
+        animTimer.Start();
+    }
+}
+
+void RailWnd::OnPaint(HDC hdc, PAINTSTRUCT*) {
     Rect rcClient = HwndClientRect(hwnd);
     COLORREF bgCol = RailBgColor();
-    HdcFillRect(hdc, ToRect(ps->rcPaint), bgCol);
+    // Buffer the whole rail: an animating button repaints ~60 times a second,
+    // and the fill-then-draw sequence would otherwise be visible as a shimmer.
+    // The buffer is client-origin, so no world transform is involved (which
+    // ImageList_Draw's BitBlt would ignore), and Flush is clipped by hdc to
+    // whatever rect the animation actually invalidated.
+    DoubleBuffer buffer(hwnd, rcClient);
+    HDC hdcOut = hdc;
+    hdc = buffer.GetDC();
+    HdcFillRect(hdc, rcClient, bgCol);
 
     // right edge, so the rail reads as its own surface next to the panel
     HdcFillRect(hdc, Rect{rcClient.dx - 1, 0, 1, rcClient.dy}, ThemeEdgeColor());
@@ -529,6 +623,11 @@ void RailWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
         HdcFillRect(hdc, Rect{(rcClient.dx - dividerDx) / 2, dividerY, dividerDx, 1}, ThemeEdgeColor());
     }
     int radius = DpiScale(hwnd, kRailBtnRadius);
+    int pressInset = DpiScale(hwnd, kRailPressInset);
+    COLORREF emphBg = RailEmphBgColor();
+    COLORREF activeBg = RailActiveBgColor();
+    COLORREF activeEmphBg = RailActiveEmphBgColor();
+    int activeIdx = -1;
     for (int i = 0; i < kRailItemsCount; i++) {
         const RailItem& item = gRailItems[i];
         if (!IsRailItemVisible(item)) {
@@ -537,30 +636,38 @@ void RailWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
         Rect r = ItemRect(i);
         bool isActive = IsRailItemActive(win, item);
         bool isEnabled = IsRailItemEnabled(win, item);
-
-        COLORREF btnBg = bgCol;
         if (isActive) {
-            btnBg = RailActiveBgColor();
-        } else if (i == hotIdx && isEnabled) {
-            // a step from the rail's own background: the theme's hot color is
-            // now what the rail is painted with, so it would be invisible
-            btnBg = AccentColor(bgCol, 10);
-        }
-        if (btnBg != bgCol) {
-            FillRoundedRect(hdc, r, radius, btnBg);
+            activeIdx = i;
         }
 
-        // marker on the left edge of the active button
+        float press = pressAnim[i].Value();
+        // hover and press travel the same color path; an active button is
+        // already tinted, so only the press reads on it
+        float emphasis = isActive ? press : hoverAnim[i].Value() * kRailHoverEmphasis + press * kRailPressEmphasis;
+        emphasis = limitValue(emphasis, 0.0f, 1.0f);
+
+        HIMAGELIST iml = imlNormal;
         if (isActive) {
-            int markerDx = DpiScale(hwnd, kRailMarkerDx);
-            int markerDy = DpiScale(hwnd, kRailMarkerDy);
-            Rect rMarker{0, r.y + (r.dy - markerDy) / 2, markerDx, markerDy};
-            HdcFillRect(hdc, rMarker, RailActiveFgColor());
+            iml = imlActive;
+        } else if (!isEnabled) {
+            iml = imlDisabled;
+            emphasis = 0.0f;
         }
 
-        // the icons are opaque, so an icon on the active button has to come
-        // from the image list built against that button's background
-        HIMAGELIST iml = isActive ? imlActive : (isEnabled ? imlNormal : imlDisabled);
+        if (isActive || emphasis > 0.0f) {
+            COLORREF from = isActive ? activeBg : bgCol;
+            COLORREF to = isActive ? activeEmphBg : emphBg;
+            // a pressed button also sinks a couple of pixels, which is what
+            // makes the feedback read as a push rather than a color change
+            Rect fill = r;
+            int inset = AnimLerpInt(0, pressInset, press);
+            fill.Inflate(-inset, -inset);
+            FillRoundedRect(hdc, fill, radius, AnimLerpColor(from, to, emphasis));
+        }
+
+        // The icon lists carry per-pixel alpha (only the glyph is opaque), so
+        // the animated fill shows through and the icon needs no blending; the
+        // list is chosen only for the color of the glyph itself.
         int ix = r.x + (r.dx - iconDy) / 2;
         int iy = r.y + (r.dy - iconDy) / 2;
         ImageList_Draw(iml, (int)item.icon, hdc, ix, iy, ILD_NORMAL);
@@ -578,6 +685,90 @@ void RailWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
             }
         }
     }
+
+    // marker on the left edge of the active button, sliding from wherever it
+    // last was. Drawn after the buttons so a slide reads as one continuous bar.
+    SyncActiveMarker(activeIdx);
+    float mt = markerAnim.Value();
+    COLORREF markerCol = RailActiveFgColor();
+    Rect btnFrom = markerFromIdx >= 0 ? ItemRect(markerFromIdx) : Rect{};
+    Rect btnTo = markerToIdx >= 0 ? ItemRect(markerToIdx) : Rect{};
+    if (!btnFrom.IsEmpty() && !btnTo.IsEmpty()) {
+        Rect m = RailMarkerRect(hwnd, btnTo);
+        m.y = AnimLerpInt(RailMarkerRect(hwnd, btnFrom).y, m.y, mt);
+        HdcFillRect(hdc, m, markerCol);
+    } else if (!btnTo.IsEmpty()) {
+        // nothing was active: fade in rather than slide from an arbitrary place
+        HdcFillRect(hdc, RailMarkerRect(hwnd, btnTo), AnimLerpColor(bgCol, markerCol, mt));
+    } else if (!btnFrom.IsEmpty() && mt < 1.0f) {
+        HdcFillRect(hdc, RailMarkerRect(hwnd, btnFrom), AnimLerpColor(markerCol, bgCol, mt));
+    }
+
+    buffer.Flush(hdcOut);
+}
+
+// Aims each button's hover animation at its new resting value and repaints the
+// two buttons that can be affected. Only the button rects are invalidated, so a
+// hover fade never repaints the whole rail.
+void RailWnd::SetHot(int idx) {
+    if (idx == hotIdx) {
+        return;
+    }
+    int old = hotIdx;
+    hotIdx = idx;
+    if (old >= 0) {
+        hoverAnim[old].SetTarget(0.0f, kAnimHoverMs);
+        HwndInvalidateRect(hwnd, ItemRect(old), false);
+    }
+    if (idx >= 0 && IsRailItemEnabled(win, gRailItems[idx])) {
+        hoverAnim[idx].SetTarget(1.0f, kAnimHoverMs);
+        HwndInvalidateRect(hwnd, ItemRect(idx), false);
+    } else if (idx >= 0) {
+        hoverAnim[idx].Set(0.0f);
+    }
+    animTimer.Start();
+}
+
+// The press animation is purely visual feedback: the click itself is handled on
+// WM_LBUTTONUP as before, so nothing waits on this.
+void RailWnd::SetPressed(int idx) {
+    if (idx == pressedIdx) {
+        return;
+    }
+    int old = pressedIdx;
+    pressedIdx = idx;
+    if (old >= 0) {
+        pressAnim[old].SetTarget(0.0f, kAnimPressReleaseMs);
+        HwndInvalidateRect(hwnd, ItemRect(old), false);
+    }
+    if (idx >= 0) {
+        pressAnim[idx].SetTarget(1.0f, kAnimPressMs);
+        HwndInvalidateRect(hwnd, ItemRect(idx), false);
+    }
+    animTimer.Start();
+}
+
+// One frame. Invalidates only what is in motion and stops the timer the moment
+// nothing is, so an idle rail costs nothing.
+void RailWnd::OnAnimTick() {
+    bool anyRunning = false;
+    for (int i = 0; i < kRailItemsCount; i++) {
+        bool running = hoverAnim[i].IsAnimating() || pressAnim[i].IsAnimating();
+        if (running || animDirty[i]) {
+            HwndInvalidateRect(hwnd, ItemRect(i), false);
+        }
+        animDirty[i] = running;
+        anyRunning |= running;
+    }
+    bool markerRunning = markerAnim.IsAnimating();
+    if (markerRunning || markerDirty) {
+        HwndInvalidateRect(hwnd, MarkerBandRect(), false);
+    }
+    markerDirty = markerRunning;
+    anyRunning |= markerRunning;
+    if (!anyRunning) {
+        animTimer.Stop();
+    }
 }
 
 LRESULT RailWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -585,12 +776,16 @@ LRESULT RailWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         return TRUE;
     }
 
+    if (msg == WM_TIMER && wparam == kRailAnimTimerId) {
+        OnAnimTick();
+        return 0;
+    }
+
     if (msg == WM_MOUSEMOVE) {
         Point pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         int idx = ItemFromPoint(pt);
         if (idx != hotIdx) {
-            hotIdx = idx;
-            HwndInvalidate(hwnd, false);
+            SetHot(idx);
             // hovering the switcher previews the open documents after a short
             // delay, the way the taskbar does; moving off cancels it
             KillTimer(hwnd, kRailHoverTimerId);
@@ -614,12 +809,21 @@ LRESULT RailWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_MOUSELEAVE) {
         trackingMouse = false;
         KillTimer(hwnd, kRailHoverTimerId);
-        if (hotIdx != -1) {
-            hotIdx = -1;
-            HwndInvalidate(hwnd, false);
-        }
+        SetHot(-1);
+        // the rail takes no capture, so a press dragged off it ends here
+        SetPressed(-1);
         HoverTouchDocumentPreview(win, hwnd, Rect{}, false);
         return 0;
+    }
+
+    // note: no return - WM_LBUTTONDOWN was never handled here, and the press
+    // animation is feedback only, so let the default handling stand
+    if (msg == WM_LBUTTONDOWN) {
+        Point pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        int idx = ItemFromPoint(pt);
+        if (idx >= 0 && IsRailItemEnabled(win, gRailItems[idx])) {
+            SetPressed(idx);
+        }
     }
 
     if (msg == WM_TIMER && wparam == kRailHoverTimerId) {
@@ -633,6 +837,8 @@ LRESULT RailWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_LBUTTONUP) {
         Point pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         int idx = ItemFromPoint(pt);
+        // the button eases back out while the command below already runs
+        SetPressed(-1);
         // Closing the overlays first would hide the preview, so the switcher
         // could never see it as open and always re-opened it instead of
         // toggling. Leave it alone when the click IS the switcher.
@@ -681,6 +887,7 @@ HWND RailWnd::Create(MainWindow* w) {
     if (!hwnd) {
         return nullptr;
     }
+    animTimer.Init(hwnd, kRailAnimTimerId);
     RebuildImageLists();
     collapseWnd = new SidebarToggleWnd();
     if (!collapseWnd->Create(w)) {

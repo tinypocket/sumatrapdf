@@ -9,6 +9,7 @@
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
+#include "wingui/Anim.h"
 
 #include "Settings.h"
 #include "GlobalPrefs.h"
@@ -131,6 +132,23 @@ static TopBarSlot gTopBarSlots[] = {
 
 constexpr int kTopBarSlotCount = (int)dimof(gTopBarSlots);
 
+// how far along a slot's normal -> pressed color path a plain hover sits
+constexpr float kTopBarHoverEmphasis = 0.55f;
+constexpr float kTopBarPressEmphasis = 1.0f - kTopBarHoverEmphasis;
+constexpr int kTopBarPressInset = 2;
+
+// slots drawn as a button, i.e. the ones that carry a hover / press wash
+static bool SlotHasWash(const TopBarSlot& slot) {
+    switch (slot.item) {
+        case TopBarItem::Preview:
+        case TopBarItem::Overflow:
+        case TopBarItem::Button:
+            return true;
+        default:
+            return false;
+    }
+}
+
 struct TopBarWnd : Wnd {
     TopBarWnd();
     ~TopBarWnd() override;
@@ -144,12 +162,23 @@ struct TopBarWnd : Wnd {
     bool Layout(HDC hdc, Rect* rects);
     int SlotFromPoint(Point pt);
 
+    void SetHot(int idx);
+    void SetPressed(int idx);
+    void OnAnimTick();
+
     MainWindow* win = nullptr;
     HIMAGELIST iml = nullptr;
     HIMAGELIST imlPaper = nullptr;
     int iconDy = 0;
     int hotIdx = -1;
     bool trackingMouse = false;
+
+    AnimTimer animTimer;
+    AnimVal hoverAnim[kTopBarSlotCount];
+    AnimVal pressAnim[kTopBarSlotCount];
+    // a slot that just finished still owes one frame in its settled state
+    bool animDirty[kTopBarSlotCount]{};
+    int pressedIdx = -1;
     // last laid-out rects, so hit testing doesn't have to re-measure text
     Rect slotRects[kTopBarSlotCount]{};
     Rect nameRect{};
@@ -204,6 +233,8 @@ TopBarWnd::TopBarWnd() {
 }
 
 TopBarWnd::~TopBarWnd() {
+    // before ~Wnd tears the window down, so no timer outlives the object
+    animTimer.Stop();
     delete previewWnd;
     delete bookmarkConfirmWnd;
     if (iml) {
@@ -220,6 +251,8 @@ constexpr UINT_PTR kPreviewHoverTimerId = 0x51A3;
 constexpr int kPreviewHoverDelayMs = 450;
 constexpr UINT_PTR kSavedPageHoldTimerId = 0x51A3;
 constexpr UINT_PTR kSavedPageRenameTimerId = 0x51A4;
+// drives the hover / press transitions; only runs while one is in flight
+constexpr UINT_PTR kTopBarAnimTimerId = 0x51A5;
 
 void TopBarWnd::CancelPreviewClose() {
     KillTimer(hwnd, kPreviewCloseTimerId);
@@ -390,6 +423,13 @@ static COLORREF TopBarBgColor() {
 // the track a group of controls sits on
 static COLORREF TopBarGroupColor() {
     return ThemeHotBackgroundColor();
+}
+
+// The far end of a button's hover / press path. A plain hover travels only
+// kTopBarHoverEmphasis of the way here, which lands on the step the
+// un-animated hover used to paint, so nothing about the resting design moved.
+static COLORREF TopBarEmphColor() {
+    return AccentColor(TopBarGroupColor(), 18);
 }
 
 void TopBarWnd::RebuildImageList() {
@@ -719,6 +759,12 @@ int TopBarWnd::SlotFromPoint(Point pt) {
 // (radius 12) with rounded-rect buttons (radius 10).
 static bool GroupIsRound(int g) {
     return g == 3;
+}
+
+// Groups drawn on a rounded track. The rest sit straight on the bar, which is
+// the surface their hover / press wash has to start from.
+static bool GroupHasTrack(int g) {
+    return g == 1 || g == 3;
 }
 
 static void FillTrack(HDC hdc, const Rect& r, int radius, COLORREF col, COLORREF borderCol = kColorUnset) {
@@ -1152,10 +1198,17 @@ static void DrawDashedTrack(HDC hdc, const Rect& r, int radius, COLORREF col) {
     g.DrawPath(&pen, &path);
 }
 
-void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
+void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT*) {
     Rect rcClient = HwndClientRect(hwnd);
     COLORREF bgCol = TopBarBgColor();
-    HdcFillRect(hdc, ToRect(ps->rcPaint), bgCol);
+    // Buffer the whole bar: an animating button repaints ~60 times a second and
+    // the fill-then-draw sequence would show as a shimmer. Client-origin, so no
+    // world transform (which ImageList_Draw's BitBlt would ignore) is involved,
+    // and Flush is clipped by hdc to whatever the animation invalidated.
+    DoubleBuffer buffer(hwnd, rcClient);
+    HDC hdcOut = hdc;
+    hdc = buffer.GetDC();
+    HdcFillRect(hdc, rcClient, bgCol);
     // bottom edge, separating the bar from the canvas
     HdcFillRect(hdc, Rect{0, rcClient.dy - 1, rcClient.dx, 1}, ThemeEdgeColor());
 
@@ -1163,6 +1216,7 @@ void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
         RebuildImageList();
     }
     if (!Layout(hdc, slotRects)) {
+        buffer.Flush(hdcOut);
         return;
     }
 
@@ -1177,7 +1231,7 @@ void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
         maxGroup = std::max(maxGroup, gTopBarSlots[i].group);
     }
     for (int g = 0; g <= maxGroup; g++) {
-        if (g != 1 && g != 3) {
+        if (!GroupHasTrack(g)) {
             continue;
         }
         Rect track;
@@ -1267,12 +1321,22 @@ void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
     }
     RestoreDC(hdc, trayDc);
 
+    COLORREF emphCol = TopBarEmphColor();
+    int pressInset = DpiScale(hwnd, kTopBarPressInset);
     for (int i = 0; i < kTopBarSlotCount; i++) {
         const TopBarSlot& slot = gTopBarSlots[i];
         Rect r = slotRects[i];
         if (r.IsEmpty()) {
             continue;
         }
+        // hover and press are two stops on one color path; a press also sinks
+        // the fill a couple of pixels, which is what makes it read as a push
+        float press = pressAnim[i].Value();
+        float emphasis = hoverAnim[i].Value() * kTopBarHoverEmphasis + press * kTopBarPressEmphasis;
+        emphasis = isEnabled ? limitValue(emphasis, 0.0f, 1.0f) : 0.0f;
+        Rect washRect = r;
+        int inset = AnimLerpInt(0, pressInset, press);
+        washRect.Inflate(-inset, -inset);
         switch (slot.item) {
             case TopBarItem::PageBox: {
                 // 4a: the page readout sits in its own inset box - a lighter
@@ -1320,8 +1384,8 @@ void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
             case TopBarItem::Preview:
             case TopBarItem::Overflow: {
                 FillTrack(hdc, r, r.dy / 2, groupCol);
-                if (i == hotIdx && isEnabled) {
-                    FillTrack(hdc, r, r.dy / 2, AccentColor(groupCol, 10));
+                if (emphasis > 0.0f) {
+                    FillTrack(hdc, washRect, washRect.dy / 2, AnimLerpColor(groupCol, emphCol, emphasis));
                 }
                 int ix = r.x + ((r.dx - iconDy) / 2);
                 int iy = r.y + ((r.dy - iconDy) / 2);
@@ -1340,16 +1404,22 @@ void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
                 // otherwise a hover fill. Circular in round groups (zoom /
                 // settings), rounded-rect in the squared page / nav groups.
                 int btnRadius = GroupIsRound(slot.group) ? (r.dy / 2) : DpiScale(hwnd, 10);
-                if (isEnabled && IsSlotActive(win, slot)) {
+                bool isActive = isEnabled && IsSlotActive(win, slot);
+                if (isActive) {
                     COLORREF abg, afg;
                     ThemeAccentSurfaceColors(&abg, &afg);
                     FillTrack(hdc, r, btnRadius, abg);
-                } else if (i == hotIdx && isEnabled) {
-                    // one step darker than the track the button sits on - the
+                } else if (emphasis > 0.0f) {
+                    // One step darker than the surface the button sits on - the
                     // same formula the rail uses, so hover feels like one
                     // system. ThemeHotBackgroundColor equals the track color on
                     // the Touch Paper theme, which made the hover invisible.
-                    FillTrack(hdc, r, btnRadius, AccentColor(TopBarGroupColor(), 10));
+                    // Only groups 1 and 3 get a track drawn under them; the
+                    // rest sit on the bar itself, and starting the fade from
+                    // the wrong surface would make it jump on its first frame.
+                    COLORREF base = GroupHasTrack(slot.group) ? groupCol : bgCol;
+                    int washRadius = GroupIsRound(slot.group) ? (washRect.dy / 2) : btnRadius;
+                    FillTrack(hdc, washRect, washRadius, AnimLerpColor(base, emphCol, emphasis));
                 }
                 int ix = r.x + ((r.dx - iconDy) / 2);
                 int iy = r.y + ((r.dy - iconDy) / 2);
@@ -1357,6 +1427,64 @@ void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
                 break;
             }
         }
+    }
+    buffer.Flush(hdcOut);
+}
+
+// Aims a slot's hover animation at its resting value. Only the two slots that
+// can change are invalidated, so a hover fade never repaints the whole bar.
+void TopBarWnd::SetHot(int idx) {
+    if (idx == hotIdx) {
+        return;
+    }
+    int old = hotIdx;
+    hotIdx = idx;
+    if (old >= 0) {
+        hoverAnim[old].SetTarget(0.0f, kAnimHoverMs);
+        HwndInvalidateRect(hwnd, slotRects[old], false);
+    }
+    if (idx >= 0 && SlotHasWash(gTopBarSlots[idx])) {
+        hoverAnim[idx].SetTarget(1.0f, kAnimHoverMs);
+        HwndInvalidateRect(hwnd, slotRects[idx], false);
+    } else if (idx >= 0) {
+        hoverAnim[idx].Set(0.0f);
+    }
+    animTimer.Start();
+}
+
+// Feedback only: the click is still acted on at WM_LBUTTONUP, so nothing waits
+// for this to finish.
+void TopBarWnd::SetPressed(int idx) {
+    if (idx == pressedIdx) {
+        return;
+    }
+    int old = pressedIdx;
+    pressedIdx = idx;
+    if (old >= 0) {
+        pressAnim[old].SetTarget(0.0f, kAnimPressReleaseMs);
+        HwndInvalidateRect(hwnd, slotRects[old], false);
+    }
+    if (idx >= 0) {
+        pressAnim[idx].SetTarget(1.0f, kAnimPressMs);
+        HwndInvalidateRect(hwnd, slotRects[idx], false);
+    }
+    animTimer.Start();
+}
+
+// One frame; stops the timer as soon as nothing is in motion, so an idle bar
+// costs nothing.
+void TopBarWnd::OnAnimTick() {
+    bool anyRunning = false;
+    for (int i = 0; i < kTopBarSlotCount; i++) {
+        bool running = hoverAnim[i].IsAnimating() || pressAnim[i].IsAnimating();
+        if (running || animDirty[i]) {
+            HwndInvalidateRect(hwnd, slotRects[i], false);
+        }
+        animDirty[i] = running;
+        anyRunning |= running;
+    }
+    if (!anyRunning) {
+        animTimer.Stop();
     }
 }
 
@@ -1444,10 +1572,7 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         int idx = SlotFromPoint(pt);
         int oldHotIdx = hotIdx;
-        if (idx != hotIdx) {
-            hotIdx = idx;
-            HwndInvalidate(hwnd, false);
-        }
+        SetHot(idx);
         if (idx == 0 && oldHotIdx != 0 && gTopBarSlots[0].item == TopBarItem::Preview) {
             KillTimer(hwnd, kPreviewHoverTimerId);
             SetTimer(hwnd, kPreviewHoverTimerId, kPreviewHoverDelayMs, nullptr);
@@ -1471,10 +1596,15 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         if (hotIdx == 0 && gTopBarSlots[0].item == TopBarItem::Preview) {
             SchedulePreviewClose();
         }
-        if (hotIdx != -1) {
-            hotIdx = -1;
-            HwndInvalidate(hwnd, false);
-        }
+        SetHot(-1);
+        // the bar only captures for the saved-page tray, so a press dragged off
+        // a button ends here
+        SetPressed(-1);
+        return 0;
+    }
+
+    if (msg == WM_TIMER && wparam == kTopBarAnimTimerId) {
+        OnAnimTick();
         return 0;
     }
 
@@ -1533,6 +1663,11 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         if (bookmarkConfirmWnd) {
             bookmarkConfirmWnd->Hide();
         }
+        // feedback only, and deliberately after the tray cases above (which
+        // return): a press on a button, not on a saved-page pill
+        if (clickedSlot >= 0 && win && win->IsDocLoaded() && SlotHasWash(gTopBarSlots[clickedSlot])) {
+            SetPressed(clickedSlot);
+        }
     }
 
     if (msg == WM_CAPTURECHANGED && GetCapture() != hwnd) {
@@ -1554,6 +1689,7 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             KillTimer(hwnd, kSavedPageRenameTimerId);
             changed = true;
         }
+        SetPressed(-1);
         if (changed) {
             HwndInvalidate(hwnd, false);
             return 0;
@@ -1614,6 +1750,8 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
     if (msg == WM_LBUTTONUP) {
         Point pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        // the button eases back out while the command below already runs
+        SetPressed(-1);
         if (savedTrayDragging) {
             bool dragged = savedTrayDidDrag;
             int quickBodyIdx = savedBodyHoldingIdx;
@@ -1838,6 +1976,7 @@ HWND TopBarWnd::Create(MainWindow* w) {
     if (!hwnd) {
         return nullptr;
     }
+    animTimer.Init(hwnd, kTopBarAnimTimerId);
     RebuildImageList();
     return hwnd;
 }

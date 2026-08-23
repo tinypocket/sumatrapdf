@@ -35,6 +35,7 @@ COLORREF ThemeNotificationsHighlightColor();
 // it actually reads against the tint; on some themes it doesn't.
 COLORREF ThemeTouchSurfaceColor();
 COLORREF ThemeTextFieldColor();
+COLORREF ThemeTabInactiveTextColor();
 void ThemeAccentSurfaceColors(COLORREF* bgOut, COLORREF* fgOut);
 COLORREF ThemeNotificationsHighlightTextColor();
 COLORREF ThemeNotificationsHighlightLinkColor();

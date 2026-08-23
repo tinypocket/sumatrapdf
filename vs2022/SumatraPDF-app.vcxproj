@@ -1359,6 +1359,7 @@ if exist ..\out\rel64_prefast_asan\InstallerData.dat del /f /q ..\out\rel64_pref
     <ClInclude Include="..\src\uia\Provider.h" />
     <ClInclude Include="..\src\uia\StartPageProvider.h" />
     <ClInclude Include="..\src\uia\TextRange.h" />
+    <ClInclude Include="..\src\wingui\Anim.h" />
     <ClInclude Include="..\src\wingui\BrowserDocView.h" />
     <ClInclude Include="..\src\wingui\DialogSizer.h" />
     <ClInclude Include="..\src\wingui\FrameRateWnd.h" />
@@ -1826,6 +1827,7 @@ if exist ..\out\rel64_prefast_asan\InstallerData.dat del /f /q ..\out\rel64_pref
     <ClCompile Include="..\src\uia\Provider.cpp" />
     <ClCompile Include="..\src\uia\StartPageProvider.cpp" />
     <ClCompile Include="..\src\uia\TextRange.cpp" />
+    <ClCompile Include="..\src\wingui\Anim.cpp" />
     <ClCompile Include="..\src\wingui\BrowserDocView.cpp" />
     <ClCompile Include="..\src\wingui\Button.cpp" />
     <ClCompile Include="..\src\wingui\Checkbox.cpp" />

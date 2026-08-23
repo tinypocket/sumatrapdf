@@ -1057,6 +1057,14 @@ COLORREF ThemeTouchSurfaceColor() {
 // the row and the field ends up defined only by its border. The design uses
 // pure white against a near-white row, so lighten a light surface further;
 // dark themes already get a visibly raised surface.
+// Label of an unselected tab. DarkerTextColor alone is a muted gray that reads
+// as disabled at tab size - the file name in an inactive tab was hard to read -
+// so pull it most of the way back toward the normal text color. The selected
+// tab still stands out through its pill background and heavier weight.
+COLORREF ThemeTabInactiveTextColor() {
+    return BlendColors(ThemeWindowTextColor(), ThemeWindowDarkerTextColor(), 65);
+}
+
 COLORREF ThemeTextFieldColor() {
     COLORREF surface = ThemeTouchSurfaceColor();
     COLORREF row = ThemeWindowControlBackgroundColor();
