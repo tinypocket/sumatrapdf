@@ -2553,78 +2553,29 @@ bool HandleTouchHomeLink(MainWindow* win, Str url) {
     return true;
 }
 
-struct TouchHomeTabThumbnailRequest {
-    WindowTab* tab = nullptr;
-    int pageNo = 1;
-};
-
-static void TouchHomeTabThumbnailFinished(TouchHomeTabThumbnailRequest* request, RenderedBitmap* thumbnail) {
-    WindowTab* tab = request->tab;
-    if (IsWindowTabValid(tab)) {
-        tab->touchHomeThumbnailRequested = false;
-        if (tab->ctrl && tab->ctrl->CurrentPageNo() == request->pageNo) {
-            delete tab->touchHomeThumbnail;
-            tab->touchHomeThumbnail = thumbnail;
-            tab->touchHomeThumbnailPage = request->pageNo;
-            thumbnail = nullptr;
+// Recent folders: the distinct parent directories of the recent files, in the
+// same most-recent-first order. Drawn as small pills rather than cards - a
+// folder is a destination, not a document, and it has no thumbnail to show.
+static void CollectRecentFolders(const Vec<FileState*>& files, StrVec& out, int maxCount) {
+    for (FileState* fs : files) {
+        if (!fs || len(fs->filePath) == 0) {
+            continue;
         }
-        if (tab->win && tab->win->hwndCanvas) {
-            HwndInvalidate(tab->win->hwndCanvas, false);
+        TempStr dir = path::GetDirTemp(fs->filePath);
+        if (!dir || len(dir) == 0) {
+            continue;
+        }
+        if (out.FindI(dir) >= 0) {
+            continue; // already have this folder from a more recent file
+        }
+        out.Append(dir);
+        if (len(out) >= maxCount) {
+            return;
         }
     }
-    delete thumbnail;
-    delete request;
 }
 
-static void DrawTouchOpenTabCard(MainWindow* win, HDC hdc, WindowTab* tab, int tabIndex, const Rect& card) {
-    COLORREF paper = ThemeWindowControlBackgroundColor();
-    DrawHomeShadow(hdc, card, DpiScale(hdc, 12), paper);
-    FillHomeRoundRect(hdc, card, DpiScale(hdc, 12), paper, ThemeEdgeColor());
-    int titleDy = DpiScale(hdc, 30);
-    Rect title{card.x, card.y, card.dx, titleDy};
-    FillHomeRoundRect(hdc, title, DpiScale(hdc, 12), RGB(43, 43, 43));
-    HdcFillRect(hdc, Rect{title.x, title.y + title.dy / 2, title.dx, title.dy / 2}, RGB(43, 43, 43));
-    Rect close{title.x + title.dx - DpiScale(hdc, 26), title.y + DpiScale(hdc, 7), DpiScale(hdc, 16),
-               DpiScale(hdc, 16)};
-    int pdfDx = DpiScale(hdc, 13);
-    Rect pdf{title.x + DpiScale(hdc, 10), title.y + (title.dy - pdfDx) / 2, pdfDx, pdfDx};
-    Rect nameRect{pdf.x + pdf.dx + DpiScale(hdc, 8), title.y, close.x - pdf.x - pdf.dx - DpiScale(hdc, 10), title.dy};
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(255, 255, 255));
-    HdcDrawText(hdc, tab->GetTabTitle(), nameRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
-                HdcGetUiFont(hdc, 12, FW_MEDIUM));
-    SetTextColor(hdc, RGB(210, 210, 210));
-    HdcDrawText(hdc, StrL("×"), close, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
-                HdcGetUiFont(hdc, 14, FW_MEDIUM));
-    FillHomeRoundRect(hdc, pdf, DpiScale(hdc, 2), RgbToCOLORREF(0xe8927c));
-
-    Rect thumb{card.x, card.y + titleDy, card.dx, card.dy - titleDy};
-    FillHomeRoundRect(hdc, thumb, DpiScale(hdc, 6), RGB(234, 229, 222));
-    int pageNo = tab->ctrl ? tab->ctrl->CurrentPageNo() : 1;
-    if (tab->touchHomeThumbnailPage != pageNo) {
-        delete tab->touchHomeThumbnail;
-        tab->touchHomeThumbnail = nullptr;
-        tab->touchHomeThumbnailPage = pageNo;
-    }
-    if (!tab->touchHomeThumbnail && !tab->touchHomeThumbnailRequested && tab->filePath) {
-        tab->touchHomeThumbnailRequested = true;
-        auto* request = new TouchHomeTabThumbnailRequest{tab, pageNo};
-        auto* onRendered = NewFunc1(TouchHomeTabThumbnailFinished, request);
-        CreateThumbnailFromFileAsync(tab->filePath, pageNo, onRendered);
-    }
-    RenderedBitmap* bitmap = tab->touchHomeThumbnail;
-    if (bitmap) {
-        Rect inset = thumb;
-        inset.Inflate(-DpiScale(hdc, 10), -DpiScale(hdc, 10));
-        bitmap->Blit(hdc, FitRectInRect(bitmap->GetSize(), inset));
-    }
-    win->staticLinks.Append(
-        new StaticLink(close, fmt("%s%d", Str(kLinkHomeCloseTabPrefix), tabIndex), StrL("Close tab")));
-    win->staticLinks.Append(new StaticLink(card, fmt("%s%d", Str(kLinkHomeOpenTabPrefix), tabIndex)));
-}
-
-// The "Recent" surface: the CURRENTLY OPEN carousel plus the PINNED and RECENT
-// file-card sections. It used to be a view of its own (TouchView::Home); now it
+// The "Recent" surface: the PINNED and RECENT file-card sections. It used to be a view of its own (TouchView::Home); now it
 // is drawn into the Library's content pane when its "Recent" sidebar row is
 // selected. contentRc is that pane (right of the sidebar, below the header) and
 // the pane's scroll position is win->libraryFilesScrollY.
@@ -2643,18 +2594,48 @@ static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc
     int cardDx = DpiScale(hdc, 148);
     int cardDy = DpiScale(hdc, 196);
     int cardBlockDy = cardDy + DpiScale(hdc, 50);
-    Vec<int> openTabIndexes;
-    for (int i = 0; i < win->TabCount(); i++) {
-        WindowTab* tab = win->GetTab(i);
-        if (tab && !tab->IsNonDocumentTab()) {
-            openTabIndexes.Append(i);
+    // No "Currently open" carousel: an open document is still a recent file and
+    // appears in the RECENT section like any other, so the carousel only
+    // duplicated it and pushed everything else down.
+    win->homeOpenScrollX = 0;
+    win->homeOpenScrollMaxX = 0;
+    win->homeOpenCarouselRect = {};
+    // Lay the folder pills out first: their wrapped height feeds the scroll
+    // extent below, so it has to be known before anything is drawn.
+    StrVec recentFolders;
+    CollectRecentFolders(files, recentFolders, 10);
+    int pillDy = DpiScale(hdc, 34);
+    int pillGap = DpiScale(hdc, 10);
+    int pillPadX = DpiScale(hdc, 14);
+    Vec<Rect> pillRects; // offsets relative to the block's top-left
+    int pillBlockDy = 0;
+    {
+        int availDx = std::max(0, contentRc.dx - 2 * pad);
+        HFONT pillFont = HdcGetUiFont(hdc, 13);
+        ScopedSelectObject selPill(hdc, pillFont);
+        int px = 0;
+        int py = 0;
+        for (int i = 0; i < len(recentFolders); i++) {
+            TempStr name = path::GetBaseNameTemp(recentFolders[i]);
+            Size sz = HdcGetTextExtentPoint32(hdc, name);
+            int pillDx = sz.dx + 2 * pillPadX;
+            if (px > 0 && px + pillDx > availDx) {
+                px = 0;
+                py += pillDy + pillGap;
+            }
+            pillRects.Append(Rect{px, py, pillDx, pillDy});
+            px += pillDx + pillGap;
+        }
+        if (len(pillRects) > 0) {
+            pillBlockDy = py + pillDy;
         }
     }
-    int openSectionDy = len(openTabIndexes) > 0 ? DpiScale(hdc, 18 + 14 + 170 + 28) : 0;
+    int folderBlockDy = len(pillRects) > 0 ? DpiScale(hdc, 31) + pillBlockDy + gap : 0;
+
     int columns = TouchCardColumns(win->hwndCanvas, contentRc.dx - 2 * pad);
     int pinnedRows = TouchCardRows(len(pinned), columns);
     int recentRows = TouchCardRows(len(recent), columns);
-    int contentDy = pad + openSectionDy +
+    int contentDy = pad + folderBlockDy +
                     (pinnedRows ? DpiScale(hdc, 31) + pinnedRows * cardBlockDy + (pinnedRows - 1) * gap + gap : 0) +
                     DpiScale(hdc, 31) + recentRows * cardBlockDy + std::max(0, recentRows - 1) * gap + pad;
     win->libraryFilesScrollMaxY = std::max(0, contentDy - contentRc.dy);
@@ -2666,37 +2647,6 @@ static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc
     int saved = SaveDC(hdc);
     IntersectClipRect(hdc, contentRc.x, contentRc.y, contentRc.x + contentRc.dx, contentBottom);
     int y = contentRc.y + pad - win->libraryFilesScrollY;
-    if (len(openTabIndexes) > 0) {
-        Rect labelRc{contentX, y, contentDx, DpiScale(hdc, 18)};
-        SetTextColor(hdc, ThemeWindowDarkerTextColor());
-        HdcDrawText(hdc, StrL("CURRENTLY OPEN"), labelRc, DT_SINGLELINE | DT_NOPREFIX,
-                    HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
-        y += DpiScale(hdc, 32);
-        int openCardDx = DpiScale(hdc, 190);
-        int openCardDy = DpiScale(hdc, 170);
-        int openGap = DpiScale(hdc, 16);
-        int openContentDx = len(openTabIndexes) * openCardDx + std::max(0, len(openTabIndexes) - 1) * openGap;
-        win->homeOpenScrollMaxX = std::max(0, openContentDx - contentDx);
-        win->homeOpenScrollX = std::clamp(win->homeOpenScrollX, 0, win->homeOpenScrollMaxX);
-        win->homeOpenCarouselRect = {contentX, y, contentDx, openCardDy + DpiScale(hdc, 4)};
-        int carouselDc = SaveDC(hdc);
-        IntersectClipRect(hdc, win->homeOpenCarouselRect.x, win->homeOpenCarouselRect.y,
-                          win->homeOpenCarouselRect.x + win->homeOpenCarouselRect.dx,
-                          win->homeOpenCarouselRect.y + win->homeOpenCarouselRect.dy);
-        for (int i = 0; i < len(openTabIndexes); i++) {
-            int tabIndex = openTabIndexes[i];
-            Rect card{contentX - win->homeOpenScrollX + i * (openCardDx + openGap), y, openCardDx, openCardDy};
-            if (card.x < contentX + contentDx && card.x + card.dx > contentX) {
-                DrawTouchOpenTabCard(win, hdc, win->GetTab(tabIndex), tabIndex, card);
-            }
-        }
-        RestoreDC(hdc, carouselDc);
-        y += openCardDy + DpiScale(hdc, 28);
-    } else {
-        win->homeOpenScrollX = 0;
-        win->homeOpenScrollMaxX = 0;
-        win->homeOpenCarouselRect = {};
-    }
     auto drawGroup = [&](Str label, const Vec<FileState*>& group, bool showProgress) {
         if (len(group) == 0 && str::Eq(label, StrL("PINNED"))) {
             return;
@@ -2719,6 +2669,37 @@ static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc
         y += rows * cardBlockDy + std::max(0, rows - 1) * gap + gap;
     };
     drawGroup(StrL("PINNED"), pinned, false);
+
+    // folder pills sit between the pinned files and the recent ones
+    if (len(pillRects) > 0) {
+        Rect labelRc{contentX, y, contentDx, DpiScale(hdc, 18)};
+        SetTextColor(hdc, ThemeWindowDarkerTextColor());
+        HdcDrawText(hdc, StrL("FOLDERS"), labelRc, DT_SINGLELINE | DT_NOPREFIX, HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
+        y += DpiScale(hdc, 31);
+        HFONT pillFont = HdcGetUiFont(hdc, 13);
+        ScopedSelectObject selPill(hdc, pillFont);
+        COLORREF pillBg = ThemeControlBackgroundColor();
+        for (int i = 0; i < len(pillRects) && i < len(recentFolders); i++) {
+            Rect r = pillRects[i];
+            Rect pill{contentX + r.x, y + r.y, r.dx, r.dy};
+            if (pill.y + pill.dy < contentRc.y || pill.y > contentBottom) {
+                continue; // scrolled out of the pane
+            }
+            FillHomeRoundRect(hdc, pill, pill.dy / 2, pillBg, ThemeEdgeColor());
+            SetTextColor(hdc, ThemeWindowTextColor());
+            TempStr name = path::GetBaseNameTemp(recentFolders[i]);
+            Rect textRc{pill.x + pillPadX, pill.y, pill.dx - 2 * pillPadX, pill.dy};
+            HdcDrawText(hdc, name, textRc, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+            Rect linkRect = pill.Intersect(contentRc);
+            if (!linkRect.IsEmpty()) {
+                // opens that folder in the Library, same as its sidebar row
+                TempStr target = str::JoinTemp(kLinkLibraryFolderPrefix, recentFolders[i]);
+                win->staticLinks.Append(new StaticLink(linkRect, target, recentFolders[i]));
+            }
+        }
+        y += pillBlockDy + gap;
+    }
+
     drawGroup(StrL("RECENT"), recent, true);
     if (len(pinned) == 0 && len(recent) == 0) {
         Rect empty{contentX, y, contentDx, DpiScale(hdc, 40)};
