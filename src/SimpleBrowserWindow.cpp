@@ -2327,7 +2327,7 @@ void TbChromeWnd::Draw(HDC hdc) {
         HdcDrawText(hdc, StrL("Home"), homeRect, flags, font);
 
         // the URL field's surround; the EDIT itself is a child window on top
-        TbFillRounded(hdc, urlRect, radius, ThemeTouchSurfaceColor(), edge);
+        TbFillRounded(hdc, urlRect, radius, ThemeTextFieldColor(), edge);
 
         TbFillRounded(hdc, favBtnRect, radius, btnBg(TbPart::FavBtn, -1));
         // the button is a toggle, so it says which way it is pointing by

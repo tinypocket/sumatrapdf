@@ -58,7 +58,8 @@ static RailItem gRailItems[] = {
     {TbIcon::Search, TouchPanelMode::Search, TouchView::Doc, 0, false, false},
     {TbIcon::Annotation, TouchPanelMode::Annotations, TouchView::Doc, 0, false, false},
     {TbIcon::Attachment, TouchPanelMode::Attachments, TouchView::Doc, 0, false, false},
-    {TbIcon::Recent, TouchPanelMode::Bookmarks, TouchView::Home, 0, true, false},
+    // Recent used to be a rail item of its own; it's now the Library's first
+    // sidebar row, so the Library is the single browsing destination
     {TbIcon::Library, TouchPanelMode::Bookmarks, TouchView::Library, 0, true, false},
     {TbIcon::Web, TouchPanelMode::Bookmarks, TouchView::Web, 0, true, false},
     {TbIcon::WindowStack, TouchPanelMode::Bookmarks, TouchView::Doc, kRailDocumentPreview, true, false},
@@ -218,10 +219,8 @@ void SetTouchSidebarCollapsed(MainWindow* win, bool collapsed) {
 }
 
 static void SetTouchHomeTabLabel(MainWindow* win, TouchView view) {
-    Str label = StrL("Home");
-    if (view == TouchView::Library) {
-        label = StrL("Library");
-    } else if (view == TouchView::Web) {
+    Str label = StrL("Library");
+    if (view == TouchView::Web) {
         label = StrL("Web");
     }
     for (int i = 0; i < win->TabCount(); i++) {
@@ -238,8 +237,13 @@ void SetTouchView(MainWindow* win, TouchView view) {
     if (!win || !IsTouchChrome(win)) {
         return;
     }
+    // Home folded into the Library (its "Recent" sidebar row); nothing should
+    // navigate to it any more
+    if (view == TouchView::Home) {
+        view = TouchView::Library;
+    }
     TouchView oldView = win->touchView;
-    if (oldView != view && (oldView == TouchView::Home || oldView == TouchView::Library)) {
+    if (oldView != view && oldView == TouchView::Library) {
         HomePageDestroySearch(win);
     }
     if (oldView != view && oldView == TouchView::Web) {
@@ -271,7 +275,7 @@ void SetTouchView(MainWindow* win, TouchView view) {
         win->uiState.favVisible = false;
     }
     win->touchView = view;
-    if (view == TouchView::Home || view == TouchView::Library || view == TouchView::Web) {
+    if (view == TouchView::Library || view == TouchView::Web) {
         SetTouchHomeTabLabel(win, view);
         // remember where the user was, so closing the last document comes back here
         win->lastNonDocView = view;

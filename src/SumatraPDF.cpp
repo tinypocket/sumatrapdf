@@ -3832,8 +3832,9 @@ void LoadModelIntoTab(WindowTab* tab) {
 
     if (IsTouchChrome(win)) {
         if (tab->IsAboutTab()) {
-            Str title = tab->GetTabTitle();
-            win->touchView = str::EqI(title, StrL("Library")) ? TouchView::Library : TouchView::Home;
+            // the about tab shows the Library now; Recent is one of its sidebar
+            // rows instead of a view of its own
+            win->touchView = TouchView::Library;
             win->uiState.tocVisible = false;
             win->uiState.favVisible = false;
         } else if (!tab->IsNonDocumentTab()) {

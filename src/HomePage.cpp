@@ -905,9 +905,11 @@ static void UpdateHomeSearchCueBanner(MainWindow* win) {
         return;
     }
     // _TRA returns Str; pass .s into type-safe fmt for the format string.
-    TempStr cue = IsTouchChrome(win)
-                      ? str::DupTemp(win->touchView == TouchView::Library ? "Search library" : "Search files")
-                      : fmt(_TRA("Search %d files (Ctrl + F)").s, CountHomePageFiles());
+    // in the touch chrome the one search field serves both Library states: it
+    // filters the folder tree, or the recent files when Recent is selected
+    const char* touchCue = win->libraryRecentSelected ? "Search recent files" : "Search library";
+    TempStr cue =
+        IsTouchChrome(win) ? str::DupTemp(touchCue) : fmt(_TRA("Search %d files (Ctrl + F)").s, CountHomePageFiles());
     Edit_SetCueBannerText(win->hwndHomeSearch, CWStrTemp(cue));
 }
 
@@ -2616,47 +2618,12 @@ static void DrawTouchOpenTabCard(MainWindow* win, HDC hdc, WindowTab* tab, int t
     win->staticLinks.Append(new StaticLink(card, fmt("%s%d", Str(kLinkHomeOpenTabPrefix), tabIndex)));
 }
 
-static void DrawTouchHomePage(MainWindow* win, HDC hdc) {
-    Rect rc = HwndClientRect(win->hwndCanvas);
-    HdcFillRect(hdc, rc, ThemeWindowControlBackgroundColor());
-    int headerDy = DpiScale(hdc, 64);
-    HdcFillRect(hdc, Rect{0, 0, rc.dx, headerDy}, ThemeWindowControlBackgroundColor());
-    HdcFillRect(hdc, Rect{0, headerDy - 1, rc.dx, 1}, ThemeEdgeColor());
-
-    Rect title{DpiScale(hdc, 24), 0, DpiScale(hdc, 112), headerDy};
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, ThemeWindowTextColor());
-    HdcDrawText(hdc, StrL("Recent files"), title, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
-                HdcGetUiFont(hdc, 18, FW_SEMIBOLD));
-
-    Rect open{title.x + title.dx + DpiScale(hdc, 12), DpiScale(hdc, 12), DpiScale(hdc, 112), DpiScale(hdc, 40)};
-    FillHomeRoundRect(hdc, open, open.dy / 2, RgbToCOLORREF(0xb4530a));
-    SetTextColor(hdc, RGB(255, 255, 255));
-    int openIconDy = DpiScale(hdc, 16);
-    HIMAGELIST openIcons = GetTintedToolbarImageList(openIconDy, RGB(255, 255, 255), RgbToCOLORREF(0xb4530a));
-    if (openIcons) {
-        ImageList_Draw(openIcons, (int)TbIcon::Open, hdc, open.x + DpiScale(hdc, 15),
-                       open.y + (open.dy - openIconDy) / 2, ILD_NORMAL);
-    }
-    Rect openText{open.x + DpiScale(hdc, 38), open.y, open.dx - DpiScale(hdc, 48), open.dy};
-    HdcDrawText(hdc, StrL("Open file"), openText, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX,
-                HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
-    win->staticLinks.Append(new StaticLink(open, Str(kLinkOpenFile)));
-
-    EnsureHomeSearchCreated(win);
-    int searchDx = DpiScale(hdc, kHomeSearchMinDx);
-    Rect search{(rc.dx - searchDx) / 2, DpiScale(hdc, 12), searchDx, DpiScale(hdc, 40)};
-    FillHomeRoundRect(hdc, search, search.dy / 2, ThemeHotBackgroundColor());
-    int iconDy = DpiScale(hdc, 16);
-    HIMAGELIST iml = GetTintedToolbarImageList(iconDy, ThemeWindowDarkerTextColor(), ThemeHotBackgroundColor());
-    if (iml) {
-        ImageList_Draw(iml, (int)TbIcon::Search, hdc, search.x + DpiScale(hdc, 14), search.y + (search.dy - iconDy) / 2,
-                       ILD_NORMAL);
-    }
-    MoveWindow(win->hwndHomeSearch, search.x + DpiScale(hdc, 38), search.y + DpiScale(hdc, 4),
-               search.dx - DpiScale(hdc, 50), search.dy - DpiScale(hdc, 8), TRUE);
-    HwndShow(win->hwndHomeSearch);
-
+// The "Recent" surface: the CURRENTLY OPEN carousel plus the PINNED and RECENT
+// file-card sections. It used to be a view of its own (TouchView::Home); now it
+// is drawn into the Library's content pane when its "Recent" sidebar row is
+// selected. contentRc is that pane (right of the sidebar, below the header) and
+// the pane's scroll position is win->libraryFilesScrollY.
+static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc) {
     Vec<FileState*> files;
     StrVec filterWords;
     CollectHomePageFiles(win, files, filterWords);
@@ -2679,20 +2646,23 @@ static void DrawTouchHomePage(MainWindow* win, HDC hdc) {
         }
     }
     int openSectionDy = len(openTabIndexes) > 0 ? DpiScale(hdc, 18 + 14 + 170 + 28) : 0;
-    int columns = TouchCardColumns(win->hwndCanvas, rc.dx - 2 * pad);
+    int columns = TouchCardColumns(win->hwndCanvas, contentRc.dx - 2 * pad);
     int pinnedRows = TouchCardRows(len(pinned), columns);
     int recentRows = TouchCardRows(len(recent), columns);
     int contentDy = pad + openSectionDy +
                     (pinnedRows ? DpiScale(hdc, 31) + pinnedRows * cardBlockDy + (pinnedRows - 1) * gap + gap : 0) +
                     DpiScale(hdc, 31) + recentRows * cardBlockDy + std::max(0, recentRows - 1) * gap + pad;
-    int viewportDy = std::max(0, rc.dy - headerDy);
-    win->homePageScrollY = std::clamp(win->homePageScrollY, 0, std::max(0, contentDy - viewportDy));
+    win->libraryFilesScrollMaxY = std::max(0, contentDy - contentRc.dy);
+    win->libraryFilesScrollY = std::clamp(win->libraryFilesScrollY, 0, win->libraryFilesScrollMaxY);
 
+    int contentX = contentRc.x + pad;
+    int contentDx = std::max(0, contentRc.dx - 2 * pad);
+    int contentBottom = contentRc.y + contentRc.dy;
     int saved = SaveDC(hdc);
-    IntersectClipRect(hdc, 0, headerDy, rc.dx, rc.dy);
-    int y = headerDy + pad - win->homePageScrollY;
+    IntersectClipRect(hdc, contentRc.x, contentRc.y, contentRc.x + contentRc.dx, contentBottom);
+    int y = contentRc.y + pad - win->libraryFilesScrollY;
     if (len(openTabIndexes) > 0) {
-        Rect labelRc{pad, y, rc.dx - 2 * pad, DpiScale(hdc, 18)};
+        Rect labelRc{contentX, y, contentDx, DpiScale(hdc, 18)};
         SetTextColor(hdc, ThemeWindowDarkerTextColor());
         HdcDrawText(hdc, StrL("CURRENTLY OPEN"), labelRc, DT_SINGLELINE | DT_NOPREFIX,
                     HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
@@ -2701,18 +2671,17 @@ static void DrawTouchHomePage(MainWindow* win, HDC hdc) {
         int openCardDy = DpiScale(hdc, 170);
         int openGap = DpiScale(hdc, 16);
         int openContentDx = len(openTabIndexes) * openCardDx + std::max(0, len(openTabIndexes) - 1) * openGap;
-        int openViewportDx = std::max(0, rc.dx - 2 * pad);
-        win->homeOpenScrollMaxX = std::max(0, openContentDx - openViewportDx);
+        win->homeOpenScrollMaxX = std::max(0, openContentDx - contentDx);
         win->homeOpenScrollX = std::clamp(win->homeOpenScrollX, 0, win->homeOpenScrollMaxX);
-        win->homeOpenCarouselRect = {pad, y, openViewportDx, openCardDy + DpiScale(hdc, 4)};
+        win->homeOpenCarouselRect = {contentX, y, contentDx, openCardDy + DpiScale(hdc, 4)};
         int carouselDc = SaveDC(hdc);
         IntersectClipRect(hdc, win->homeOpenCarouselRect.x, win->homeOpenCarouselRect.y,
                           win->homeOpenCarouselRect.x + win->homeOpenCarouselRect.dx,
                           win->homeOpenCarouselRect.y + win->homeOpenCarouselRect.dy);
         for (int i = 0; i < len(openTabIndexes); i++) {
             int tabIndex = openTabIndexes[i];
-            Rect card{pad - win->homeOpenScrollX + i * (openCardDx + openGap), y, openCardDx, openCardDy};
-            if (card.x < pad + openViewportDx && card.x + card.dx > pad) {
+            Rect card{contentX - win->homeOpenScrollX + i * (openCardDx + openGap), y, openCardDx, openCardDy};
+            if (card.x < contentX + contentDx && card.x + card.dx > contentX) {
                 DrawTouchOpenTabCard(win, hdc, win->GetTab(tabIndex), tabIndex, card);
             }
         }
@@ -2727,15 +2696,15 @@ static void DrawTouchHomePage(MainWindow* win, HDC hdc) {
         if (len(group) == 0 && str::Eq(label, StrL("PINNED"))) {
             return;
         }
-        Rect labelRc{pad, y, rc.dx - 2 * pad, DpiScale(hdc, 18)};
+        Rect labelRc{contentX, y, contentDx, DpiScale(hdc, 18)};
         SetTextColor(hdc, ThemeWindowDarkerTextColor());
         HdcDrawText(hdc, label, labelRc, DT_SINGLELINE | DT_NOPREFIX, HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
         y += DpiScale(hdc, 31);
         for (int i = 0; i < len(group); i++) {
             int col = i % columns;
             int row = i / columns;
-            Rect card{pad + col * (cardDx + gap), y + row * (cardBlockDy + gap), cardDx, cardDy};
-            if (card.y + cardBlockDy >= headerDy && card.y < rc.dy) {
+            Rect card{contentX + col * (cardDx + gap), y + row * (cardBlockDy + gap), cardDx, cardDy};
+            if (card.y + cardBlockDy >= contentRc.y && card.y < contentBottom) {
                 DrawTouchFileCard(win, hdc, group[i], card, showProgress);
             }
         }
@@ -2744,6 +2713,12 @@ static void DrawTouchHomePage(MainWindow* win, HDC hdc) {
     };
     drawGroup(StrL("PINNED"), pinned, false);
     drawGroup(StrL("RECENT"), recent, true);
+    if (len(pinned) == 0 && len(recent) == 0) {
+        Rect empty{contentX, y, contentDx, DpiScale(hdc, 40)};
+        SetTextColor(hdc, ThemeWindowDarkerTextColor());
+        Str message = len(filterWords) > 0 ? StrL("No matching files.") : StrL("No recent files yet.");
+        HdcDrawText(hdc, message, empty, DT_SINGLELINE | DT_NOPREFIX, HdcGetUiFont(hdc, 14));
+    }
     RestoreDC(hdc, saved);
 }
 
@@ -3019,7 +2994,11 @@ bool HandleTouchLibraryLink(MainWindow* win, Str url) {
     if (!win || !gGlobalPrefs) {
         return false;
     }
-    if (str::TrimPrefix(url, kLinkLibraryMenuPrefix)) {
+    if (str::Eq(url, kLinkLibraryRecent)) {
+        win->libraryRecentSelected = true;
+        win->libraryFilesScrollY = 0;
+        str::FreePtr(&win->libraryRowMenuPath);
+    } else if (str::TrimPrefix(url, kLinkLibraryMenuPrefix)) {
         str::ReplaceWithCopy(&win->libraryRowMenuPath, url);
     } else if (str::TrimPrefix(url, kLinkLibraryPinPrefix)) {
         if (!TouchLibraryRemovePath(gGlobalPrefs->libraryPinnedFolders, url)) {
@@ -3083,6 +3062,7 @@ void SelectTouchLibraryFolder(MainWindow* win, Str folderPath) {
         return;
     }
     str::ReplaceWithCopy(&win->librarySelectedFolderPath, folderPath);
+    win->libraryRecentSelected = false;
     win->libraryFilesScrollY = 0;
 
     Str current = folderPath;
@@ -3527,6 +3507,9 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     }
     auto& folders = gTouchLibraryFolders;
     auto& files = gTouchLibraryFiles;
+    // the sidebar's "Recent" row: the content pane then shows the recent files
+    // instead of a folder's contents
+    bool recentSelected = win->libraryRecentSelected;
 
     EnsureHomeSearchCreated(win);
     Rect search{DpiScale(hdc, 12), DpiScale(hdc, 12), leftDx - DpiScale(hdc, 24), DpiScale(hdc, 40)};
@@ -3573,6 +3556,11 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                     HdcGetUiFont(hdc, 12, FW_SEMIBOLD));
         y += labelRect.dy;
     };
+    // the shared selected-row treatment (also used by the rail and the panels)
+    COLORREF selBg = 0;
+    COLORREF selFg = 0;
+    ThemeAccentSurfaceColors(&selBg, &selFg);
+    auto drawSidebarRowBg = [&](const Rect& row) { FillHomeRoundRect(hdc, row, DpiScale(hdc, 8), selBg); };
     Rect openMenuAnchor{};
     auto drawFolderRow = [&](int idx, bool pinnedRow) {
         if (idx < 0 || idx >= len(folders)) {
@@ -3580,7 +3568,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         }
         Str folder = folders[idx];
         TouchLibraryFolderData* data = folders.AtData(idx);
-        bool isSelected = idx == selected;
+        bool isSelected = !recentSelected && idx == selected;
         bool isPinned = TouchLibraryPathIn(gGlobalPrefs->libraryPinnedFolders, folder);
         Rect row{DpiScale(hdc, 8), y, leftDx - DpiScale(hdc, 16), DpiScale(hdc, 38)};
         y += row.dy;
@@ -3590,15 +3578,15 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         }
         COLORREF rowBg = ThemeHotBackgroundColor();
         if (isSelected) {
-            rowBg = RgbToCOLORREF(0xfbeee2);
-            FillHomeRoundRect(hdc, row, DpiScale(hdc, 8), rowBg);
+            rowBg = selBg;
+            drawSidebarRowBg(row);
         }
         int indent = pinnedRow ? 10 : 10 + data->depth * 20;
         int x = row.x + DpiScale(hdc, indent);
         Rect chevron{x, row.y, DpiScale(hdc, 18), row.dy};
         if (!pinnedRow && data->hasChildren) {
             bool collapsed = win->libraryExpandedFolderPaths.FindI(folder) < 0;
-            SetTextColor(hdc, isSelected ? ThemeWindowLinkColor() : ThemeWindowDarkerTextColor());
+            SetTextColor(hdc, isSelected ? selFg : ThemeWindowDarkerTextColor());
             HdcDrawText(hdc, collapsed ? StrL("›") : StrL("⌄"), chevron,
                         DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, HdcGetUiFont(hdc, 15, FW_MEDIUM));
             Rect chevronLink = chevron.Intersect(treeClip);
@@ -3608,7 +3596,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
             }
         }
         Rect folderIcon{chevron.x + chevron.dx + DpiScale(hdc, 4), row.y, DpiScale(hdc, 18), row.dy};
-        COLORREF fg = isSelected || pinnedRow ? ThemeWindowLinkColor() : ThemeWindowTextColor();
+        COLORREF fg = isSelected ? selFg : (pinnedRow ? ThemeWindowLinkColor() : ThemeWindowTextColor());
         DrawTouchLibraryFolderIcon(hdc, folderIcon, fg, isSelected ? rowBg : ThemeHotBackgroundColor());
         Rect countRect{row.x + row.dx - DpiScale(hdc, 28), row.y, DpiScale(hdc, 24), row.dy};
         Rect menuRect{countRect.x - DpiScale(hdc, 26), row.y + DpiScale(hdc, 8), DpiScale(hdc, 22), DpiScale(hdc, 22)};
@@ -3616,7 +3604,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         int pinDx = isPinned && !pinnedRow ? DpiScale(hdc, 14) : 0;
         Rect nameRect{nameX, row.y, std::max(0, menuRect.x - nameX - DpiScale(hdc, 6) - pinDx), row.dy};
         TempStr name = path::GetBaseNameTemp(folder);
-        SetTextColor(hdc, isSelected ? ThemeWindowLinkColor() : ThemeWindowTextColor());
+        SetTextColor(hdc, isSelected ? selFg : ThemeWindowTextColor());
         HdcDrawText(hdc, name, nameRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
                     HdcGetUiFont(hdc, 13, FW_MEDIUM));
         if (pinDx > 0) {
@@ -3643,7 +3631,44 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         }
     };
 
-    if (len(query) > 0) {
+    // "Recent" sits above the folder sections and is the default destination
+    {
+        Rect row{DpiScale(hdc, 8), y, leftDx - DpiScale(hdc, 16), DpiScale(hdc, 38)};
+        y += row.dy;
+        Rect visibleRow = row.Intersect(treeClip);
+        if (!visibleRow.IsEmpty()) {
+            COLORREF rowBg = ThemeHotBackgroundColor();
+            if (recentSelected) {
+                rowBg = selBg;
+                drawSidebarRowBg(row);
+            }
+            COLORREF fg = recentSelected ? selFg : ThemeWindowTextColor();
+            int iconDy = DpiScale(hdc, 18);
+            Rect icon{row.x + DpiScale(hdc, 10) + DpiScale(hdc, 18) + DpiScale(hdc, 4), row.y, iconDy, row.dy};
+            HIMAGELIST recentIcons = GetTintedToolbarImageList(iconDy, fg, rowBg);
+            if (recentIcons) {
+                ImageList_Draw(recentIcons, (int)TbIcon::Recent, hdc, icon.x, icon.y + (row.dy - iconDy) / 2,
+                               ILD_NORMAL);
+            }
+            Rect countRect{row.x + row.dx - DpiScale(hdc, 28), row.y, DpiScale(hdc, 24), row.dy};
+            int nameX = icon.x + icon.dx + DpiScale(hdc, 7);
+            Rect nameRect{nameX, row.y, std::max(0, countRect.x - nameX - DpiScale(hdc, 6)), row.dy};
+            SetTextColor(hdc, fg);
+            HdcDrawText(hdc, StrL("Recent"), nameRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+                        HdcGetUiFont(hdc, 13, FW_MEDIUM));
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            HdcDrawTextTabular(hdc, fmt("%d", CountHomePageFiles()), countRect,
+                               DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_NOPREFIX, HdcGetUiFont(hdc, 12));
+            win->staticLinks.Append(new StaticLink(visibleRow, Str(kLinkLibraryRecent), StrL("Recently opened files")));
+        }
+        y += DpiScale(hdc, 8);
+        HdcFillRect(hdc, Rect{DpiScale(hdc, 16), y, leftDx - DpiScale(hdc, 32), 1}, ThemeEdgeColor());
+        y += DpiScale(hdc, 10);
+    }
+
+    // while Recent is selected the search box filters the recent files, so the
+    // sidebar keeps its normal rows instead of switching to search results
+    if (len(query) > 0 && !recentSelected) {
         bool anyFolder = false;
         sectionLabel(StrL("FOLDERS"));
         for (int i = 0; i < len(folders); i++) {
@@ -3749,157 +3774,189 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     Str selectedPath = selected >= 0 && selected < len(folders) ? folders[selected] : Str{};
     TempStr selectedName = selectedPath ? path::GetBaseNameTemp(selectedPath) : str::DupTemp("Library");
     int viewButtonDy = DpiScale(hdc, 36);
-    Rect viewToggle{rc.dx - DpiScale(hdc, 24) - 2 * viewButtonDy, (headerDy - viewButtonDy) / 2, 2 * viewButtonDy,
-                    viewButtonDy};
-    FillHomeRoundRect(hdc, viewToggle, DpiScale(hdc, 11), ThemeHotBackgroundColor());
-    Rect contentView{viewToggle.x, viewToggle.y, viewButtonDy, viewButtonDy};
-    Rect listView{contentView.x + contentView.dx, viewToggle.y, viewButtonDy, viewButtonDy};
-    Rect activeView = win->libraryListView ? listView : contentView;
-    FillHomeRoundRect(hdc, activeView, DpiScale(hdc, 9), ThemeWindowControlBackgroundColor());
-    int viewIconDy = DpiScale(hdc, 18);
-    HIMAGELIST contentIcons = GetTintedToolbarImageList(
-        viewIconDy, win->libraryListView ? ThemeWindowDarkerTextColor() : ThemeWindowLinkColor(),
-        win->libraryListView ? ThemeHotBackgroundColor() : ThemeWindowControlBackgroundColor());
-    if (contentIcons) {
-        ImageList_Draw(contentIcons, (int)TbIcon::HomeThumbnails, hdc,
-                       contentView.x + (contentView.dx - viewIconDy) / 2,
-                       contentView.y + (contentView.dy - viewIconDy) / 2, ILD_NORMAL);
+    // right end of the header: the grid/list toggle for a folder, "Open file"
+    // for Recent (the recent cards have no list variant)
+    Rect headerAction{rc.dx - DpiScale(hdc, 24) - 2 * viewButtonDy, (headerDy - viewButtonDy) / 2, 2 * viewButtonDy,
+                      viewButtonDy};
+    if (recentSelected) {
+        int openDx = DpiScale(hdc, 118);
+        Rect open{rc.dx - DpiScale(hdc, 24) - openDx, (headerDy - DpiScale(hdc, 40)) / 2, openDx, DpiScale(hdc, 40)};
+        headerAction = open;
+        FillHomeRoundRect(hdc, open, open.dy / 2, selBg);
+        SetTextColor(hdc, selFg);
+        int openIconDy = DpiScale(hdc, 16);
+        HIMAGELIST openIcons = GetTintedToolbarImageList(openIconDy, selFg, selBg);
+        if (openIcons) {
+            ImageList_Draw(openIcons, (int)TbIcon::Open, hdc, open.x + DpiScale(hdc, 15),
+                           open.y + (open.dy - openIconDy) / 2, ILD_NORMAL);
+        }
+        Rect openText{open.x + DpiScale(hdc, 38), open.y, open.dx - DpiScale(hdc, 48), open.dy};
+        HdcDrawText(hdc, StrL("Open file"), openText, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
+        win->staticLinks.Append(new StaticLink(open, Str(kLinkOpenFile), StrL("Open a document")));
+    } else {
+        Rect viewToggle = headerAction;
+        FillHomeRoundRect(hdc, viewToggle, DpiScale(hdc, 11), ThemeHotBackgroundColor());
+        Rect contentView{viewToggle.x, viewToggle.y, viewButtonDy, viewButtonDy};
+        Rect listView{contentView.x + contentView.dx, viewToggle.y, viewButtonDy, viewButtonDy};
+        Rect activeView = win->libraryListView ? listView : contentView;
+        FillHomeRoundRect(hdc, activeView, DpiScale(hdc, 9), ThemeWindowControlBackgroundColor());
+        int viewIconDy = DpiScale(hdc, 18);
+        HIMAGELIST contentIcons = GetTintedToolbarImageList(
+            viewIconDy, win->libraryListView ? ThemeWindowDarkerTextColor() : ThemeWindowLinkColor(),
+            win->libraryListView ? ThemeHotBackgroundColor() : ThemeWindowControlBackgroundColor());
+        if (contentIcons) {
+            ImageList_Draw(contentIcons, (int)TbIcon::HomeThumbnails, hdc,
+                           contentView.x + (contentView.dx - viewIconDy) / 2,
+                           contentView.y + (contentView.dy - viewIconDy) / 2, ILD_NORMAL);
+        }
+        HIMAGELIST listIcons = GetTintedToolbarImageList(
+            viewIconDy, win->libraryListView ? ThemeWindowLinkColor() : ThemeWindowDarkerTextColor(),
+            win->libraryListView ? ThemeWindowControlBackgroundColor() : ThemeHotBackgroundColor());
+        if (listIcons) {
+            ImageList_Draw(listIcons, (int)TbIcon::HomeList, hdc, listView.x + (listView.dx - viewIconDy) / 2,
+                           listView.y + (listView.dy - viewIconDy) / 2, ILD_NORMAL);
+        }
+        win->staticLinks.Append(new StaticLink(contentView, Str(kLinkLibraryContentView), StrL("Content view")));
+        win->staticLinks.Append(new StaticLink(listView, Str(kLinkLibraryListView), StrL("List view")));
     }
-    HIMAGELIST listIcons = GetTintedToolbarImageList(
-        viewIconDy, win->libraryListView ? ThemeWindowLinkColor() : ThemeWindowDarkerTextColor(),
-        win->libraryListView ? ThemeWindowControlBackgroundColor() : ThemeHotBackgroundColor());
-    if (listIcons) {
-        ImageList_Draw(listIcons, (int)TbIcon::HomeList, hdc, listView.x + (listView.dx - viewIconDy) / 2,
-                       listView.y + (listView.dy - viewIconDy) / 2, ILD_NORMAL);
-    }
-    win->staticLinks.Append(new StaticLink(contentView, Str(kLinkLibraryContentView), StrL("Content view")));
-    win->staticLinks.Append(new StaticLink(listView, Str(kLinkLibraryListView), StrL("List view")));
 
-    Rect header{leftDx + DpiScale(hdc, 24), 0, std::max(0, viewToggle.x - leftDx - DpiScale(hdc, 40)), headerDy};
+    Rect header{leftDx + DpiScale(hdc, 24), 0, std::max(0, headerAction.x - leftDx - DpiScale(hdc, 40)), headerDy};
     SetTextColor(hdc, ThemeWindowTextColor());
-    HdcDrawText(hdc, selectedName, header, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+    Str headerTitle = selectedName;
+    if (recentSelected) {
+        headerTitle = StrL("Recent files");
+    }
+    HdcDrawText(hdc, headerTitle, header, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
                 HdcGetUiFont(hdc, 18, FW_SEMIBOLD));
 
-    Vec<int> selectedFolders;
-    for (int i = 0; i < len(folders); i++) {
-        if (folders.AtData(i)->parent == selected && !TouchLibraryFolderHidden(folders, i)) {
-            selectedFolders.Append(i);
-        }
-    }
-    Vec<int> selectedFiles;
-    for (int i = 0; i < len(files); i++) {
-        if (selectedPath && str::EqI(path::GetDirTemp(files[i]), selectedPath)) {
-            selectedFiles.Append(i);
-        }
-    }
-    int pad = DpiScale(hdc, 24);
-    int filesViewportDy = std::max(0, rc.dy - headerDy);
-    int itemCount = len(selectedFolders) + len(selectedFiles);
-    int filesContentDy = 0;
-    int gap = DpiScale(hdc, 20);
-    int cardDx = DpiScale(hdc, 148);
-    int cardDy = DpiScale(hdc, 196);
-    int columns = TouchCardColumns(win->hwndCanvas, rc.dx - leftDx - 2 * pad);
-    int cardStepY = cardDy + DpiScale(hdc, 70);
-    int listPadY = DpiScale(hdc, 8);
-    int listRowDy = DpiScale(hdc, 44);
-    if (win->libraryListView) {
-        filesContentDy = 2 * listPadY + itemCount * listRowDy;
+    if (recentSelected) {
+        Rect content{leftDx, headerDy, std::max(0, rc.dx - leftDx), std::max(0, rc.dy - headerDy)};
+        DrawTouchRecentCards(win, hdc, content);
     } else {
-        filesContentDy = pad + TouchCardRows(itemCount, columns) * cardStepY + pad;
-    }
-    win->libraryFilesScrollMaxY = std::max(0, filesContentDy - filesViewportDy);
-    win->libraryFilesScrollY = std::clamp(win->libraryFilesScrollY, 0, win->libraryFilesScrollMaxY);
-    Rect filesClip{leftDx, headerDy, std::max(0, rc.dx - leftDx), filesViewportDy};
-    int filesDc = SaveDC(hdc);
-    IntersectClipRect(hdc, filesClip.x, filesClip.y, filesClip.x + filesClip.dx, filesClip.y + filesClip.dy);
+        Vec<int> selectedFolders;
+        for (int i = 0; i < len(folders); i++) {
+            if (folders.AtData(i)->parent == selected && !TouchLibraryFolderHidden(folders, i)) {
+                selectedFolders.Append(i);
+            }
+        }
+        Vec<int> selectedFiles;
+        for (int i = 0; i < len(files); i++) {
+            if (selectedPath && str::EqI(path::GetDirTemp(files[i]), selectedPath)) {
+                selectedFiles.Append(i);
+            }
+        }
+        int pad = DpiScale(hdc, 24);
+        int filesViewportDy = std::max(0, rc.dy - headerDy);
+        int itemCount = len(selectedFolders) + len(selectedFiles);
+        int filesContentDy = 0;
+        int gap = DpiScale(hdc, 20);
+        int cardDx = DpiScale(hdc, 148);
+        int cardDy = DpiScale(hdc, 196);
+        int columns = TouchCardColumns(win->hwndCanvas, rc.dx - leftDx - 2 * pad);
+        int cardStepY = cardDy + DpiScale(hdc, 70);
+        int listPadY = DpiScale(hdc, 8);
+        int listRowDy = DpiScale(hdc, 44);
+        if (win->libraryListView) {
+            filesContentDy = 2 * listPadY + itemCount * listRowDy;
+        } else {
+            filesContentDy = pad + TouchCardRows(itemCount, columns) * cardStepY + pad;
+        }
+        win->libraryFilesScrollMaxY = std::max(0, filesContentDy - filesViewportDy);
+        win->libraryFilesScrollY = std::clamp(win->libraryFilesScrollY, 0, win->libraryFilesScrollMaxY);
+        Rect filesClip{leftDx, headerDy, std::max(0, rc.dx - leftDx), filesViewportDy};
+        int filesDc = SaveDC(hdc);
+        IntersectClipRect(hdc, filesClip.x, filesClip.y, filesClip.x + filesClip.dx, filesClip.y + filesClip.dy);
 
-    if (win->libraryListView) {
-        int rowY = headerDy + listPadY - win->libraryFilesScrollY;
-        auto drawListRow = [&](bool isFolder, int idx) {
-            Rect row{leftDx + DpiScale(hdc, 16), rowY, rc.dx - leftDx - DpiScale(hdc, 32), listRowDy};
-            rowY += listRowDy;
-            Rect visibleRow = row.Intersect(filesClip);
-            if (visibleRow.IsEmpty()) {
-                return;
+        if (win->libraryListView) {
+            int rowY = headerDy + listPadY - win->libraryFilesScrollY;
+            auto drawListRow = [&](bool isFolder, int idx) {
+                Rect row{leftDx + DpiScale(hdc, 16), rowY, rc.dx - leftDx - DpiScale(hdc, 32), listRowDy};
+                rowY += listRowDy;
+                Rect visibleRow = row.Intersect(filesClip);
+                if (visibleRow.IsEmpty()) {
+                    return;
+                }
+                Rect icon{row.x, row.y + (row.dy - DpiScale(hdc, 18)) / 2, DpiScale(hdc, 18), DpiScale(hdc, 18)};
+                Str itemPath;
+                TempStr name;
+                TempStr meta;
+                TempStr target;
+                if (isFolder) {
+                    itemPath = folders[idx];
+                    name = path::GetBaseNameTemp(itemPath);
+                    meta = TouchLibraryFolderSummaryTemp(folders.AtData(idx));
+                    target = fmt("%s%s", Str(kLinkLibraryFolderPrefix), itemPath);
+                    DrawTouchLibrarySolidFolderIcon(hdc, icon, RgbToCOLORREF(0xc56a1a));
+                } else {
+                    itemPath = files[idx];
+                    name = path::GetBaseNameTemp(itemPath);
+                    i64 size = file::GetSize(itemPath);
+                    meta = size >= 0 ? str::FormatSizeShortTemp(size, nullptr) : str::DupTemp("");
+                    target = str::DupTemp(itemPath);
+                    Rect pdfIcon{icon.x + DpiScale(hdc, 1), icon.y + DpiScale(hdc, 1), DpiScale(hdc, 16),
+                                 DpiScale(hdc, 16)};
+                    DrawTouchLibraryPdfIcon(hdc, pdfIcon);
+                }
+                Rect metaRect{row.x + row.dx - DpiScale(hdc, 170), row.y, DpiScale(hdc, 170), row.dy};
+                Rect nameRect{icon.x + icon.dx + DpiScale(hdc, 10), row.y,
+                              std::max(0, metaRect.x - icon.x - icon.dx - DpiScale(hdc, 22)), row.dy};
+                SetTextColor(hdc, ThemeWindowTextColor());
+                HdcDrawText(hdc, name, nameRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+                            HdcGetUiFont(hdc, 14));
+                SetTextColor(hdc, ThemeWindowDarkerTextColor());
+                HdcDrawText(hdc, meta, metaRect, DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+                            HdcGetUiFont(hdc, 12));
+                HdcFillRect(hdc, Rect{row.x, row.y + row.dy - 1, row.dx, 1}, RgbToCOLORREF(0xeee9e1));
+                win->staticLinks.Append(new StaticLink(visibleRow, target, itemPath));
+            };
+            for (int folderIdx : selectedFolders) {
+                drawListRow(true, folderIdx);
             }
-            Rect icon{row.x, row.y + (row.dy - DpiScale(hdc, 18)) / 2, DpiScale(hdc, 18), DpiScale(hdc, 18)};
-            Str itemPath;
-            TempStr name;
-            TempStr meta;
-            TempStr target;
-            if (isFolder) {
-                itemPath = folders[idx];
-                name = path::GetBaseNameTemp(itemPath);
-                meta = TouchLibraryFolderSummaryTemp(folders.AtData(idx));
-                target = fmt("%s%s", Str(kLinkLibraryFolderPrefix), itemPath);
-                DrawTouchLibrarySolidFolderIcon(hdc, icon, RgbToCOLORREF(0xc56a1a));
-            } else {
-                itemPath = files[idx];
-                name = path::GetBaseNameTemp(itemPath);
-                i64 size = file::GetSize(itemPath);
-                meta = size >= 0 ? str::FormatSizeShortTemp(size, nullptr) : str::DupTemp("");
-                target = str::DupTemp(itemPath);
-                Rect pdfIcon{icon.x + DpiScale(hdc, 1), icon.y + DpiScale(hdc, 1), DpiScale(hdc, 16),
-                             DpiScale(hdc, 16)};
-                DrawTouchLibraryPdfIcon(hdc, pdfIcon);
+            for (int fileIdx : selectedFiles) {
+                drawListRow(false, fileIdx);
             }
-            Rect metaRect{row.x + row.dx - DpiScale(hdc, 170), row.y, DpiScale(hdc, 170), row.dy};
-            Rect nameRect{icon.x + icon.dx + DpiScale(hdc, 10), row.y,
-                          std::max(0, metaRect.x - icon.x - icon.dx - DpiScale(hdc, 22)), row.dy};
-            SetTextColor(hdc, ThemeWindowTextColor());
-            HdcDrawText(hdc, name, nameRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
-                        HdcGetUiFont(hdc, 14));
+        } else {
+            for (int i = 0; i < itemCount; i++) {
+                int col = i % columns;
+                int row = i / columns;
+                Rect card{leftDx + pad + col * (cardDx + gap),
+                          headerDy + pad - win->libraryFilesScrollY + row * cardStepY, cardDx, cardDy};
+                Rect cardBlock = card;
+                cardBlock.dy = cardStepY;
+                if (cardBlock.Intersect(filesClip).IsEmpty()) {
+                    continue;
+                }
+                if (i < len(selectedFolders)) {
+                    int folderIdx = selectedFolders[i];
+                    DrawTouchLibraryFolderCard(win, hdc, folders[folderIdx], folders.AtData(folderIdx), card,
+                                               filesClip);
+                    continue;
+                }
+                int fileIdx = selectedFiles[i - len(selectedFolders)];
+                Str filePath = files[fileIdx];
+                TouchLibraryFileData* fileData = files.AtData(fileIdx);
+                if (!fileData->thumbnail && !fileData->thumbnailRequested) {
+                    fileData->thumbnailRequested = true;
+                    auto* request = new TouchLibraryThumbnailRequest();
+                    request->filePath = str::Dup(filePath);
+                    auto* onRendered = NewFunc1(TouchLibraryThumbnailFinished, request);
+                    CreateThumbnailFromFileAsync(filePath, 1, onRendered);
+                }
+                DrawTouchFileCardPath(win, hdc, filePath, gFileHistory.FindByPath(filePath), fileData->thumbnail, card,
+                                      false, &filesClip, true, true);
+            }
+        }
+        if (itemCount == 0) {
+            Rect empty{leftDx + DpiScale(hdc, 40), headerDy + DpiScale(hdc, 40), rc.dx - leftDx - DpiScale(hdc, 80),
+                       DpiScale(hdc, 40)};
             SetTextColor(hdc, ThemeWindowDarkerTextColor());
-            HdcDrawText(hdc, meta, metaRect, DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
-                        HdcGetUiFont(hdc, 12));
-            HdcFillRect(hdc, Rect{row.x, row.y + row.dy - 1, row.dx, 1}, RgbToCOLORREF(0xeee9e1));
-            win->staticLinks.Append(new StaticLink(visibleRow, target, itemPath));
-        };
-        for (int folderIdx : selectedFolders) {
-            drawListRow(true, folderIdx);
+            Str message =
+                len(folders) == 0 ? StrL("Add a folder to build your Library.") : StrL("This folder is empty.");
+            HdcDrawText(hdc, message, empty, DT_SINGLELINE | DT_NOPREFIX, HdcGetUiFont(hdc, 14));
         }
-        for (int fileIdx : selectedFiles) {
-            drawListRow(false, fileIdx);
-        }
-    } else {
-        for (int i = 0; i < itemCount; i++) {
-            int col = i % columns;
-            int row = i / columns;
-            Rect card{leftDx + pad + col * (cardDx + gap), headerDy + pad - win->libraryFilesScrollY + row * cardStepY,
-                      cardDx, cardDy};
-            Rect cardBlock = card;
-            cardBlock.dy = cardStepY;
-            if (cardBlock.Intersect(filesClip).IsEmpty()) {
-                continue;
-            }
-            if (i < len(selectedFolders)) {
-                int folderIdx = selectedFolders[i];
-                DrawTouchLibraryFolderCard(win, hdc, folders[folderIdx], folders.AtData(folderIdx), card, filesClip);
-                continue;
-            }
-            int fileIdx = selectedFiles[i - len(selectedFolders)];
-            Str filePath = files[fileIdx];
-            TouchLibraryFileData* fileData = files.AtData(fileIdx);
-            if (!fileData->thumbnail && !fileData->thumbnailRequested) {
-                fileData->thumbnailRequested = true;
-                auto* request = new TouchLibraryThumbnailRequest();
-                request->filePath = str::Dup(filePath);
-                auto* onRendered = NewFunc1(TouchLibraryThumbnailFinished, request);
-                CreateThumbnailFromFileAsync(filePath, 1, onRendered);
-            }
-            DrawTouchFileCardPath(win, hdc, filePath, gFileHistory.FindByPath(filePath), fileData->thumbnail, card,
-                                  false, &filesClip, true, true);
-        }
+        RestoreDC(hdc, filesDc);
     }
-    if (itemCount == 0) {
-        Rect empty{leftDx + DpiScale(hdc, 40), headerDy + DpiScale(hdc, 40), rc.dx - leftDx - DpiScale(hdc, 80),
-                   DpiScale(hdc, 40)};
-        SetTextColor(hdc, ThemeWindowDarkerTextColor());
-        Str message = len(folders) == 0 ? StrL("Add a folder to build your Library.") : StrL("This folder is empty.");
-        HdcDrawText(hdc, message, empty, DT_SINGLELINE | DT_NOPREFIX, HdcGetUiFont(hdc, 14));
-    }
-    RestoreDC(hdc, filesDc);
 
     if (!openMenuAnchor.IsEmpty() && win->libraryRowMenuPath) {
         DeleteVecMembers(win->staticLinks);
@@ -3944,11 +4001,9 @@ void DrawHomePage(MainWindow* win, HDC hdc) {
 
     if (IsTouchChrome(win)) {
         ClearHomeLayoutCache();
-        if (win->touchView == TouchView::Library) {
-            DrawTouchLibraryPageV2(win, hdc);
-        } else {
-            DrawTouchHomePage(win, hdc);
-        }
+        // the Library is the only browsing destination; Recent is one of its
+        // sidebar rows (win->libraryRecentSelected)
+        DrawTouchLibraryPageV2(win, hdc);
         return;
     }
 
@@ -4449,7 +4504,7 @@ void HomePageOnMouseWheel(MainWindow* win, int delta, Point canvasPt) {
 }
 
 void HomePageOnMouseHWheel(MainWindow* win, int delta) {
-    if (!IsTouchChrome(win) || win->touchView != TouchView::Home || win->homeOpenScrollMaxX <= 0) {
+    if (!IsTouchChrome(win) || win->touchView != TouchView::Library || win->homeOpenScrollMaxX <= 0) {
         return;
     }
     int step = DpiScale(win->hwndCanvas, 120);
@@ -4492,14 +4547,17 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
         Rect canvas = HwndClientRect(win->hwndCanvas);
         int headerDy = DpiScale(win->hwndCanvas, 64);
         int area = 0;
-        if (win->touchView == TouchView::Home && pt.y >= headerDy) {
-            area = win->homeOpenCarouselRect.Contains(pt) ? 2 : 1;
-        } else if (win->touchView == TouchView::Library && TouchLibrarySplitterHitRect(win).Contains(pt)) {
+        if (win->touchView == TouchView::Library && TouchLibrarySplitterHitRect(win).Contains(pt)) {
             area = 5;
         } else if (win->touchView == TouchView::Library && pt.y >= headerDy) {
             int leftDx = TouchLibrarySidebarDx(win);
             int manageTop = canvas.dy - DpiScale(win->hwndCanvas, 64);
-            area = pt.x < leftDx && pt.y < manageTop ? 3 : (pt.x >= leftDx ? 4 : 0);
+            if (pt.x < leftDx) {
+                area = pt.y < manageTop ? 3 : 0;
+            } else {
+                // the Recent pane's "currently open" strip also pans sideways
+                area = win->homeOpenCarouselRect.Contains(pt) ? 2 : 4;
+            }
         }
         if (area == 0) {
             return false;
@@ -4513,9 +4571,7 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
             win->librarySidebarResizeStartX = pt.x;
             win->librarySidebarResizeStartDx = TouchLibrarySidebarDx(win);
         }
-        if (area == 1 || area == 2) {
-            win->touchAboutPanStartY = win->homePageScrollY;
-        } else if (area == 3) {
+        if (area == 3) {
             win->touchAboutPanStartY = win->libraryTreeScrollY;
         } else {
             win->touchAboutPanStartY = win->libraryFilesScrollY;
@@ -4547,11 +4603,9 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
             ResizeTouchLibrarySidebar(win, pt.x);
         } else if (win->touchAboutPanArea == 2 && win->touchAboutPanAxis == 1) {
             win->homeOpenScrollX = std::clamp(win->touchAboutPanStartX - dx, 0, win->homeOpenScrollMaxX);
-        } else if (win->touchAboutPanArea == 1 || win->touchAboutPanArea == 2) {
-            win->homePageScrollY = std::max(0, win->touchAboutPanStartY - dy);
         } else if (win->touchAboutPanArea == 3) {
             win->libraryTreeScrollY = std::clamp(win->touchAboutPanStartY - dy, 0, win->libraryTreeScrollMaxY);
-        } else if (win->touchAboutPanArea == 4) {
+        } else if (win->touchAboutPanArea == 2 || win->touchAboutPanArea == 4) {
             win->libraryFilesScrollY = std::clamp(win->touchAboutPanStartY - dy, 0, win->libraryFilesScrollMaxY);
         }
         HwndInvalidate(win->hwndCanvas, false);

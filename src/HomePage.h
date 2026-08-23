@@ -31,6 +31,7 @@ constexpr const char* kLinkHomeRemoveFilePrefix = "<HomePage,RemoveFile>";
 constexpr const char* kLinkHomePinFilePrefix = "<HomePage,PinFile>";
 constexpr const char* kLinkHomeOpenTabPrefix = "<HomePage,OpenTab>";
 constexpr const char* kLinkHomeCloseTabPrefix = "<HomePage,CloseTab>";
+constexpr const char* kLinkLibraryRecent = "<Library,Recent>";
 constexpr const char* kLinkLibraryFolderPrefix = "<Library,Folder>";
 constexpr const char* kLinkLibraryTogglePrefix = "<Library,Toggle>";
 constexpr const char* kLinkLibraryAddFolder = "<Library,AddFolder>";

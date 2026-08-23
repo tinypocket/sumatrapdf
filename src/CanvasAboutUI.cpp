@@ -259,6 +259,8 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
                     win->homePageScrollY = 0;
                     if (win->touchView == TouchView::Library) {
                         win->libraryTreeScrollY = 0;
+                        // the same field filters the Recent cards
+                        win->libraryFilesScrollY = 0;
                     }
                     // the filter changed the list, so select its first entry (#1136)
                     HomePageSelectFirst(win);

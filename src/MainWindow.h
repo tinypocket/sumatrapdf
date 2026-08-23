@@ -137,6 +137,8 @@ enum class TouchPanelMode {
 
 enum class TouchView {
     Doc = 0,
+    // deprecated: the Recent surface is now the Library's first sidebar row.
+    // Nothing navigates here any more (SetTouchView maps it to Library)
     Home,
     Library,
     Web,
@@ -209,9 +211,9 @@ struct MainWindow {
 
     // the in-product web browser shown for TouchView::Web (see SimpleBrowserWindow.cpp)
     TouchBrowser* touchBrowser = nullptr;
-    // the last non-document view the user was in (Recent / Library / Web), so
+    // the last non-document view the user was in (Library / Web), so
     // closing the last document returns to where they came from
-    TouchView lastNonDocView = TouchView::Home;
+    TouchView lastNonDocView = TouchView::Library;
 
     // custom-drawn top bar; replaces the rebar toolbar with the rail chrome
     TopBarWnd* topBarWnd = nullptr;
@@ -387,6 +389,10 @@ struct MainWindow {
     Str homeSearchQuery;
     int librarySelectedFolder = 0;
     Str librarySelectedFolderPath;
+    // the Library sidebar's "Recent" row is selected: the content pane shows
+    // the recently opened / pinned / currently open files instead of a folder.
+    // It's the default so opening the Library lands on something useful.
+    bool libraryRecentSelected = true;
     StrVec libraryExpandedFolderPaths;
     Str librarySearchQuery;
     Str libraryRowMenuPath;

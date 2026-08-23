@@ -1051,6 +1051,21 @@ COLORREF ThemeTouchSurfaceColor() {
     return AdjustLightness2(panel, 14.0f);
 }
 
+// A text-entry surface (the browser's address field). It has to read as a
+// field, i.e. a step ABOVE whatever row it sits on. ThemeTouchSurfaceColor
+// alone is not enough on light themes, where it resolves to the same value as
+// the row and the field ends up defined only by its border. The design uses
+// pure white against a near-white row, so lighten a light surface further;
+// dark themes already get a visibly raised surface.
+COLORREF ThemeTextFieldColor() {
+    COLORREF surface = ThemeTouchSurfaceColor();
+    COLORREF row = ThemeWindowControlBackgroundColor();
+    if (GetLightness(surface) >= GetLightness(row) + 6.0f) {
+        return surface;
+    }
+    return AdjustLightness2(surface, 12.0f);
+}
+
 void ThemeAccentSurfaceColors(COLORREF* bgOut, COLORREF* fgOut) {
     // A tint of the theme's own accent over the control background. It used to
     // borrow NotificationHighlightColor, which is only an accent tint by
