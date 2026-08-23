@@ -303,6 +303,9 @@
     <ClInclude Include="..\src\ProgressUpdateUI.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\KineticScroll.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\Rail.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -828,6 +831,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Print.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\KineticScroll.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Rail.cpp">

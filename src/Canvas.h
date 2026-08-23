@@ -34,4 +34,6 @@ constexpr uint kLinkFollowRecomputeDelayInMs = 300;
 constexpr UINT_PTR kTextSelectCaretTimerID = 12;
 // Debounce for popping up the floating selection toolbar after a selection
 constexpr UINT_PTR kSelectionToolbarShowTimerID = 13;
+// drives Library scroll easing / fling while it is moving
+constexpr UINT_PTR kLibraryScrollTimerID = 14;
 constexpr uint kSelectionToolbarShowDelayInMs = 500;

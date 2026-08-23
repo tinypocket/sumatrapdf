@@ -30,6 +30,7 @@
 #include "Theme.h"
 #include "Translations.h"
 #include "BrowserUrlUtil.h"
+#include "wingui/Anim.h"
 
 #include "SimpleBrowserWindow.h"
 
@@ -334,7 +335,6 @@ SimpleBrowserWindow* SimpleBrowserWindowCreate(const SimpleBrowserCreateArgs& ar
 // (children of hwndFrame drawn over the canvas) instead of its own window.
 // ---------------------------------------------------------------------------
 
-
 // --- design metrics --------------------------------------------------------
 // All values are LOGICAL px from the "SumatraPDF Touch Redesign v3" spec and
 // are DpiScale()d at use. The chrome is three stacked rows (tab strip,
@@ -392,15 +392,15 @@ constexpr int kTbMenuItemRadius = 6;
 constexpr int kTbMenuItemPadX = 12;
 
 // "Manage favorites" modal
-constexpr int kTbFavMgrDx = 420;
+constexpr int kTbFavMgrDx = 480; // room for a name plus four 28px buttons
 constexpr int kTbFavMgrMaxDy = 520;
 constexpr int kTbFavMgrRadius = 14;
-constexpr int kTbFavMgrHeaderDy = 63;  // 20 + 17px line + 20, rounded
-constexpr int kTbFavMgrFooterDy = 64;  // 14 + 36 + 14
-constexpr int kTbFavMgrHeadPadX = 24;  // header / footer horizontal padding
-constexpr int kTbFavMgrListPadX = 16;  // list area horizontal padding
-constexpr int kTbFavMgrListPadY = 10;  // list area vertical padding
-constexpr int kTbFavMgrRowDy = 44;     // 8 + 28 + 8
+constexpr int kTbFavMgrHeaderDy = 63; // 20 + 17px line + 20, rounded
+constexpr int kTbFavMgrFooterDy = 64; // 14 + 36 + 14
+constexpr int kTbFavMgrHeadPadX = 24; // header / footer horizontal padding
+constexpr int kTbFavMgrListPadX = 16; // list area horizontal padding
+constexpr int kTbFavMgrListPadY = 10; // list area vertical padding
+constexpr int kTbFavMgrRowDy = 44;    // 8 + 28 + 8
 constexpr int kTbFavMgrRowPad = 8;
 constexpr int kTbFavMgrRowGap = 10;
 constexpr int kTbFavMgrRowRadius = 8;
@@ -413,6 +413,22 @@ constexpr int kTbFavMgrDonePadX = 18;
 // a press has to travel this far (logical px) before it counts as a drag
 // rather than a click, so tapping a row still works on a shaky finger
 constexpr int kTbDragSlop = 6;
+
+// --- page load progress bar -----------------------------------------------
+// A thin accent bar along the bottom edge of the nav row, like Chrome/Edge.
+// WebView2 reports no percentage, so it eases quickly to kTbProgCreepTo while
+// the page loads (a cubic ease-out is fast at the start and crawls at the end -
+// exactly the "nearly there" feel a browser bar has), then jumps to 100% and
+// fades out when the navigation ends.
+constexpr int kTbProgDy = 3;
+constexpr int kTbProgCreepMs = 2400;
+constexpr int kTbProgFinishMs = 180;
+constexpr int kTbProgFadeMs = 280;
+constexpr float kTbProgCreepTo = 0.85f;
+constexpr UINT_PTR kTbProgTimerId = 71;
+
+// nav-row escape hatch shown when the page turns out to be a document
+#define kTbOpenDocLabel "Open in SumatraPDF"
 
 struct TouchBrowser;
 struct TbChromeWnd;
@@ -434,6 +450,19 @@ struct TbTab {
     // page it should open is parked here.
     Str pendingUrl;
     bool didInitialNav = false;
+    // a top-level navigation is in flight; drives the load progress bar
+    bool loading = false;
+    // The page on screen is really a document (its response said so). Set from
+    // the Content-Type of the main document, which is the only thing that knows
+    // when the URL has no ".pdf" in it. While set, the nav row offers
+    // "Open in SumatraPDF".
+    bool isDocPage = false;
+    Str docPageUrl;
+    Str docPageExt;
+    // URL of the last automatic hand-off, so a page that redirects straight
+    // back to the document can't put us in a takeover loop
+    Str lastTakeoverUrl;
+    double lastTakeoverMs = 0.0;
 };
 
 struct TouchBrowser {
@@ -638,6 +667,48 @@ static void TbDrawTrash(HDC hdc, HWND hwnd, const Rect& box, COLORREF col) {
     g.DrawLine(&pen, cx - 3.4f * u, cy + 5.5f * u, cx + 3.4f * u, cy + 5.5f * u);
 }
 
+// the rename button's pencil, drawn as a 45-degree body with a pointed tip.
+// A path rather than a glyph: the codebase keeps every string literal ASCII, so
+// icon characters are out.
+static void TbDrawPencil(HDC hdc, HWND hwnd, const Rect& box, COLORREF col) {
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    float u = (float)DpiScale(hwnd, 1000) / 1000.0f;
+    float cx = (float)box.x + (float)box.dx / 2;
+    float cy = (float)box.y + (float)box.dy / 2;
+    // unit vectors along the pencil (pointing up-right) and across it
+    const float k = 0.70711f;
+    float dx = k, dy = -k; // along
+    float px = k, py = k;  // across
+    float halfLen = 6.2f * u;
+    float halfW = 2.2f * u;
+    float collar = 2.4f * u; // distance from the tip to where the body starts
+    auto pt = [&](float along, float across) {
+        return Gdiplus::PointF(cx + dx * along + px * across, cy + dy * along + py * across);
+    };
+    Gdiplus::PointF tip = pt(-halfLen, 0);
+    Gdiplus::PointF c1 = pt(-halfLen + collar, halfW);
+    Gdiplus::PointF c2 = pt(-halfLen + collar, -halfW);
+    Gdiplus::PointF e1 = pt(halfLen, halfW);
+    Gdiplus::PointF e2 = pt(halfLen, -halfW);
+    Gdiplus::GraphicsPath body;
+    body.AddLine(tip, c1);
+    body.AddLine(c1, e1);
+    body.AddLine(e1, e2);
+    body.AddLine(e2, c2);
+    body.AddLine(c2, tip);
+    body.CloseFigure();
+    Gdiplus::Pen pen(GdiRgbFromCOLORREF(col), TbScaleF(hwnd, 1.3f));
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    g.DrawPath(&pen, &body);
+    // the collar line separating the tip from the body
+    g.DrawLine(&pen, c1, c2);
+    // and the ferrule near the far end
+    Gdiplus::PointF f1 = pt(halfLen - 2.2f * u, halfW);
+    Gdiplus::PointF f2 = pt(halfLen - 2.2f * u, -halfW);
+    g.DrawLine(&pen, f1, f2);
+}
+
 // the 6-dot grab handle that marks a favorites row as draggable
 static void TbDrawGrip(HDC hdc, HWND hwnd, const Rect& box, COLORREF col) {
     Gdiplus::Graphics g(hdc);
@@ -766,6 +837,36 @@ static void TbDocDownloadAsync(TbDocDownload* d) {
     uitask::Post(MkFunc0<TbDocDownload>(TbDocDownloadFinish, d), "TbDocDownloadFinish");
 }
 
+// Downloads `url` into the Downloads folder and opens it as a SumatraPDF tab.
+// `ext` is the extension the file should end up with ("" = whatever the URL
+// already says); a content-type detected document usually has no extension in
+// its URL at all, and SumatraPDF picks its engine from the file name.
+static void TbStartDocDownload(MainWindow* win, Str url, Str ext) {
+    if (!url) {
+        return;
+    }
+    auto* d = new TbDocDownload();
+    d->win = win;
+    d->url = str::Dup(url);
+    TempStr dir = TbDownloadsDirTemp();
+    TempStr fileName = TbUrlFileNameTemp(url);
+    if (ext && !str::EndsWithI(fileName, ext)) {
+        Str base = str::IsEmptyOrWhiteSpace(fileName) ? StrL("document") : Str(fileName);
+        fileName = str::JoinTemp(base, ext);
+    }
+    if (dir && fileName) {
+        TempStr want = path::JoinTemp(dir, fileName);
+        d->destPath = str::Dup(MakeUniqueFilePathTemp(want));
+    } else {
+        TempStr base = GetTempFilePathTemp("sumatra-web");
+        d->destPath = str::Dup(str::JoinTemp(base, ext ? ext : StrL(".dat")));
+    }
+    if (fileName) {
+        d->displayName = str::Dup(fileName);
+    }
+    RunAsync(MkFunc0<TbDocDownload>(TbDocDownloadAsync, d), "TbDocDownloadAsync");
+}
+
 static void TbSetChildrenVisible(TouchBrowser* tb, bool show);
 static void TbActivateTab(TouchBrowser* tb, int idx);
 // opens `url` in a new browser tab, from the message loop rather than inline
@@ -782,6 +883,12 @@ static void TbShowFavMgr(TouchBrowser* tb);
 static void TbShowMenu(TouchBrowser* tb);
 static void TbOnNewTab(TouchBrowser* tb);
 static void TbCloseTab(TbTab* t);
+// a tab started / finished loading: drives the nav row's progress bar, which
+// only ever reflects the ACTIVE tab
+static void TbSetTabLoading(TbTab* t, bool loading);
+// the tab is no longer showing a document, so the "Open in SumatraPDF" button
+// goes away
+static void TbClearDocPage(TbTab* t);
 
 static TbTab* TbActiveTab(TouchBrowser* tb) {
     if (tb->activeTab < 0 || tb->activeTab >= len(tb->tabs)) {
@@ -808,30 +915,17 @@ static bool TbNavigationStarting(void* ctx, Str url, bool newWindow) {
     TouchBrowser* tb = tab->tb;
     Str ext;
     if (TouchBrowserUrlIsDoc(url, &ext)) {
-        auto* d = new TbDocDownload();
-        d->win = tb->win;
-        d->url = str::Dup(url);
-        // save into Downloads under the URL's own file name; fall back to a
-        // temp file only if the Downloads folder can't be resolved
-        TempStr dir = TbDownloadsDirTemp();
-        Str fileName = TbUrlFileNameTemp(url);
-        if (dir && fileName) {
-            TempStr want = path::JoinTemp(dir, fileName);
-            d->destPath = str::Dup(MakeUniqueFilePathTemp(want));
-        } else {
-            TempStr base = GetTempFilePathTemp("sumatra-web");
-            d->destPath = str::Dup(str::JoinTemp(base, ext));
-        }
-        if (fileName) {
-            d->displayName = str::Dup(fileName);
-        }
-        RunAsync(MkFunc0<TbDocDownload>(TbDocDownloadAsync, d), "TbDocDownloadAsync");
+        // save into Downloads under the URL's own file name
+        TbStartDocDownload(tb->win, url, ext);
         return false; // cancel the webview navigation
     }
     if (newWindow) {
         TbRequestNewTab(tb->win, url);
         return false;
     }
+    // this tab is leaving whatever it was showing, document or not
+    TbClearDocPage(tab);
+    TbSetTabLoading(tab, true);
     // This tab is really leaving its page, so drop the title it had: the strip
     // falls back to the host until the new page reports one. Done here and not
     // in navigationCompleted because DocumentTitleChanged arrives first (the
@@ -856,11 +950,111 @@ static void TbUpdateNavButtons(TouchBrowser* tb) {
 static void TbNavigationCompleted(void* ctx, Str url, bool /*success*/) {
     auto* tab = (TbTab*)ctx;
     str::ReplaceWithCopy(&tab->url, url);
+    // both success and failure land here - including a navigation WebView2
+    // cancelled - so the progress bar always gets to finish
+    TbSetTabLoading(tab, false);
+    // navigationStarting dropped the old title, and WebView2 only raises
+    // documentTitleChanged when the title CHANGES - so a reload (or a
+    // back/forward to a page whose title equals the one we just discarded)
+    // would leave the tab and any favorite made from it labelled by host only
+    if (str::IsEmptyOrWhiteSpace(tab->title) && tab->webView) {
+        TempStr t = tab->webView->GetDocumentTitle();
+        if (!str::IsEmptyOrWhiteSpace(t)) {
+            str::ReplaceWithCopy(&tab->title, t);
+        }
+    }
     TbRedrawChrome(tab->tb);
     if (TbIsActiveTab(tab)) {
         TbSyncUrlBar(tab->tb);
         TbUpdateNavButtons(tab->tb);
     }
+}
+
+// --- documents behind an extension-less URL ---------------------------------
+// TouchBrowserUrlIsDoc only reads the URL, so a PDF served from /download?id=42
+// or an extension-less route slipped through and WebView2 rendered it in Edge's
+// built-in PDF viewer. The main document's Content-Type is the authoritative
+// answer and arrives before the page renders, so the browser hands the URL to
+// the same download-and-open path and takes the webview back off the document.
+
+// how long a page has to be away before the same URL may be auto-handed-off
+// again. A site that redirects its own back-navigation straight to the document
+// would otherwise bounce forever; after this guard fires the user still gets the
+// "Open in SumatraPDF" button.
+constexpr double kTbTakeoverGuardMs = 8000.0;
+
+struct TbDocTakeoverReq {
+    MainWindow* win = nullptr;
+    TbTab* tab = nullptr;
+    Str url;
+    Str ext;
+};
+
+// Runs from the message loop: the detection fires inside a WebView2 event
+// handler, and neither navigating the control nor starting a download belongs
+// in there. `tab` may be gone by now, so it is re-validated against the live
+// browser first (same contract as TbCloseTabNow).
+static void TbDocTakeoverNow(TbDocTakeoverReq* req) {
+    MainWindow* win = req->win;
+    TbTab* tab = req->tab;
+    Str url = req->url;
+    Str ext = req->ext;
+    bool valid = IsMainWindowValid(win) && win->touchBrowser && win->touchBrowser->tabs.Find(tab) >= 0;
+    if (valid) {
+        tab->isDocPage = true;
+        str::ReplaceWithCopy(&tab->docPageUrl, url);
+        str::ReplaceWithCopy(&tab->docPageExt, ext);
+        double now = AnimNowMs();
+        bool sameAsLast = tab->lastTakeoverUrl && str::EqI(tab->lastTakeoverUrl, url) &&
+                          (now - tab->lastTakeoverMs) < kTbTakeoverGuardMs;
+        if (!sameAsLast) {
+            str::ReplaceWithCopy(&tab->lastTakeoverUrl, url);
+            tab->lastTakeoverMs = now;
+            TbStartDocDownload(win, url, ext);
+            // ...and get out of Edge's viewer, back to the page the link was on
+            WebviewWnd* wv = tab->webView;
+            if (wv) {
+                if (wv->CanGoBack()) {
+                    wv->GoBack();
+                } else {
+                    wv->Navigate(TouchBrowserHomeUrl());
+                }
+            }
+        }
+        TbRelayoutChrome(win->touchBrowser);
+    }
+    str::Free(req->url);
+    str::Free(req->ext);
+    delete req;
+}
+
+static void TbMainDocumentResponse(void* ctx, Str url, Str contentType) {
+    auto* tab = (TbTab*)ctx;
+    FileType ft = TouchBrowserFileTypeFromContentType(contentType);
+    if (ft == FileType::Unknown || !TouchBrowserFileTypeIsDownloadableDoc(ft)) {
+        return; // ordinary web content: keep browsing
+    }
+    auto* req = new TbDocTakeoverReq();
+    req->win = tab->tb->win;
+    req->tab = tab;
+    req->url = str::Dup(url);
+    req->ext = str::Dup(TouchBrowserExtForFileType(ft));
+    uitask::Post(MkFunc0<TbDocTakeoverReq>(TbDocTakeoverNow, req), "TbDocTakeoverNow");
+}
+
+// the escape hatch: opens whatever the active tab is showing as a document,
+// used when the automatic hand-off did not fire
+static void TbOpenPageAsDoc(TouchBrowser* tb) {
+    TbTab* act = TbActiveTab(tb);
+    if (!act) {
+        return;
+    }
+    Str url = act->docPageUrl ? act->docPageUrl : act->url;
+    if (!url) {
+        return;
+    }
+    Str ext = act->docPageExt ? act->docPageExt : StrL(".pdf");
+    TbStartDocDownload(tb->win, url, ext);
 }
 
 static void TbDocumentTitleChanged(void* ctx, Str title) {
@@ -902,12 +1096,12 @@ static void TbOnHome(TouchBrowser* tb) {
 static void TbOnInfo(TouchBrowser* tb) {
     TempStr dir = TbDownloadsDirTemp();
     Str where = dir ? Str(dir) : StrL("(Downloads folder not found)");
-    TempStr msg = fmt(
-        "Documents you open from the browser (PDF, EPUB, MOBI, CBZ, DjVu, XPS, CHM) are "
-        "downloaded and saved to your Downloads folder:\n\n%s\n\n"
-        "They stay there until you delete them. Use the menu button next to this one and "
-        "choose 'Clean up downloaded files' to remove the ones SumatraPDF+ downloaded.",
-        where);
+    TempStr msg =
+        fmt("Documents you open from the browser (PDF, EPUB, MOBI, CBZ, DjVu, XPS, CHM) are "
+            "downloaded and saved to your Downloads folder:\n\n%s\n\n"
+            "They stay there until you delete them. Use the menu button next to this one and "
+            "choose 'Clean up downloaded files' to remove the ones SumatraPDF+ downloaded.",
+            where);
     MsgBox(tb->win ? tb->win->hwndFrame : nullptr, msg, StrL("Downloads"), MB_OK | MB_ICONINFORMATION);
 }
 
@@ -951,8 +1145,8 @@ static void TbCleanupDownloads(TouchBrowser* tb) {
     }
     v->Reset();
     SaveSettings();
-    MsgBox(parent, fmt("Deleted %d file%s.", nDeleted, nDeleted == 1 ? StrL("") : StrL("s")), StrL("Clean up downloads"),
-           MB_OK | MB_ICONINFORMATION);
+    MsgBox(parent, fmt("Deleted %d file%s.", nDeleted, nDeleted == 1 ? StrL("") : StrL("s")),
+           StrL("Clean up downloads"), MB_OK | MB_ICONINFORMATION);
 }
 
 // make the page in the active tab the browser's home page
@@ -983,6 +1177,80 @@ static Str TbFavAt(int idx) {
     return (*bm)[idx];
 }
 
+// --- favorite display names ------------------------------------------------
+// A favorite is a URL in browserBookmarks plus a display name at the SAME index
+// in browserFavoriteTitles. Two parallel arrays rather than one array of pairs
+// because browserBookmarks already exists and is written by older builds; a
+// settings file that predates titles simply has a short (or absent) title list,
+// which every read here tolerates.
+//
+// The name is never stored empty. SerializeUtf8StringArray writes an empty
+// string as nothing at all, and the parser then skips it - one empty title
+// would silently shift every later title onto the wrong URL. So a favorite with
+// no page title is stored under its host label instead.
+
+static Vec<Str>* TbFavTitlesVec() {
+    if (!gGlobalPrefs->browserFavoriteTitles) {
+        gGlobalPrefs->browserFavoriteTitles = new Vec<Str>();
+    }
+    return gGlobalPrefs->browserFavoriteTitles;
+}
+
+// read-only and index-safe: painting must never mutate prefs
+static Str TbFavTitleAt(int idx) {
+    Vec<Str>* t = gGlobalPrefs->browserFavoriteTitles;
+    if (!t || idx < 0 || idx >= len(*t)) {
+        return {};
+    }
+    return (*t)[idx];
+}
+
+// what a favorites chip and a manager row say: the stored name, falling back to
+// the URL's host when there is none (old settings file, or a page with no title)
+static TempStr TbFavLabel(int idx) {
+    Str title = TbFavTitleAt(idx);
+    if (!str::IsEmptyOrWhiteSpace(title)) {
+        return str::DupTemp(title);
+    }
+    return TbChipLabel(TbFavAt(idx));
+}
+
+// the name to STORE for (title, url); guaranteed non-empty (see above)
+static TempStr TbFavStoreTitle(Str title, Str url) {
+    if (!str::IsEmptyOrWhiteSpace(title)) {
+        return str::DupTemp(title);
+    }
+    TempStr host = TbChipLabel(url);
+    if (!str::IsEmptyOrWhiteSpace(host)) {
+        return host;
+    }
+    if (!str::IsEmptyOrWhiteSpace(url)) {
+        return str::DupTemp(url);
+    }
+    return str::DupTemp(StrL("Favorite"));
+}
+
+// Brings the title array to exactly len(bookmarks) entries, all non-empty, so
+// add / delete / move afterwards can treat the two arrays as one. Every mutation
+// calls this FIRST; that is what keeps them from drifting apart even if a hand-
+// edited settings file arrives with the wrong number of titles.
+static void TbFavSyncTitles() {
+    int n = TbFavCount();
+    Vec<Str>* t = TbFavTitlesVec();
+    while (len(*t) > n) {
+        str::Free(t->Pop());
+    }
+    while (len(*t) < n) {
+        t->Append(str::Dup(TbFavStoreTitle({}, TbFavAt(len(*t)))));
+    }
+    for (int i = 0; i < n; i++) {
+        if (str::IsEmptyOrWhiteSpace((*t)[i])) {
+            str::Free((*t)[i]);
+            (*t)[i] = str::Dup(TbFavStoreTitle({}, TbFavAt(i)));
+        }
+    }
+}
+
 // after any change to gGlobalPrefs->browserBookmarks: persist it and put the
 // favorites bar back in sync with it
 static void TbFavRefresh(TouchBrowser* tb) {
@@ -995,8 +1263,12 @@ static void TbFavDelete(TouchBrowser* tb, int idx) {
     if (!bm || idx < 0 || idx >= len(*bm)) {
         return;
     }
+    TbFavSyncTitles();
+    Vec<Str>* ti = TbFavTitlesVec();
     str::Free((*bm)[idx]);
     bm->RemoveAt(idx);
+    str::Free((*ti)[idx]);
+    ti->RemoveAt(idx);
     TbFavRefresh(tb);
 }
 
@@ -1009,8 +1281,28 @@ static void TbFavMove(TouchBrowser* tb, int from, int to) {
     if (from < 0 || from >= n || to < 0 || to >= n || from == to) {
         return;
     }
+    TbFavSyncTitles();
+    Vec<Str>* ti = TbFavTitlesVec();
     Str s = bm->PopAt(from);
     bm->InsertAt(to, s);
+    Str t = ti->PopAt(from);
+    ti->InsertAt(to, t);
+    TbFavRefresh(tb);
+}
+
+// rename from the manager's pencil button. An empty name resets the favorite to
+// its host label rather than storing nothing.
+static void TbFavRename(TouchBrowser* tb, int idx, Str name) {
+    if (idx < 0 || idx >= TbFavCount()) {
+        return;
+    }
+    TbFavSyncTitles();
+    Vec<Str>* ti = TbFavTitlesVec();
+    TempStr want = TbFavStoreTitle(name, TbFavAt(idx));
+    if (str::Eq((*ti)[idx], want)) {
+        return;
+    }
+    str::ReplaceWithCopy(&(*ti)[idx], want);
     TbFavRefresh(tb);
 }
 
@@ -1152,10 +1444,18 @@ LRESULT TbScrimWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
 
 // --- favorites manager -----------------------------------------------------
 
-enum class TbFavPart { None, Row, Up, Down, Delete };
+enum class TbFavPart {
+    None,
+    Row,
+    Rename,
+    Up,
+    Down,
+    Delete
+};
 
 struct TbFavMgrWnd : Wnd {
     TbFavMgrWnd();
+    ~TbFavMgrWnd() override;
     bool Create(TouchBrowser*);
     void ShowAt();
     void Hide();
@@ -1168,10 +1468,17 @@ struct TbFavMgrWnd : Wnd {
     Rect ListRect() const;
     Rect RowRect(int idx) const;
     Rect BtnRect(int idx, TbFavPart part) const;
+    Rect NameRect(int idx) const;
     Rect DoneRect() const;
     int RowAt(Point pt) const;
     TbFavPart PartAt(Point pt, int* idxOut) const;
     int MaxScrollY() const;
+
+    // in-place rename: a real EDIT parked over the row's name, so the caret,
+    // selection, IME and clipboard all come for free
+    void BeginRename(int idx);
+    void CommitRename();
+    void CancelRename();
 
     TouchBrowser* tb = nullptr;
     // the row the left button went down on, and which part of it (a press on a
@@ -1187,10 +1494,29 @@ struct TbFavMgrWnd : Wnd {
     bool donePressed = false;
     bool tracking = false;
     int scrollY = 0;
+    HWND hwndEdit = nullptr;
+    // row being renamed, or -1. `editClosing` keeps the EN_KILLFOCUS that
+    // hiding the EDIT provokes from re-entering the commit.
+    int editIdx = -1;
+    bool editClosing = false;
+    HBRUSH editBrush = nullptr;
+    COLORREF editBrushColor = kColorUnset;
 };
 
 TbFavMgrWnd::TbFavMgrWnd() {
     kind = kindTbFavMgr;
+}
+
+TbFavMgrWnd::~TbFavMgrWnd() {
+    if (editBrush) {
+        DeleteObject(editBrush);
+    }
+    // ~Wnd destroys hwnd, which would take the EDIT with it, but the order is
+    // explicit here so the subclass never sees a half-torn-down owner
+    if (hwndEdit) {
+        DestroyWindow(hwndEdit);
+        hwndEdit = nullptr;
+    }
 }
 
 bool TbFavMgrWnd::Create(TouchBrowser* browser) {
@@ -1250,9 +1576,22 @@ Rect TbFavMgrWnd::BtnRect(int idx, TbFavPart part) const {
             return {right - 2 * d - gap, y, d, d};
         case TbFavPart::Up:
             return {right - 3 * d - 2 * gap, y, d, d};
+        case TbFavPart::Rename:
+            return {right - 4 * d - 3 * gap, y, d, d};
         default:
             return {};
     }
+}
+
+// where a row's name is drawn - and where the rename EDIT is parked
+Rect TbFavMgrWnd::NameRect(int idx) const {
+    Rect r = RowRect(idx);
+    int pad = DpiScale(hwnd, kTbFavMgrRowPad);
+    int gap = DpiScale(hwnd, kTbFavMgrRowGap);
+    int gripDx = DpiScale(hwnd, kTbFavMgrGripDx);
+    int x = r.x + pad + gripDx + gap;
+    Rect firstBtn = BtnRect(idx, TbFavPart::Rename);
+    return {x, r.y, std::max(0, firstBtn.x - gap - x), r.dy};
 }
 
 Rect TbFavMgrWnd::DoneRect() const {
@@ -1299,10 +1638,105 @@ TbFavPart TbFavMgrWnd::PartAt(Point pt, int* idxOut) const {
     if (BtnRect(idx, TbFavPart::Up).Contains(pt)) {
         return TbFavPart::Up;
     }
+    if (BtnRect(idx, TbFavPart::Rename).Contains(pt)) {
+        return TbFavPart::Rename;
+    }
     return TbFavPart::Row;
 }
 
+// Enter commits, Esc cancels; losing focus commits too (handled via
+// EN_KILLFOCUS in the manager's WndProc), which is what a click anywhere else
+// in the dialog does.
+static LRESULT CALLBACK TbFavEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
+    auto* mgr = (TbFavMgrWnd*)ref;
+    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
+        if (mgr) {
+            mgr->CommitRename();
+        }
+        return 0;
+    }
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
+        if (mgr) {
+            mgr->CancelRename();
+        }
+        return 0;
+    }
+    // Enter / Esc still arrive as control characters, which the default handler
+    // would beep at (MessageBeep on an EDIT that has no ES_MULTILINE)
+    if (msg == WM_CHAR && (wp == VK_RETURN || wp == VK_ESCAPE)) {
+        return 0;
+    }
+    if (msg == WM_KEYDOWN && wp == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+        SendMessageW(hwnd, EM_SETSEL, 0, -1);
+        return 0;
+    }
+    if (msg == WM_CHAR && wp == 1) {
+        return 0;
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+void TbFavMgrWnd::BeginRename(int idx) {
+    if (idx < 0 || idx >= TbFavCount()) {
+        return;
+    }
+    if (editIdx == idx) {
+        return;
+    }
+    CommitRename(); // a rename already open on another row
+    if (!hwndEdit) {
+        hwndEdit = CreateWindowExW(0, WC_EDITW, L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, nullptr,
+                                   GetInstance(), nullptr);
+        if (!hwndEdit) {
+            return;
+        }
+        SendMessageW(hwndEdit, WM_SETFONT, (WPARAM)tb->hFont, TRUE);
+        SetWindowSubclass(hwndEdit, TbFavEditProc, NextSubclassId(), (DWORD_PTR)this);
+    }
+    editIdx = idx;
+    Rect r = NameRect(idx);
+    int inset = DpiScale(hwnd, 4);
+    MoveWindow(hwndEdit, r.x, r.y + inset, std::max(0, r.dx), std::max(0, r.dy - 2 * inset), TRUE);
+    HwndSetText(hwndEdit, TbFavLabel(idx));
+    ShowWindow(hwndEdit, SW_SHOW);
+    SetFocus(hwndEdit);
+    SendMessageW(hwndEdit, EM_SETSEL, 0, -1);
+    HwndInvalidate(hwnd, false);
+}
+
+void TbFavMgrWnd::CommitRename() {
+    if (editIdx < 0 || editClosing) {
+        return;
+    }
+    editClosing = true;
+    int idx = editIdx;
+    TempStr name = hwndEdit ? HwndGetTextTemp(hwndEdit) : TempStr();
+    editIdx = -1;
+    if (hwndEdit) {
+        ShowWindow(hwndEdit, SW_HIDE);
+    }
+    editClosing = false;
+    // TbFavRename saves the settings and rebuilds the favorites bar; it never
+    // touches this window, so running it from here is safe
+    TbFavRename(tb, idx, name);
+    HwndInvalidate(hwnd, false);
+}
+
+void TbFavMgrWnd::CancelRename() {
+    if (editIdx < 0) {
+        return;
+    }
+    editClosing = true;
+    editIdx = -1;
+    if (hwndEdit) {
+        ShowWindow(hwndEdit, SW_HIDE);
+    }
+    editClosing = false;
+    HwndInvalidate(hwnd, false);
+}
+
 void TbFavMgrWnd::Hide() {
+    CancelRename();
     if (GetCapture() == hwnd) {
         ReleaseCapture();
     }
@@ -1320,6 +1754,7 @@ void TbFavMgrWnd::Hide() {
 }
 
 void TbFavMgrWnd::ShowAt() {
+    CancelRename();
     pressedIdx = -1;
     pressedPart = TbFavPart::None;
     dragging = false;
@@ -1401,6 +1836,7 @@ void TbFavMgrWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
             Rect grip{r.x + pad, r.y + (r.dy - gripDx) / 2, gripDx, gripDx};
             TbDrawGrip(hdc, hwnd, grip, ThemeWindowDarkerTextColor());
 
+            Rect ren = BtnRect(i, TbFavPart::Rename);
             Rect up = BtnRect(i, TbFavPart::Up);
             Rect down = BtnRect(i, TbFavPart::Down);
             Rect del = BtnRect(i, TbFavPart::Delete);
@@ -1411,19 +1847,24 @@ void TbFavMgrWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
             };
             bool canUp = i > 0;
             bool canDown = i < n - 1;
+            TbFillRounded(hdc, ren, btnRadius, btnBg(TbFavPart::Rename), ThemeEdgeColor());
             TbFillRounded(hdc, up, btnRadius, btnBg(TbFavPart::Up), ThemeEdgeColor());
             TbFillRounded(hdc, down, btnRadius, btnBg(TbFavPart::Down), ThemeEdgeColor());
             TbFillRounded(hdc, del, btnRadius, btnBg(TbFavPart::Delete), ThemeEdgeColor());
+            TbDrawPencil(hdc, hwnd, ren, ThemeWindowDarkerTextColor());
             TbDrawChevron(hdc, hwnd, up, canUp ? ThemeWindowDarkerTextColor() : ThemeWindowTextDisabledColor(), true);
             TbDrawChevron(hdc, hwnd, down, canDown ? ThemeWindowDarkerTextColor() : ThemeWindowTextDisabledColor(),
                           false);
             TbDrawTrash(hdc, hwnd, del, ThemeWindowLinkColor());
 
-            Rect name{grip.x + grip.dx + gap, r.y, std::max(0, up.x - gap - (grip.x + grip.dx + gap)), r.dy};
-            SetTextColor(hdc, ThemeWindowTextColor());
-            HdcDrawText(hdc, TbChipLabel(TbFavAt(i)), name,
-                        DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
-                        HdcGetUiFont(hdc, kTbFontUrl));
+            // the row being renamed shows the EDIT instead of its label
+            if (i != editIdx) {
+                Rect name = NameRect(i);
+                SetTextColor(hdc, ThemeWindowTextColor());
+                HdcDrawText(hdc, TbFavLabel(i), name,
+                            DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
+                            HdcGetUiFont(hdc, kTbFontUrl));
+            }
         }
         // insertion marker: where the dragged row would land on mouse-up
         if (dragging && dragTo >= 0 && dragTo != pressedIdx) {
@@ -1451,10 +1892,33 @@ LRESULT TbFavMgrWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_ERASEBKGND) {
         return TRUE;
     }
+    if (msg == WM_COMMAND && (HWND)lp == hwndEdit && HIWORD(wp) == EN_KILLFOCUS) {
+        // clicking anywhere else in the dialog commits, the way an in-place
+        // rename does everywhere else
+        CommitRename();
+        return 0;
+    }
+    if (msg == WM_CTLCOLOREDIT && (HWND)lp == hwndEdit) {
+        HDC dc = (HDC)wp;
+        COLORREF bg = ThemeTextFieldColor();
+        if (!editBrush || editBrushColor != bg) {
+            if (editBrush) {
+                DeleteObject(editBrush);
+            }
+            editBrush = CreateSolidBrush(bg);
+            editBrushColor = bg;
+        }
+        SetBkColor(dc, bg);
+        SetTextColor(dc, ThemeWindowTextColor());
+        return (LRESULT)editBrush;
+    }
     if (msg == WM_MOUSEWHEEL) {
         int delta = GET_WHEEL_DELTA_WPARAM(wp);
         int next = std::clamp(scrollY - delta / 2, 0, MaxScrollY());
         if (next != scrollY) {
+            // the EDIT is parked at absolute coordinates, so it would be left
+            // floating over the wrong row
+            CommitRename();
             scrollY = next;
             HwndInvalidate(hw, false);
         }
@@ -1489,11 +1953,11 @@ LRESULT TbFavMgrWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         if (pressedIdx >= 0 && GetCapture() == hw) {
             // only a press on the row body starts a drag, and only after the
             // slop, so a tap on a button is never a reorder
-            if (!dragging && pressedPart == TbFavPart::Row &&
-                std::abs(pt.y - pressPt.y) > DpiScale(hw, kTbDragSlop)) {
+            if (!dragging && pressedPart == TbFavPart::Row && std::abs(pt.y - pressPt.y) > DpiScale(hw, kTbDragSlop)) {
                 dragging = true;
             }
             if (dragging) {
+                CommitRename();
                 int n = TbFavCount();
                 Rect list = ListRect();
                 int padY = DpiScale(hw, kTbFavMgrListPadY);
@@ -1569,6 +2033,12 @@ LRESULT TbFavMgrWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             int n = TbFavCount();
+            if (part == TbFavPart::Rename) {
+                BeginRename(idx);
+                return 0;
+            }
+            // any reorder / delete moves rows out from under an open EDIT
+            CommitRename();
             if (part == TbFavPart::Delete) {
                 TbFavDelete(tb, idx);
             } else if (part == TbFavPart::Up && idx > 0) {
@@ -1940,7 +2410,29 @@ static TempStr TbTabLabel(TbTab* t) {
     return str::DupTemp(StrL("New Tab"));
 }
 
-enum class TbPart { None, Tab, TabClose, NewTab, Fav, Back, Fwd, Home, FavBtn, Info, Menu };
+enum class TbPart {
+    None,
+    Tab,
+    TabClose,
+    NewTab,
+    Fav,
+    Back,
+    Fwd,
+    Home,
+    OpenDoc,
+    FavBtn,
+    Info,
+    Menu
+};
+
+// what the load progress bar is doing; Idle means it isn't on screen and
+// its timer is stopped
+enum class TbProgState {
+    Idle,
+    Loading,
+    Finishing,
+    Fading
+};
 
 struct TbHit {
     TbPart part = TbPart::None;
@@ -1966,6 +2458,15 @@ struct TbChromeWnd : Wnd {
     void SyncUrlText();
     void UpdateTooltip(const TbHit&);
 
+    Rect ProgressRect() const;
+    void InvalidateProgress();
+    void DrawProgress(HDC hdc);
+    void ProgressStart();
+    void ProgressFinish();
+    void ProgressReset();
+    void SyncProgressToActiveTab();
+    void OnProgTick();
+
     TouchBrowser* tb = nullptr;
     HWND hwndUrl = nullptr;
     HFONT urlFont = nullptr;
@@ -1980,6 +2481,8 @@ struct TbChromeWnd : Wnd {
     Vec<Rect> tabCloseRects;
     Vec<Rect> favRects;
     Rect newTabRect, backRect, fwdRect, homeRect, urlRect, favBtnRect, infoRect, menuRect;
+    // only laid out (non-empty) while the active tab is showing a document
+    Rect openDocRect;
     Rect editRect;
     int tabScrollX = 0;
     int tabContentDx = 0;
@@ -1988,6 +2491,11 @@ struct TbChromeWnd : Wnd {
 
     TbHit hot;
     TbHit pressed;
+
+    AnimTimer progTimer;
+    AnimVal progVal;  // 0..1 of the bar's width
+    AnimVal progFade; // 1 while loading, eases to 0 after the bar hits 100%
+    TbProgState progState = TbProgState::Idle;
 };
 
 // Enter in the URL field navigates (prefixing https:// when no scheme is typed)
@@ -2024,6 +2532,8 @@ TbChromeWnd::TbChromeWnd() {
 }
 
 TbChromeWnd::~TbChromeWnd() {
+    // before ~Wnd tears the window down, so no timer outlives the object
+    progTimer.Stop();
     delete tooltip;
     if (urlBrush) {
         DeleteObject(urlBrush);
@@ -2055,7 +2565,133 @@ bool TbChromeWnd::Create(TouchBrowser* browser) {
                               nullptr);
     SendMessageW(hwndUrl, WM_SETFONT, (WPARAM)tb->hFont, TRUE);
     SetWindowSubclass(hwndUrl, TbUrlEditProc, NextSubclassId(), (DWORD_PTR)tb);
+    progTimer.Init(hwnd, kTbProgTimerId);
     return true;
+}
+
+// --- load progress bar -----------------------------------------------------
+// The strip is the bottom kTbProgDy pixels of the chrome, i.e. the bottom edge
+// of the nav row. It is deliberately independent of Layout(): a progress frame
+// must not have to re-measure every tab and favorite label.
+Rect TbChromeWnd::ProgressRect() const {
+    Rect rc = HwndClientRect(hwnd);
+    int dy = std::min(DpiScale(hwnd, kTbProgDy), rc.dy);
+    if (rc.dx <= 0 || dy <= 0) {
+        return {};
+    }
+    return {0, rc.dy - dy, rc.dx, dy};
+}
+
+void TbChromeWnd::InvalidateProgress() {
+    Rect r = ProgressRect();
+    if (!r.IsEmpty()) {
+        HwndInvalidateRect(hwnd, r, false);
+    }
+}
+
+void TbChromeWnd::DrawProgress(HDC hdc) {
+    Rect strip = ProgressRect();
+    if (strip.IsEmpty()) {
+        return;
+    }
+    // repaint what is underneath first: the chrome's panel plus the nav row's
+    // 1px bottom border, which the strip covers
+    HdcFillRect(hdc, strip, ThemeWindowControlBackgroundColor());
+    HdcFillRect(hdc, Rect{strip.x, strip.y + strip.dy - 1, strip.dx, 1}, ThemeEdgeColor());
+    if (progState == TbProgState::Idle) {
+        return;
+    }
+    float f = limitValue(progVal.Value(), 0.0f, 1.0f);
+    int dx = (int)((float)strip.dx * f + 0.5f);
+    if (dx <= 0) {
+        return;
+    }
+    // no alpha blending on a GDI fill, so the fade is a colour lerp back to the
+    // panel the bar sits on - visually the same at this thickness
+    float a = limitValue(progFade.Value(), 0.0f, 1.0f);
+    COLORREF col = AnimLerpColor(ThemeWindowControlBackgroundColor(), ThemeWindowLinkColor(), a);
+    HdcFillRect(hdc, Rect{strip.x, strip.y, dx, strip.dy}, col);
+}
+
+void TbChromeWnd::ProgressStart() {
+    // the bar IS an animation; with animations off there is nothing to show
+    if (!AnimEnabled()) {
+        ProgressReset();
+        return;
+    }
+    if (progState == TbProgState::Loading) {
+        return; // a redirect in the same navigation: keep creeping, don't restart
+    }
+    progState = TbProgState::Loading;
+    progVal.Set(0.0f);
+    progVal.SetTarget(kTbProgCreepTo, kTbProgCreepMs);
+    progFade.Set(1.0f);
+    progTimer.Start();
+    InvalidateProgress();
+}
+
+void TbChromeWnd::ProgressFinish() {
+    if (progState == TbProgState::Idle || progState == TbProgState::Fading) {
+        return;
+    }
+    progState = TbProgState::Finishing;
+    progVal.SetTarget(1.0f, kTbProgFinishMs);
+    progTimer.Start();
+    InvalidateProgress();
+}
+
+void TbChromeWnd::ProgressReset() {
+    progTimer.Stop();
+    if (progState == TbProgState::Idle) {
+        return;
+    }
+    progState = TbProgState::Idle;
+    progVal.Set(0.0f);
+    progFade.Set(0.0f);
+    InvalidateProgress();
+}
+
+// the bar shows the ACTIVE tab only, so switching tabs adopts that tab's state
+void TbChromeWnd::SyncProgressToActiveTab() {
+    TbTab* act = TbActiveTab(tb);
+    if (act && act->loading) {
+        ProgressStart();
+    } else {
+        ProgressReset();
+    }
+}
+
+// One frame. Invalidates only the 3px strip and stops the timer the moment
+// nothing is moving - including while a slow page is still loading, where the
+// bar simply rests at kTbProgCreepTo until the navigation ends.
+void TbChromeWnd::OnProgTick() {
+    bool running = false;
+    switch (progState) {
+        case TbProgState::Loading:
+            running = progVal.IsAnimating();
+            break;
+        case TbProgState::Finishing:
+            running = progVal.IsAnimating();
+            if (!running) {
+                progState = TbProgState::Fading;
+                progFade.SetTarget(0.0f, kTbProgFadeMs);
+                running = progFade.IsAnimating();
+            }
+            break;
+        case TbProgState::Fading:
+            running = progFade.IsAnimating();
+            if (!running) {
+                ProgressReset();
+                return;
+            }
+            break;
+        default:
+            break;
+    }
+    InvalidateProgress();
+    if (!running) {
+        progTimer.Stop();
+    }
 }
 
 // how tall the chrome wants to be: the favorites bar only exists when there is
@@ -2084,6 +2720,7 @@ void TbChromeWnd::Layout(HDC hdc) {
     favRects.Reset();
     newTabRect = {};
     backRect = fwdRect = homeRect = urlRect = favBtnRect = infoRect = menuRect = {};
+    openDocRect = {};
     if (rc.dx <= 0 || rc.dy <= 0) {
         return;
     }
@@ -2141,7 +2778,7 @@ void TbChromeWnd::Layout(HDC hdc) {
         int x = padX - favScrollX;
         int total = padX;
         for (int i = 0; i < n; i++) {
-            TempStr label = TbChipLabel(TbFavAt(i));
+            TempStr label = TbFavLabel(i);
             Size sz = HdcMeasureText(hdc, label, DT_SINGLELINE | DT_NOPREFIX, fontFav);
             favRects.Append(Rect{x, favRow.y, sz.dx, favRow.dy});
             x += sz.dx + gap;
@@ -2190,8 +2827,19 @@ void TbChromeWnd::Layout(HDC hdc) {
         int favBtnDx = favSz.dx + 2 * btnPadX;
         favBtnRect = {infoRect.x - gap - favBtnDx, btnY, favBtnDx, btnDy};
 
+        // "Open in SumatraPDF" only exists while the page really is a document,
+        // and takes its width out of the URL field
+        int leftOfUrl = favBtnRect.x;
+        TbTab* act = TbActiveTab(tb);
+        if (act && act->isDocPage) {
+            Size sz = HdcMeasureText(hdc, StrL(kTbOpenDocLabel), DT_SINGLELINE | DT_NOPREFIX, fontBtn);
+            int dx = sz.dx + 2 * btnPadX;
+            openDocRect = {favBtnRect.x - gap - dx, btnY, dx, btnDy};
+            leftOfUrl = openDocRect.x;
+        }
+
         int urlX = x;
-        int urlDx = std::max(0, favBtnRect.x - gap - urlX);
+        int urlDx = std::max(0, leftOfUrl - gap - urlX);
         urlRect = {urlX, navRow.y + (navRow.dy - urlDy) / 2, urlDx, urlDy};
     }
 
@@ -2298,7 +2946,7 @@ void TbChromeWnd::Draw(HDC hdc) {
             bool isHot = (hot.part == TbPart::Fav && hot.idx == i);
             SetTextColor(hdc, accent);
             uint flags = DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX;
-            HdcDrawText(hdc, TbChipLabel(TbFavAt(i)), r, flags, font);
+            HdcDrawText(hdc, TbFavLabel(i), r, flags, font);
             if (isHot) {
                 // hover: underline, the only affordance plain text can carry
                 HdcFillRect(hdc, Rect{r.x, r.y + r.dy - DpiScale(hwnd, 9), r.dx, 1}, accent);
@@ -2329,6 +2977,19 @@ void TbChromeWnd::Draw(HDC hdc) {
         // the URL field's surround; the EDIT itself is a child window on top
         TbFillRounded(hdc, urlRect, radius, ThemeTextFieldColor(), edge);
 
+        if (!openDocRect.IsEmpty()) {
+            // accent surface, not the plain pill: this is the one control on the
+            // row that the user is being invited to press
+            COLORREF accentBg, accentFg;
+            ThemeAccentSurfaceColors(&accentBg, &accentFg);
+            bool odHot = (hot.part == TbPart::OpenDoc);
+            bool odPressed = (pressed.part == TbPart::OpenDoc);
+            COLORREF bg = odPressed ? ThemeEdgeColor() : (odHot ? ThemeHotEdgeColor() : accentBg);
+            TbFillRounded(hdc, openDocRect, radius, bg, ThemeEdgeColor());
+            SetTextColor(hdc, accentFg);
+            HdcDrawText(hdc, StrL(kTbOpenDocLabel), openDocRect, flags, font);
+        }
+
         TbFillRounded(hdc, favBtnRect, radius, btnBg(TbPart::FavBtn, -1));
         // the button is a toggle, so it says which way it is pointing by
         // colouring its label with the accent once the page is a favorite
@@ -2342,11 +3003,23 @@ void TbChromeWnd::Draw(HDC hdc) {
         TbFillRounded(hdc, menuRect, radius, btnBg(TbPart::Menu, -1));
         TbDrawDots(hdc, hwnd, menuRect, muted);
     }
+
+    // last, so it sits on top of the nav row's bottom border
+    DrawProgress(hdc);
 }
 
 void TbChromeWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
     Rect rc = HwndClientRect(hwnd);
     if (rc.dx <= 0 || rc.dy <= 0) {
+        return;
+    }
+    // A progress frame only ever invalidates the 3px strip. Redrawing the whole
+    // chrome (which re-measures every tab and favorite label) 60 times a second
+    // for it would be absurd, so that case paints just the strip.
+    Rect prog = ProgressRect();
+    Rect paintClip = ToRect(ps->rcPaint);
+    if (progState != TbProgState::Idle && !prog.IsEmpty() && paintClip.y >= prog.y) {
+        DrawProgress(hdc);
         return;
     }
     // double-buffered: the whole chrome repaints on every hover change
@@ -2395,6 +3068,9 @@ TbHit TbChromeWnd::HitTest(Point pt) const {
     if (homeRect.Contains(pt)) {
         return {TbPart::Home, -1};
     }
+    if (!openDocRect.IsEmpty() && openDocRect.Contains(pt)) {
+        return {TbPart::OpenDoc, -1};
+    }
     if (favBtnRect.Contains(pt)) {
         return {TbPart::FavBtn, -1};
     }
@@ -2433,6 +3109,9 @@ void TbChromeWnd::Invoke(const TbHit& h) {
             break;
         case TbPart::Home:
             TbOnHome(tb);
+            break;
+        case TbPart::OpenDoc:
+            TbOpenPageAsDoc(tb);
             break;
         case TbPart::FavBtn:
             TouchWebToggleBookmark(tb->win);
@@ -2473,6 +3152,10 @@ void TbChromeWnd::UpdateTooltip(const TbHit& h) {
 LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_ERASEBKGND) {
         return TRUE;
+    }
+    if (msg == WM_TIMER && wp == kTbProgTimerId) {
+        OnProgTick();
+        return 0;
     }
     if (msg == WM_SIZE) {
         EnsureLayout();
@@ -2604,6 +3287,30 @@ static void TbSyncUrlBar(TouchBrowser* tb) {
     }
 }
 
+static void TbSetTabLoading(TbTab* t, bool loading) {
+    t->loading = loading;
+    TbChromeWnd* chrome = t->tb ? t->tb->chrome : nullptr;
+    if (!chrome || !TbIsActiveTab(t)) {
+        return; // a background tab never writes to the nav row
+    }
+    if (loading) {
+        chrome->ProgressStart();
+    } else {
+        chrome->ProgressFinish();
+    }
+}
+
+static void TbClearDocPage(TbTab* t) {
+    if (!t->isDocPage) {
+        return;
+    }
+    t->isDocPage = false;
+    str::FreePtr(&t->docPageUrl);
+    str::FreePtr(&t->docPageExt);
+    // the nav row loses a button, so the URL field grows back: re-measure
+    TbRelayoutChrome(t->tb);
+}
+
 static Rect TbMenuAnchorScreenRect(TouchBrowser* tb) {
     if (!tb->chrome || !tb->chrome->hwnd) {
         return HwndWindowRect(tb->win->hwndFrame);
@@ -2621,6 +3328,9 @@ static void TbDestroyTab(TbTab* t) {
     str::Free(t->url);
     str::Free(t->title);
     str::Free(t->pendingUrl);
+    str::Free(t->docPageUrl);
+    str::Free(t->docPageExt);
+    str::Free(t->lastTakeoverUrl);
     delete t;
 }
 
@@ -2693,6 +3403,7 @@ static TbTab* TbCreateTab(TouchBrowser* tb, Str url) {
     t->webView->events.navigationCompleted = TbNavigationCompleted;
     t->webView->events.historyChanged = TbHistoryChanged;
     t->webView->events.documentTitleChanged = TbDocumentTitleChanged;
+    t->webView->events.mainDocumentResponse = TbMainDocumentResponse;
     t->webView->forwardAppAccelerators = true;
     CreateWebViewArgs cargs;
     cargs.parent = frame;
@@ -2715,6 +3426,12 @@ static void TbActivateTab(TouchBrowser* tb, int idx) {
     tb->activeTab = limitValue(idx, 0, n - 1);
     TbSyncUrlBar(tb);
     TbUpdateNavButtons(tb);
+    if (tb->chrome) {
+        // the progress bar and the "Open in SumatraPDF" button both describe the
+        // ACTIVE tab, so both follow the switch
+        tb->chrome->SyncProgressToActiveTab();
+        tb->chrome->EnsureLayout();
+    }
     if (tb->win->touchView == TouchView::Web) {
         // redo the show/hide + z-order dance for the new set of controls, then
         // relayout (which also issues a newly activated tab's deferred Navigate)
@@ -2907,11 +3624,19 @@ void TouchWebToggleBookmark(MainWindow* win) {
             break;
         }
     }
+    // the display name array is index-parallel to the URL array, so it is
+    // brought in sync before either is touched and updated in the same step
+    TbFavSyncTitles();
+    Vec<Str>* titles = TbFavTitlesVec();
     if (found >= 0) {
         str::Free((*bm)[found]);
         bm->RemoveAt(found);
+        str::Free((*titles)[found]);
+        titles->RemoveAt(found);
     } else {
         bm->Append(str::Dup(url));
+        // the page title WebView2 reported, or its host when it has none
+        titles->Append(str::Dup(TbFavStoreTitle(act->title, url)));
     }
     SaveSettings();
     TbRelayoutChrome(tb);

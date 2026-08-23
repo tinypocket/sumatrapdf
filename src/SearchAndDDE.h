@@ -60,6 +60,9 @@ void FindToggleMatchWholeWord(MainWindow* win);
 // called when the user edits the find bar's text (find-as-you-type)
 void OnFindBarTextChanged(MainWindow* win);
 void SearchDocumentFromTouchPanel(MainWindow* win, Str text);
+// the find query, from whichever UI currently owns it: the classic find bar /
+// find window (win->hwndFindEdit) or the touch chrome's Search panel
+TempStr FindCurrentQueryTemp(MainWindow* win);
 // fired by the debounce WM_TIMER on hwndFrame: runs the deferred search
 void FindDebounceTimerFired(MainWindow* win);
 // if a debounced search is pending, cancel the timer and start it now (so Enter

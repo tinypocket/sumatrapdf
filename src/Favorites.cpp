@@ -1130,6 +1130,75 @@ void AddFavoriteForCurrentPage(MainWindow* win) {
     AddFavoriteForPage(win, pageNo);
 }
 
+// --- "PDF favorites" for the touch chrome ------------------------------------
+// The touch bookmark tray saves the current page with a single tap and renames
+// in place afterwards, so it needs the store without the Dialog_AddFavorite
+// prompt that AddFavoriteWithLabelAndName wraps. Same Favorite records, same
+// per-file grouping, same prefs file - so the tray, the Favorites pane and the
+// Favorites menu are all views onto one list.
+
+// default title for a one-tap save: the ToC heading covering the page, so a
+// favorite reads as "Second Antiphon" rather than "p. 12"
+TempStr FavoriteDefaultNameTemp(MainWindow* win, int pageNo) {
+    if (!win || !win->ctrl || !win->ctrl->HasToc()) {
+        return {};
+    }
+    TocTree* docTree = win->ctrl->GetToc();
+    if (!docTree) {
+        return {};
+    }
+    TocItem* item = TocItemForPageNo(docTree->root, pageNo);
+    if (!item || !item->title) {
+        return {};
+    }
+    return str::DupTemp(item->title);
+}
+
+void AddFavoriteQuiet(MainWindow* win, int pageNo, Str name) {
+    if (!win || !win->IsDocLoaded()) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    if (!tab || !tab->filePath) {
+        return;
+    }
+    TempStr pageLabel = win->ctrl->GetPageLabeTemp(pageNo);
+    TempStr plainLabel = fmt("%d", pageNo);
+    // only carry a label when it differs from the page number, matching
+    // AddFavoriteWithLabelAndName
+    Str pl = str::Eq(plainLabel, pageLabel) ? Str{} : Str(pageLabel);
+    RememberFavTreeExpansionStateForAllWindows();
+    AddOrReplaceFav(tab->filePath, pageNo, name, pl);
+    UpdateFavoritesTreeForAllWindows();
+    SaveSettings();
+}
+
+void RenameFavorite(Str filePath, int pageNo, Str newName) {
+    if (!filePath) {
+        return;
+    }
+    FileState* fs = GetFavByFilePath(filePath);
+    if (!fs) {
+        return;
+    }
+    Favorite* fn = FindByPage(fs, pageNo);
+    if (!fn) {
+        return;
+    }
+    str::ReplaceWithCopy(&fn->name, newName);
+    UpdateFavoritesTreeForAllWindows();
+    SaveSettings();
+}
+
+// the favorites of one document, in sorted order; nullptr when it has none
+Vec<Favorite*>* GetFileFavorites(Str filePath) {
+    if (!filePath) {
+        return nullptr;
+    }
+    FileState* fs = GetFavByFilePath(filePath);
+    return fs ? fs->favorites : nullptr;
+}
+
 void DelFavorite(Str filePath, int pageNo) {
     if (!filePath) {
         return;

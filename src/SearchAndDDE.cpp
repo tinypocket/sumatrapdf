@@ -100,7 +100,7 @@ static DocController* BrowserFindCtrl(MainWindow* win) {
 // the current page and sweep all pages for the match list. Results arrive
 // asynchronously via BrowserFindResultReceived() / BrowserFindAllResultReceived()
 static void BrowserFindStartSearch(MainWindow* win, DocController* md) {
-    TempStr term = HwndGetTextTemp(win->hwndFindEdit);
+    TempStr term = FindCurrentQueryTemp(win);
     if (len(term) == 0) {
         return;
     }
@@ -384,8 +384,21 @@ void FindDebounceTimerFired(MainWindow* win) {
     }
 }
 
+// The find query has two possible owners. The classic find bar / find window
+// puts it in win->hwndFindEdit; the touch chrome's Search panel never opens
+// either of those and drives the search from its own filter edit. Everything
+// that used to read hwndFindEdit as the single source of truth asks this
+// instead, so Find Next / Prev step through matches from either UI. When the
+// find bar has text it wins, so classic behavior is bit-for-bit unchanged.
+TempStr FindCurrentQueryTemp(MainWindow* win) {
+    if (win->hwndFindEdit && HwndGetTextLen(win->hwndFindEdit) > 0) {
+        return HwndGetTextTemp(win->hwndFindEdit);
+    }
+    return TouchSearchPanelQueryTemp(win);
+}
+
 static bool HasFindText(MainWindow* win) {
-    return win->hwndFindEdit && HwndGetTextLen(win->hwndFindEdit) > 0;
+    return len(FindCurrentQueryTemp(win)) > 0;
 }
 
 bool FindFlushPendingSearch(MainWindow* win) {
@@ -1487,10 +1500,12 @@ __unused static TempStr ReverseTextTemp(Str s) {
 }
 
 void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, bool showProgress) {
-    TempStr s = HwndGetTextTemp(win->hwndFindEdit);
+    // not necessarily the find bar: the touch Search panel owns the query when
+    // it is the one showing (see FindCurrentQueryTemp)
+    TempStr s = FindCurrentQueryTemp(win);
     // if document is rtl, need to reverse the text
     // s = ReverseTextTemp(s);
-    bool wasModified = Edit_GetModify(win->hwndFindEdit);
+    bool wasModified = win->hwndFindEdit && Edit_GetModify(win->hwndFindEdit);
     if (!wasModified) {
         // check if the find text differs from the current tab's cached search text
         // this happens when switching tabs: the find edit box shows the current text
@@ -1511,7 +1526,9 @@ void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, bool sho
             }
         }
     }
-    Edit_SetModify(win->hwndFindEdit, FALSE);
+    if (win->hwndFindEdit) {
+        Edit_SetModify(win->hwndFindEdit, FALSE);
+    }
     FindTextOnThread(win, direction, s, wasModified, showProgress);
 }
 

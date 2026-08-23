@@ -495,9 +495,13 @@ class webview2_navigation_starting_handler : public ICoreWebView2NavigationStart
         if (!url) {
             return S_OK;
         }
+        // remembered for the main-document check in WebResourceResponseReceived;
+        // a redirect fires NavigationStarting again, so this tracks the chain
+        str::ReplaceWithCopy(&m_wnd->pendingNavUrl, url);
         bool allow = m_wnd->events.navigationStarting(m_wnd->events.ctx, url, false);
         if (!allow) {
             args->put_Cancel(TRUE);
+            str::FreePtr(&m_wnd->pendingNavUrl);
         }
         return S_OK;
     }
@@ -545,6 +549,7 @@ class webview2_navigation_completed_handler : public ICoreWebView2NavigationComp
         if (uri) {
             CoTaskMemFree(uri);
         }
+        str::FreePtr(&m_wnd->pendingNavUrl);
         if (url) {
             m_wnd->events.navigationCompleted(m_wnd->events.ctx, url, success != FALSE);
         }
@@ -669,6 +674,92 @@ class webview2_new_window_handler : public ICoreWebView2NewWindowRequestedEventH
         if (url) {
             m_wnd->events.navigationStarting(m_wnd->events.ctx, url, true);
         }
+        return S_OK;
+    }
+
+  private:
+    WebviewWnd* m_wnd = nullptr;
+    ULONG m_refCount = 1;
+};
+
+// Reports the Content-Type of a TOP-LEVEL document response. WebResourceResponseReceived
+// fires for every request the page makes, so the main document has to be picked
+// out: Chromium tags a top-level navigation with "Sec-Fetch-Dest: document",
+// and as a fallback (no Sec-Fetch headers on some schemes) we accept a response
+// whose URI is the one the webview is navigating to.
+class webview2_response_received_handler : public ICoreWebView2WebResourceResponseReceivedEventHandler {
+  public:
+    explicit webview2_response_received_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
+    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    ULONG STDMETHODCALLTYPE Release() {
+        ULONG n = --m_refCount;
+        if (n == 0) {
+            delete this;
+        }
+        return n;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, LPVOID* ppv) {
+        if (!ppv) {
+            return E_POINTER;
+        }
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == __uuidof(ICoreWebView2WebResourceResponseReceivedEventHandler)) {
+            *ppv = static_cast<ICoreWebView2WebResourceResponseReceivedEventHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* /*sender*/,
+                                     ICoreWebView2WebResourceResponseReceivedEventArgs* args) {
+        if (!args || !m_wnd || !m_wnd->events.mainDocumentResponse) {
+            return S_OK;
+        }
+        ICoreWebView2WebResourceRequest* req = nullptr;
+        if (FAILED(args->get_Request(&req)) || !req) {
+            return S_OK;
+        }
+        bool isMainDoc = false;
+        ICoreWebView2HttpRequestHeaders* reqHeaders = nullptr;
+        if (SUCCEEDED(req->get_Headers(&reqHeaders)) && reqHeaders) {
+            WCHAR* dest = nullptr;
+            if (SUCCEEDED(reqHeaders->GetHeader(L"Sec-Fetch-Dest", &dest)) && dest) {
+                isMainDoc = wstr::EqI(WStr(dest), WStrL(L"document"));
+                CoTaskMemFree(dest);
+            }
+            reqHeaders->Release();
+        }
+        WCHAR* uri = nullptr;
+        req->get_Uri(&uri);
+        req->Release();
+        TempStr url = uri ? UrlForWebViewEvent(WStr(uri), m_wnd->resourceUriPrefix) : TempStr();
+        if (uri) {
+            CoTaskMemFree(uri);
+        }
+        if (!url) {
+            return S_OK;
+        }
+        if (!isMainDoc && m_wnd->pendingNavUrl) {
+            isMainDoc = str::EqI(url, m_wnd->pendingNavUrl);
+        }
+        if (!isMainDoc) {
+            return S_OK;
+        }
+        TempStr contentType;
+        ICoreWebView2WebResourceResponseView* resp = nullptr;
+        if (SUCCEEDED(args->get_Response(&resp)) && resp) {
+            ICoreWebView2HttpResponseHeaders* headers = nullptr;
+            if (SUCCEEDED(resp->get_Headers(&headers)) && headers) {
+                WCHAR* ct = nullptr;
+                if (SUCCEEDED(headers->GetHeader(L"Content-Type", &ct)) && ct) {
+                    contentType = ToUtf8Temp(WStr(ct));
+                    CoTaskMemFree(ct);
+                }
+                headers->Release();
+            }
+            resp->Release();
+        }
+        m_wnd->events.mainDocumentResponse(m_wnd->events.ctx, url, contentType ? contentType : StrL(""));
         return S_OK;
     }
 
@@ -1265,6 +1356,22 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
         handler->Release();
     }
 
+    // WebResourceResponseReceived is on ICoreWebView2_2 (a later interface than
+    // the one we hold), so it has to be queried for; an older runtime simply
+    // doesn't deliver the event and the host falls back to URL-based detection.
+    if (events.mainDocumentResponse) {
+        ICoreWebView2_2* wv2 = nullptr;
+        if (SUCCEEDED(webview->QueryInterface(IID_PPV_ARGS(&wv2))) && wv2) {
+            auto* handler = new webview2_response_received_handler(this);
+            ::EventRegistrationToken token = {};
+            if (FAILED(wv2->add_WebResourceResponseReceived(handler, &token))) {
+                logf("WebviewWnd: add_WebResourceResponseReceived failed\n");
+            }
+            handler->Release();
+            wv2->Release();
+        }
+    }
+
     {
         auto* failedHandler = new webview2_process_failed_handler(hwnd);
         ::EventRegistrationToken token = {};
@@ -1587,6 +1694,19 @@ void WebviewWnd::Navigate(Str url) {
     }
     WCHAR* ws = CWStrTemp(url);
     webview->Navigate(ws);
+}
+
+TempStr WebviewWnd::GetDocumentTitle() const {
+    if (!webview) {
+        return {};
+    }
+    WCHAR* title = nullptr;
+    if (FAILED(webview->get_DocumentTitle(&title)) || !title) {
+        return {};
+    }
+    TempStr res = ToUtf8Temp(WStr(title));
+    CoTaskMemFree(title);
+    return res;
 }
 
 void WebviewWnd::GoBack() {
@@ -2068,6 +2188,7 @@ WebviewWnd::~WebviewWnd() {
         controller = nullptr;
     }
     str::Free(dataDir);
+    str::Free(pendingNavUrl);
     wstr::Free(userDataFolder);
     wstr::Free(resourceUriPrefix);
 }
@@ -2079,6 +2200,7 @@ WebviewWnd::~WebviewWnd() {
 WebviewWnd::WebviewWnd() = default;
 WebviewWnd::~WebviewWnd() {
     str::Free(dataDir);
+    str::Free(pendingNavUrl);
     wstr::Free(userDataFolder);
     wstr::Free(resourceUriPrefix);
 }
@@ -2108,6 +2230,9 @@ void WebviewWnd::OnProcessFailed(WebViewProcessFailure) {}
 void WebviewWnd::Navigate(Str) {}
 void WebviewWnd::RegisterForwardingDropTarget() {}
 void WebviewWnd::RevokeForwardingDropTarget() {}
+TempStr WebviewWnd::GetDocumentTitle() const {
+    return {};
+}
 void WebviewWnd::GoBack() {}
 void WebviewWnd::GoForward() {}
 void WebviewWnd::SetZoomPercent(int) {}

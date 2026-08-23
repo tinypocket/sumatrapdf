@@ -992,6 +992,11 @@ BrowserHomePage = https://www.google.com
 ; 3.8)
 BrowserBookmarks =
 
+; display names for BrowserBookmarks, one per URL and in the same order; a
+; missing or empty entry falls back to the URL's host (introduced in version
+; 3.8)
+BrowserFavoriteTitles =
+
 ; files downloaded by the in-product web browser, so they can be cleaned up
 ; later (introduced in version 3.8)
 BrowserDownloads =
@@ -999,6 +1004,16 @@ BrowserDownloads =
 ; if true, buttons animate briefly when pressed or hovered; turn off for a
 ; completely static UI (introduced in version 3.8)
 AnimateUI = true
+
+; if true (and AnimateUI is also true), animate more of the UI: in the web
+; browser the tabs, favorites and nav buttons cross-fade on hover and sink when
+; pressed instead of switching instantly. Ignored when AnimateUI is false
+; (introduced in version 3.8)
+ElaborateAnimations = false
+
+; if true, the document tabs in the title bar are taller and wider with larger
+; text; easier to read and to hit with a finger (introduced in version 3.8)
+LargerTabs = false
 
 ; if true, check at startup whether an update is available
 CheckForUpdates = true

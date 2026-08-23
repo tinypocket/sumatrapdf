@@ -1009,6 +1009,9 @@
     </ClCompile>
     <ClCompile Include="..\src\BrowserUrlUtil.cpp" />
     <ClCompile Include="..\src\BrowserUrlUtil_ut.cpp" />
+    <ClCompile Include="..\src\KineticScroll.cpp" />
+    <ClCompile Include="..\src\wingui\Anim.cpp" />
+    <ClCompile Include="..\src\KineticScroll_ut.cpp" />
     <ClCompile Include="..\src\Commands.cpp" />
     <ClCompile Include="..\src\CrashHandlerNoOp.cpp" />
     <ClCompile Include="..\src\DisplayMode.cpp" />

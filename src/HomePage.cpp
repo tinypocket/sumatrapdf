@@ -23,6 +23,8 @@
 #include "GlobalPrefs.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "Canvas.h"
+#include "wingui/Anim.h"
 #include "WindowTab.h"
 #include "Commands.h"
 #include "Accelerators.h"
@@ -4471,18 +4473,69 @@ bool HomePageSetLibraryResizeCursor(MainWindow* win) {
     return true;
 }
 
+// Keeps the timer running exactly as long as something is still moving, so an
+// idle Library costs nothing.
+static void UpdateLibraryScrollTimer(MainWindow* win) {
+    if (!win || !win->hwndCanvas) {
+        return;
+    }
+    bool moving = KsIsMoving(win->libraryTreeKs) || KsIsMoving(win->libraryFilesKs);
+    if (moving) {
+        SetTimer(win->hwndCanvas, kLibraryScrollTimerID, kAnimTickMs, nullptr);
+    } else {
+        KillTimer(win->hwndCanvas, kLibraryScrollTimerID);
+    }
+}
+
+// One tick of the Library's scroll momentum: advance both columns, publish the
+// result into the ScrollY fields the paint code reads, repaint.
+void HomePageKineticTick(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    bool moving = KsTick(win->libraryTreeKs);
+    moving |= KsTick(win->libraryFilesKs);
+    win->libraryTreeScrollY = KsPos(win->libraryTreeKs);
+    win->libraryFilesScrollY = KsPos(win->libraryFilesKs);
+    HwndInvalidate(win->hwndCanvas, false);
+    if (!moving) {
+        UpdateLibraryScrollTimer(win);
+    }
+}
+
+// Called before feeding a scroller: the content it scrolls over is remeasured
+// on every layout, so bounds have to be resynced or a fling runs past the end.
+static void SyncLibraryScrollBounds(MainWindow* win) {
+    KsSetBounds(win->libraryTreeKs, 0, win->libraryTreeScrollMaxY);
+    KsSetBounds(win->libraryFilesKs, 0, win->libraryFilesScrollMaxY);
+    // another code path may have set the position directly (view change, filter
+    // applied, folder opened); adopt it rather than fighting it
+    if (KsPos(win->libraryTreeKs) != win->libraryTreeScrollY && !KsIsMoving(win->libraryTreeKs)) {
+        KsSetPos(win->libraryTreeKs, win->libraryTreeScrollY);
+    }
+    if (KsPos(win->libraryFilesKs) != win->libraryFilesScrollY && !KsIsMoving(win->libraryFilesKs)) {
+        KsSetPos(win->libraryFilesKs, win->libraryFilesScrollY);
+    }
+}
+
 void HomePageOnMouseWheel(MainWindow* win, int delta, Point canvasPt) {
     if (IsTouchChrome(win) && win->touchView == TouchView::Library) {
         if (win->libraryManageFoldersOpen) {
             return;
         }
+        // a wheel notch eases to its new position instead of jumping a fixed
+        // number of pixels, which is what made this feel unfinished
         int step = DpiScale(win->hwndCanvas, 72);
         int dy = delta > 0 ? -step : step;
+        SyncLibraryScrollBounds(win);
         if (canvasPt.x < TouchLibrarySidebarDx(win)) {
-            win->libraryTreeScrollY = std::clamp(win->libraryTreeScrollY + dy, 0, win->libraryTreeScrollMaxY);
+            KsScrollBy(win->libraryTreeKs, dy);
+            win->libraryTreeScrollY = KsPos(win->libraryTreeKs);
         } else {
-            win->libraryFilesScrollY = std::clamp(win->libraryFilesScrollY + dy, 0, win->libraryFilesScrollMaxY);
+            KsScrollBy(win->libraryFilesKs, dy);
+            win->libraryFilesScrollY = KsPos(win->libraryFilesKs);
         }
+        UpdateLibraryScrollTimer(win);
         HwndInvalidate(win->hwndCanvas);
         return;
     }
@@ -4576,6 +4629,12 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
         } else {
             win->touchAboutPanStartY = win->libraryFilesScrollY;
         }
+        // a touch on a coasting list catches it, like every other touch surface
+        SyncLibraryScrollBounds(win);
+        KsStop(win->libraryTreeKs);
+        KsStop(win->libraryFilesKs);
+        UpdateLibraryScrollTimer(win);
+        KsDragBegin(area == 3 ? win->libraryTreeKs : win->libraryFilesKs, pt.y);
         win->touchAboutPanMoved = false;
         win->touchAboutSuppressMouseUp = false;
         return true;
@@ -4604,9 +4663,11 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
         } else if (win->touchAboutPanArea == 2 && win->touchAboutPanAxis == 1) {
             win->homeOpenScrollX = std::clamp(win->touchAboutPanStartX - dx, 0, win->homeOpenScrollMaxX);
         } else if (win->touchAboutPanArea == 3) {
-            win->libraryTreeScrollY = std::clamp(win->touchAboutPanStartY - dy, 0, win->libraryTreeScrollMaxY);
+            KsDragUpdate(win->libraryTreeKs, pt.y);
+            win->libraryTreeScrollY = KsPos(win->libraryTreeKs);
         } else if (win->touchAboutPanArea == 2 || win->touchAboutPanArea == 4) {
-            win->libraryFilesScrollY = std::clamp(win->touchAboutPanStartY - dy, 0, win->libraryFilesScrollMaxY);
+            KsDragUpdate(win->libraryFilesKs, pt.y);
+            win->libraryFilesScrollY = KsPos(win->libraryFilesKs);
         }
         HwndInvalidate(win->hwndCanvas, false);
         return true;
@@ -4615,6 +4676,10 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
         Point pt = TouchAboutPointerPos(win, lp);
         int area = win->touchAboutPanArea;
         bool moved = win->touchAboutPanMoved;
+        // let go of a flick and the list keeps going, then coasts to a stop
+        KsDragEnd(win->libraryTreeKs);
+        KsDragEnd(win->libraryFilesKs);
+        UpdateLibraryScrollTimer(win);
         win->touchAboutSuppressMouseUp = moved;
         win->touchAboutPointerId = 0;
         win->touchAboutPanArea = 0;

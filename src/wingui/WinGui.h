@@ -797,6 +797,11 @@ struct TabInfo {
     bool isPinned = false;
     bool canClose = true; // TODO: same as !isPinned?
     bool isDirty = false;
+    // Kept in the tab list (it owns a WindowTab and its canvas model) but never
+    // laid out, painted or hit-tested. The touch chrome's Library/Web view is
+    // hosted by an About tab, and the user does not think of the Library as a
+    // document tab; while it is current the tab strip shows nothing selected.
+    bool isHidden = false;
     UINT_PTR userData = 0;
     COLORREF tabColor = (COLORREF)(0xfeffffff); // kColorUnset; use default tab color
 
@@ -810,6 +815,10 @@ struct TabInfo {
     Size titleSize;
     Point titlePos;
 };
+
+// bridge for the app's "larger tabs" pref (wingui does not read GlobalPrefs)
+void TabsSetLargerTabs(bool larger);
+bool TabsLargerTabs();
 
 struct TabsCtrl : Wnd {
     struct CreateArgs {
@@ -873,8 +882,13 @@ struct TabsCtrl : Wnd {
     int tabDefaultDx = 300;
     Rect previewButtonRect;
     Rect addButtonRect;
+    // last item size handed to the native control (see LayoutTabs)
+    int lastNativeTabDx = -1;
+    // "..." overflow next to the + : reopen last closed tab, tab size, theme
+    Rect menuButtonRect;
     Func0 onPreview;
     Func0 onNewTab;
+    Func0 onTabMenu;
     Func1<bool> onPreviewHover;
     bool previewHovered = false;
 

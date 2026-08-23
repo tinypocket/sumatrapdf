@@ -1340,6 +1340,12 @@ const globalPrefs: Field[] = [
   ).ver("3.8"),
   compactArray("BrowserBookmarks", Str, null, "bookmarked URLs shown in the in-product web browser").ver("3.8"),
   compactArray(
+    "BrowserFavoriteTitles",
+    Str,
+    null,
+    "display names for BrowserBookmarks, one per URL and in the same order; a missing or empty entry falls back to the URL's host",
+  ).ver("3.8"),
+  compactArray(
     "BrowserDownloads",
     Str,
     null,
@@ -1352,6 +1358,18 @@ const globalPrefs: Field[] = [
     Bool,
     true,
     "if true, buttons animate briefly when pressed or hovered; turn off for a completely static UI",
+  ).ver("3.8"),
+  field(
+    "ElaborateAnimations",
+    Bool,
+    false,
+    "if true (and AnimateUI is also true), animate more of the UI: in the web browser the tabs, favorites and nav buttons cross-fade on hover and sink when pressed instead of switching instantly. Ignored when AnimateUI is false",
+  ).ver("3.8"),
+  field(
+    "LargerTabs",
+    Bool,
+    false,
+    "if true, the document tabs in the title bar are taller and wider with larger text; easier to read and to hit with a finger",
   ).ver("3.8"),
   field("CheckForUpdates", Bool, true, "if true, check at startup whether an update is available").internal(),
   emptyLine(),

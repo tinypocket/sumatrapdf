@@ -14,6 +14,7 @@
 #include "wingui/WinGui.h"
 
 #include "wingui/LabelWithCloseWnd.h"
+#include "wingui/Anim.h"
 
 #include "Settings.h"
 #include "AppSettings.h"
@@ -1886,6 +1887,28 @@ bool IsTouchSearchPanelVisible(MainWindow* win) {
     return win->uiState.tocVisible && win->touchPanelMode == TouchPanelMode::Search;
 }
 
+// The Search panel's live query, or {} when the panel is not the one driving
+// the find. The panel never opens the classic find bar, so win->hwndFindEdit
+// (which the find code used to treat as the only source of the query) is empty
+// while the panel owns the search - which is why Find Next / Prev did nothing.
+// The edit is the live value; touchDocumentSearchQuery is its saved copy and
+// covers the moment right after a mode switch, before the edit is refilled.
+TempStr TouchSearchPanelQueryTemp(MainWindow* win) {
+    if (!IsTouchSearchPanelVisible(win)) {
+        return {};
+    }
+    if (win->tocFilterEdit && win->tocFilterEdit->hwnd) {
+        TempStr s = win->tocFilterEdit->GetTextTemp();
+        if (!str::IsEmptyOrWhiteSpace(s)) {
+            return s;
+        }
+    }
+    if (!str::IsEmptyOrWhiteSpace(win->touchDocumentSearchQuery)) {
+        return str::DupTemp(win->touchDocumentSearchQuery);
+    }
+    return {};
+}
+
 void UpdateTouchPanelMode(MainWindow* win) {
     if (!win || !IsTouchChrome(win) || !win->tocLabelWithClose) {
         return;
@@ -1923,15 +1946,40 @@ static Rect TouchThumbnailRect(MainWindow* win, int pageIndex) {
 
 struct TouchThumbnailRenderData {
     HWND hwnd = nullptr;
+    MainWindow* win = nullptr;
+    int pageIdx = -1;
 };
 
+// Back on the UI thread: the render is no longer in flight, so a later cache
+// miss for this page is free to ask for it again.
+static void TouchThumbnailRenderDone(TouchThumbnailRenderData* data) {
+    MainWindow* win = data->win;
+    if (IsMainWindowValid(win)) {
+        int at = win->touchThumbnailRequested.Find(data->pageIdx);
+        if (at >= 0) {
+            win->touchThumbnailRequested.RemoveAt(at);
+        }
+        if (win->hwndTocBox) {
+            HwndInvalidate(win->hwndTocBox, false);
+        }
+    }
+    delete data;
+}
+
+// Runs on the render thread (RenderCache guarantees exactly one call per
+// request, including failures and queue evictions).
 static void TouchThumbnailRenderFinished(TouchThumbnailRenderData* data, PageRenderRequest*) {
     // InvalidateRect is safe across threads. The HWND value can be stale if
     // the window closed, in which case Windows simply rejects the request.
     if (data->hwnd) {
         InvalidateRect(data->hwnd, nullptr, FALSE);
     }
-    delete data;
+    // touchThumbnailRequested is UI-thread state, so clearing the in-flight
+    // mark has to hop threads. Without it the mark was permanent, and once the
+    // shared render cache evicted a thumbnail (which it does as soon as the
+    // document view renders anything else) the page was never re-requested -
+    // that is why reopening the panel showed blank white cards.
+    uitask::Post(MkFunc0<TouchThumbnailRenderData>(TouchThumbnailRenderDone, data), "TouchThumbnailRenderDone");
 }
 
 static void RequestTouchThumbnail(MainWindow* win, DisplayModel* dm, int pageNo, Rect card) {
@@ -1945,6 +1993,8 @@ static void RequestTouchThumbnail(MainWindow* win, DisplayModel* dm, int pageNo,
     pageRect = engine->Transform(pageRect, pageNo, 1.0f, 0, true);
     auto* data = new TouchThumbnailRenderData();
     data->hwnd = win->hwndTocBox;
+    data->win = win;
+    data->pageIdx = pageNo - 1;
     auto cb = MkFunc1(TouchThumbnailRenderFinished, data);
     gRenderCache->Render(dm, pageNo, 0, zoom, pageRect, cb);
 }
@@ -2331,6 +2381,27 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
     return false;
 }
 
+// Drives the panel list's scroll easing / fling while it is moving. Same
+// KineticScroll the Library columns use, so both decelerate identically.
+constexpr UINT_PTR kTouchPanelScrollTimerId = 21;
+
+static void UpdateTouchPanelScrollTimer(MainWindow* win, HWND hwnd) {
+    if (KsIsMoving(win->touchPanelKs)) {
+        SetTimer(hwnd, kTouchPanelScrollTimerId, kAnimTickMs, nullptr);
+    } else {
+        KillTimer(hwnd, kTouchPanelScrollTimerId);
+    }
+}
+
+// The list is remeasured on every layout and other code paths set the scroll
+// position directly (mode switch, document change), so resync before feeding it.
+static void SyncTouchPanelScroll(MainWindow* win) {
+    KsSetBounds(win->touchPanelKs, 0, TouchPanelMaxScroll(win));
+    if (!KsIsMoving(win->touchPanelKs) && KsPos(win->touchPanelKs) != win->touchPanelScrollY) {
+        KsSetPos(win->touchPanelKs, win->touchPanelScrollY);
+    }
+}
+
 #ifndef WM_POINTERUPDATE
 #define WM_POINTERUPDATE 0x0245
 #define WM_POINTERDOWN 0x0246
@@ -2346,6 +2417,17 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     MainWindow* win = FindMainWindowByHwnd(hwnd);
     if (!win) {
         return DefSubclassProc(hwnd, msg, wp, lp);
+    }
+
+    // WC_STATIC without SS_NOTIFY answers WM_NCHITTEST with HTTRANSPARENT, so
+    // every click and every touch fell straight through the panel to the frame
+    // underneath and WM_LBUTTONUP / WM_POINTERDOWN never arrived here at all.
+    // That is why tapping a search result, a thumbnail or the filter's clear X
+    // did nothing, and why the panel could not be dragged to scroll. Under the
+    // touch chrome the panel draws and hit-tests its own content, so it has to
+    // be solid. Classic chrome keeps the pass-through behavior it always had.
+    if (msg == WM_NCHITTEST && IsTouchChrome(win)) {
+        return HTCLIENT;
     }
 
     // The panel is a WC_STATIC: it paints its own background, so drawing the
@@ -2405,10 +2487,22 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             if (win->touchPanelMode != TouchPanelMode::Bookmarks) {
                 int step = DpiScale(hwnd, TouchSidebarRowDy());
                 int direction = GET_WHEEL_DELTA_WPARAM(wp) > 0 ? -1 : 1;
-                int next = std::clamp(win->touchPanelScrollY + direction * step, 0, TouchPanelMaxScroll(win));
-                if (next != win->touchPanelScrollY) {
-                    win->touchPanelScrollY = next;
-                    HwndInvalidate(hwnd, false);
+                SyncTouchPanelScroll(win);
+                KsScrollBy(win->touchPanelKs, direction * step);
+                win->touchPanelScrollY = KsPos(win->touchPanelKs);
+                UpdateTouchPanelScrollTimer(win, hwnd);
+                HwndInvalidate(hwnd, false);
+                return 0;
+            }
+            break;
+
+        case WM_TIMER:
+            if (wp == kTouchPanelScrollTimerId) {
+                bool moving = KsTick(win->touchPanelKs);
+                win->touchPanelScrollY = KsPos(win->touchPanelKs);
+                HwndInvalidate(hwnd, false);
+                if (!moving) {
+                    UpdateTouchPanelScrollTimer(win, hwnd);
                 }
                 return 0;
             }
@@ -2436,6 +2530,11 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                 win->touchPanelPointerStart = HwndScreenToClient(hwnd, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
                 win->touchPanelPointerStartScrollY = win->touchPanelScrollY;
                 win->touchPanelPointerMoved = false;
+                // touching a coasting list catches it
+                SyncTouchPanelScroll(win);
+                KsStop(win->touchPanelKs);
+                UpdateTouchPanelScrollTimer(win, hwnd);
+                KsDragBegin(win->touchPanelKs, win->touchPanelPointerStart.y);
                 CloseTouchDocumentOverlays(win);
                 return 0;
             }
@@ -2450,8 +2549,8 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                     win->touchPanelPointerMoved = true;
                 }
                 if (win->touchPanelPointerMoved) {
-                    win->touchPanelScrollY =
-                        std::clamp(win->touchPanelPointerStartScrollY - dy, 0, TouchPanelMaxScroll(win));
+                    KsDragUpdate(win->touchPanelKs, pt.y);
+                    win->touchPanelScrollY = KsPos(win->touchPanelKs);
                     HwndInvalidate(hwnd, false);
                 }
                 return 0;
@@ -2464,6 +2563,9 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                 bool activate = !win->touchPanelPointerMoved;
                 win->touchPanelPointerId = 0;
                 win->touchPanelPointerMoved = false;
+                // let go of a flick and the list coasts to a stop
+                KsDragEnd(win->touchPanelKs);
+                UpdateTouchPanelScrollTimer(win, hwnd);
                 if (activate) {
                     ActivateTouchPanelAt(win, pt);
                 }

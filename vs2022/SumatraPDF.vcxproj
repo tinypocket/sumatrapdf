@@ -1277,6 +1277,7 @@ cd ../out/rel64_prefast_asan &amp; if not exist InstallerData.dat ..\..\bin\Make
     <ClInclude Include="..\src\PngOptimizer.h" />
     <ClInclude Include="..\src\Print.h" />
     <ClInclude Include="..\src\ProgressUpdateUI.h" />
+    <ClInclude Include="..\src\KineticScroll.h" />
     <ClInclude Include="..\src\Rail.h" />
     <ClInclude Include="..\src\ReadAloudHighlight.h" />
     <ClInclude Include="..\src\ReadAloudPlaybackBar.h" />
@@ -1490,6 +1491,7 @@ cd ../out/rel64_prefast_asan &amp; if not exist InstallerData.dat ..\..\bin\Make
     <ClCompile Include="..\src\PdfTools.cpp" />
     <ClCompile Include="..\src\PngOptimizer.cpp" />
     <ClCompile Include="..\src\Print.cpp" />
+    <ClCompile Include="..\src\KineticScroll.cpp" />
     <ClCompile Include="..\src\Rail.cpp" />
     <ClCompile Include="..\src\ReadAloudHighlight.cpp" />
     <ClCompile Include="..\src\ReadAloudPlaybackBar.cpp" />

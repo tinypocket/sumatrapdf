@@ -1301,6 +1301,7 @@ if exist ..\out\rel64_prefast_asan\InstallerData.dat del /f /q ..\out\rel64_pref
     <ClInclude Include="..\src\PngOptimizer.h" />
     <ClInclude Include="..\src\Print.h" />
     <ClInclude Include="..\src\ProgressUpdateUI.h" />
+    <ClInclude Include="..\src\KineticScroll.h" />
     <ClInclude Include="..\src\Rail.h" />
     <ClInclude Include="..\src\ReadAloudHighlight.h" />
     <ClInclude Include="..\src\ReadAloudPlaybackBar.h" />
@@ -1514,6 +1515,7 @@ if exist ..\out\rel64_prefast_asan\InstallerData.dat del /f /q ..\out\rel64_pref
     <ClCompile Include="..\src\PdfTools.cpp" />
     <ClCompile Include="..\src\PngOptimizer.cpp" />
     <ClCompile Include="..\src\Print.cpp" />
+    <ClCompile Include="..\src\KineticScroll.cpp" />
     <ClCompile Include="..\src\Rail.cpp" />
     <ClCompile Include="..\src\ReadAloudHighlight.cpp" />
     <ClCompile Include="..\src\ReadAloudPlaybackBar.cpp" />

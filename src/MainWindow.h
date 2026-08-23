@@ -1,6 +1,9 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
+// by value below (Library scroll momentum); self-contained, no dependencies
+#include "KineticScroll.h"
+
 struct DoubleBuffer;
 struct Edit;
 struct WebviewWnd;
@@ -402,6 +405,10 @@ struct MainWindow {
     int libraryTreeScrollMaxY = 0;
     int libraryFilesScrollY = 0;
     int libraryFilesScrollMaxY = 0;
+    // Momentum for the two Library columns. The ScrollY fields above stay the
+    // value everything paints from; these drive them (see HomePageKineticTick).
+    KineticScroll libraryTreeKs;
+    KineticScroll libraryFilesKs;
     int librarySidebarDx = 0;
     bool librarySidebarResizing = false;
     int librarySidebarResizeStartX = 0;
@@ -537,6 +544,9 @@ struct MainWindow {
     DisplayModel* touchThumbnailDm = nullptr;
     Vec<int> touchThumbnailRequested;
     int touchPanelScrollY = 0;
+    // momentum for the panel list (thumbnails, search results, annotations);
+    // drives touchPanelScrollY, which is what the paint code reads
+    KineticScroll touchPanelKs;
     UINT32 touchPanelPointerId = 0;
     Point touchPanelPointerStart;
     int touchPanelPointerStartScrollY = 0;

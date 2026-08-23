@@ -12,6 +12,9 @@ void UnsubclassToc(MainWindow*);
 void TocFilterChanged(MainWindow*);
 void UpdateTouchPanelMode(MainWindow*);
 bool IsTouchSearchPanelVisible(MainWindow*);
+// the touch Search panel's current query, or {} when that panel isn't the one
+// driving the find (then win->hwndFindEdit is the source, as it always was)
+TempStr TouchSearchPanelQueryTemp(MainWindow*);
 void SetTouchPanelModeAndRestoreSearch(MainWindow*, TouchPanelMode);
 int TouchSidebarRowDy();
 

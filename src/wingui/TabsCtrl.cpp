@@ -63,6 +63,20 @@ void TabsCtrl::ScheduleRepaint() {
 
 // Calculates tab's elements, based on its width and height.
 // Generates a GraphicsPath, which is used for painting the tab, etc.
+// The app's "larger tabs" preference, pushed down from app code the same way
+// AnimSetAppEnabled bridges the animation pref: wingui must not read
+// GlobalPrefs itself. Scales the pill width; the strip height and font are
+// scaled by the app side (see TouchTitleBarTabsDy).
+static bool gLargerTabs = false;
+
+void TabsSetLargerTabs(bool larger) {
+    gLargerTabs = larger;
+}
+
+bool TabsLargerTabs() {
+    return gLargerTabs;
+}
+
 void TabsCtrl::LayoutTabs() {
     Rect rect = HwndClientRect(hwnd);
     int dy = rect.dy;
@@ -73,19 +87,32 @@ void TabsCtrl::LayoutTabs() {
     if (nTabs == 0) {
         previewButtonRect = {};
         addButtonRect = {};
+        menuButtonRect = {};
         // Do not ScheduleRepaint here: an empty bar with a forced repaint can
         // re-enter layout/paint forever if something keeps calling LayoutTabs
         // (issue #5861). The parent hides the control when there are no tabs.
         return;
     }
+    // hidden tabs (the touch Library/Web host) claim no strip space, so the
+    // width has to be divided among the visible ones or the real tabs come out
+    // narrower than the bar can actually fit
+    int nVisible = 0;
+    for (int i = 0; i < nTabs; i++) {
+        if (!tabs[i]->isHidden) {
+            nVisible++;
+        }
+    }
     int dx;
     if (tabWidthFrozen && frozenTabDx > 0) {
         dx = frozenTabDx;
     } else {
-        int controlReserve = inTitleBar ? DpiScale(hwnd, 68) : 5;
-        auto maxDx = (rect.dx - controlReserve) / nTabs;
+        // preview + add + "...", each 28 wide with 4px gaps
+        int controlReserve = inTitleBar ? DpiScale(hwnd, 100) : 5;
+        auto maxDx = (rect.dx - controlReserve) / std::max(nVisible, 1);
         if (inTitleBar) {
-            dx = std::clamp(maxDx, DpiScale(hwnd, kTabPillMinDx), DpiScale(hwnd, kTabPillMaxDx));
+            int minDx = gLargerTabs ? kTabPillLargeMinDx : kTabPillMinDx;
+            int maxPillDx = gLargerTabs ? kTabPillLargeMaxDx : kTabPillMaxDx;
+            dx = std::clamp(maxDx, DpiScale(hwnd, minDx), DpiScale(hwnd, maxPillDx));
         } else {
             dx = std::min(tabDefaultDx, maxDx);
         }
@@ -117,6 +144,20 @@ void TabsCtrl::LayoutTabs() {
         // bounded loop with a valid index: index tabs directly instead of going
         // through GetTab (which re-issues TCM_GETITEMCOUNT each call)
         TabInfo* ti = tabs[i];
+        if (ti->isHidden) {
+            // empty rect also makes TabStateFromMousePosition miss it
+            ti->r = {};
+            ti->rClose = {};
+            ti->rCloseHit = {};
+            ti->titleSize = {};
+            ti->titlePos = {};
+            if (withToolTips) {
+                tools[i].s = nullptr;
+                tools[i].id = i;
+                tools[i].r = {};
+            }
+            continue;
+        }
         if (isRtl) {
             xEnd = x - dx;
             ti->r = {xEnd, 0, dx, dy};
@@ -151,16 +192,47 @@ void TabsCtrl::LayoutTabs() {
     addButtonRect = inTitleBar ? Rect{isRtl ? x - titleControlGap - titleControlDx : x + titleControlGap,
                                       (dy - titleControlDx) / 2, titleControlDx, titleControlDx}
                                : Rect{};
+    if (inTitleBar) {
+        int mx = isRtl ? addButtonRect.x - titleControlGap - titleControlDx
+                       : addButtonRect.x + titleControlDx + titleControlGap;
+        menuButtonRect = Rect{mx, (dy - titleControlDx) / 2, titleControlDx, titleControlDx};
+    } else {
+        menuButtonRect = {};
+    }
     if (withToolTips) {
         HWND ttHwnd = GetToolTipsHwnd();
         TooltipRemoveAll(ttHwnd);
         TooltipAddTools(ttHwnd, hwnd, tools, nTabs);
     }
 
+    // The native control still holds the hidden tab (it owns the tab list) and
+    // lays its items out itself. Handing it a width derived from the *visible*
+    // count makes it conclude its tabs overflow, and it grows spin buttons
+    // (msctls_updown32) over our chrome. It is only bookkeeping here - every
+    // pixel is owner-drawn from ti->r - so give it a size that always fits.
+    Size nativeSize = tabSize;
+    // slack for the control's own per-item padding, or "exactly fits" by our
+    // arithmetic is still an overflow by its own
+    int fitDx = std::max(1, (rect.dx - DpiScale(hwnd, 24)) / std::max(nTabs, 1));
+    nativeSize.dx = std::min(tabSize.dx, fitDx);
+    bool nativeChanged = (nativeSize.dx != lastNativeTabDx);
+    lastNativeTabDx = nativeSize.dx;
+
     // TabCtrl_SetItemSize always invalidates; skip when size is unchanged to
     // avoid a paint storm after last-tab close / caption relayout (#5861).
-    if (sizeChanged) {
-        HwndTabsSetItemSize(hwnd, tabSize);
+    if (sizeChanged || nativeChanged) {
+        HwndTabsSetItemSize(hwnd, nativeSize);
+    }
+
+    // Belt and braces: whatever it concludes about overflow, the native
+    // control's spin buttons must never show. They are a real child window it
+    // creates for itself, and they were landing on top of the "..." button.
+    HWND spinner = FindWindowExW(hwnd, nullptr, L"msctls_updown32", nullptr);
+    while (spinner) {
+        if (IsWindowVisible(spinner)) {
+            ShowWindow(spinner, SW_HIDE);
+        }
+        spinner = FindWindowExW(hwnd, spinner, L"msctls_updown32", nullptr);
     }
 }
 
@@ -174,6 +246,9 @@ TabsCtrl::MouseState TabsCtrl::TabStateFromMousePosition(const Point& p) {
     int nTabs = std::min(TabCount(), len(tabs));
     for (int i = 0; i < nTabs; i++) {
         TabInfo* ti = tabs[i];
+        if (ti->isHidden) {
+            continue;
+        }
         Rect r = ti->r;
         // logfa("testing i=%d rect: %d %d %d %d pt: %d %d\n", i, ti->r.x, ti->r.y, ti->r.dx, ti->r.dy, pt.x, pt.y);
         if (!r.Contains(pt)) {
@@ -276,8 +351,12 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
     COLORREF tabBarBg = inTitleBar ? ThemeHotBackgroundColor() : ThemeControlBackgroundColor();
     SolidBrush br(GdipCol(tabBarBg));
 
-    HFONT normalFont = inTitleBar ? HdcGetUiFont(hdc, 12) : GetFont();
-    HFONT selectedFont = inTitleBar ? HdcGetUiFont(hdc, 12, FW_SEMIBOLD) : GetFont();
+    // 12pt was small for a filename you are meant to read at a glance; the
+    // strip is 48px tall so 13 fits with room to spare. "Larger tabs" takes it
+    // to 16 along with the wider pills and taller strip.
+    int tabFontSize = gLargerTabs ? 16 : 13;
+    HFONT normalFont = inTitleBar ? HdcGetUiFont(hdc, tabFontSize) : GetFont();
+    HFONT selectedFont = inTitleBar ? HdcGetUiFont(hdc, tabFontSize, FW_SEMIBOLD) : GetFont();
     Font fNormal(hdc, normalFont);
     Font fSelected(hdc, selectedFont);
 
@@ -304,6 +383,12 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
 
     COLORREF tabBgCol;
     for (int i = 0; i < n; i++) {
+        // A hidden tab is never drawn - including when it is the selected one,
+        // which is the point: with the touch Library current, no tab in the
+        // strip is painted as selected.
+        if (tabs[i]->isHidden) {
+            continue;
+        }
         // Get the correct colors based on the state and the current theme
         tabBgCol = tabBgBackground;
         bool isSelected = selectedIdx == i;
@@ -412,6 +497,17 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
         int arm = DpiScale(hwnd, 5);
         gfx.DrawLine(&iconPen, cx - arm, cy, cx + arm, cy);
         gfx.DrawLine(&iconPen, cx, cy - arm, cx, cy + arm);
+
+        // "..." overflow: three dots on the same baseline as the + arms
+        Rect m = menuButtonRect;
+        int mcx = m.x + m.dx / 2;
+        int mcy = m.y + m.dy / 2;
+        int dotR = std::max(1, DpiScale(hwnd, 2));
+        int dotGap = DpiScale(hwnd, 5);
+        SolidBrush dotBr(GdipCol(ThemeWindowDarkerTextColor()));
+        for (int k = -1; k <= 1; k++) {
+            gfx.FillEllipse(&dotBr, mcx + (k * dotGap) - dotR, mcy - dotR, dotR * 2, dotR * 2);
+        }
     }
 }
 
@@ -634,7 +730,8 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return HTCLIENT;
             }
             mousePos = HwndScreenToClient(hwnd, mousePos);
-            if (previewButtonRect.Contains(mousePos) || addButtonRect.Contains(mousePos)) {
+            if (previewButtonRect.Contains(mousePos) || addButtonRect.Contains(mousePos) ||
+                menuButtonRect.Contains(mousePos)) {
                 return HTCLIENT;
             }
             tabState = TabStateFromMousePosition(mousePos);
@@ -726,7 +823,8 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_LBUTTONDOWN: {
-            if (inTitleBar && (previewButtonRect.Contains(mousePos) || addButtonRect.Contains(mousePos))) {
+            if (inTitleBar && (previewButtonRect.Contains(mousePos) || addButtonRect.Contains(mousePos) ||
+                               menuButtonRect.Contains(mousePos))) {
                 return 0;
             }
             tabHighlighted = tabUnderMouse;
@@ -774,6 +872,12 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (inTitleBar && addButtonRect.Contains(mousePos)) {
                 if (onNewTab.IsValid()) {
                     onNewTab.Call();
+                }
+                return 0;
+            }
+            if (inTitleBar && menuButtonRect.Contains(mousePos)) {
+                if (onTabMenu.IsValid()) {
+                    onTabMenu.Call();
                 }
                 return 0;
             }

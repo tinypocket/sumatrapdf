@@ -75,6 +75,9 @@ static UINT_PTR gNoDocWhitelist[] = {
     CmdToggleWindowsPreviewer,
     CmdToggleWindowsSearchFilter,
     CmdInvertColors,
+    // themes the app chrome, not the document: must stay available on the
+    // Library view where no document is loaded (the tab bar "..." offers it)
+    CmdToggleLightDarkTheme,
     CmdFavoriteToggle,
     CmdFavoriteShowInTab,
     CmdShowLog,

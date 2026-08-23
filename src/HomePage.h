@@ -55,6 +55,8 @@ void DrawHomePage(MainWindow* win, HDC hdc);
 void PickAnotherRandomPromotion();
 void HomePageOnVScroll(MainWindow* win, WPARAM wp);
 void HomePageOnMouseWheel(MainWindow* win, int delta, Point canvasPt);
+// one frame of Library scroll momentum; driven by kLibraryScrollTimerID
+void HomePageKineticTick(MainWindow* win);
 void HomePageOnMouseHWheel(MainWindow* win, int delta);
 bool HomePageOnLibraryResizeMouse(MainWindow* win, UINT msg, int x, int y);
 bool HomePageSetLibraryResizeCursor(MainWindow* win);

@@ -78,6 +78,89 @@ bool TouchBrowserFileTypeIsDownloadableDoc(FileType ft) {
     }
 }
 
+// --- content-type based detection ------------------------------------------
+// The URL is only a guess: a link like /download?id=42 or an extension-less
+// route serves a PDF with no ".pdf" anywhere in it, and WebView2 then renders it
+// in Edge's built-in PDF viewer instead of letting SumatraPDF open it. The HTTP
+// response's Content-Type is the authoritative answer, so the browser also
+// checks the main document's response header (SimpleBrowserWindow.cpp) and maps
+// it here.
+//
+// Only MIME types whose file type TouchBrowserFileTypeIsDownloadableDoc()
+// accepts are listed: text/html, images and friends must keep browsing
+// normally. Parameters after ';' (charset=...) are ignored, and matching is
+// case-insensitive because header values are.
+
+struct TouchBrowserMimeMap {
+    const char* mime;
+    FileType ft;
+    const char* ext;
+};
+
+// application/octet-stream is deliberately absent: servers use it for
+// everything, so it says nothing about the content.
+static const TouchBrowserMimeMap gTouchBrowserMimes[] = {
+    {"application/pdf", FileType::PDF, ".pdf"},
+    {"application/x-pdf", FileType::PDF, ".pdf"},
+    {"application/acrobat", FileType::PDF, ".pdf"},
+    {"application/vnd.pdf", FileType::PDF, ".pdf"},
+    {"text/pdf", FileType::PDF, ".pdf"},
+    {"application/postscript", FileType::PS, ".ps"},
+    {"application/vnd.ms-xpsdocument", FileType::Xps, ".xps"},
+    {"application/oxps", FileType::Xps, ".xps"},
+    {"image/vnd.djvu", FileType::DjVu, ".djvu"},
+    {"image/x-djvu", FileType::DjVu, ".djvu"},
+    {"application/vnd.ms-htmlhelp", FileType::Chm, ".chm"},
+    {"application/x-chm", FileType::Chm, ".chm"},
+    {"application/epub+zip", FileType::Epub, ".epub"},
+    {"application/x-mobipocket-ebook", FileType::Mobi, ".mobi"},
+    {"application/x-fictionbook+xml", FileType::Fb2, ".fb2"},
+    {"application/x-cbz", FileType::Cbz, ".cbz"},
+    {"application/vnd.comicbook+zip", FileType::Cbz, ".cbz"},
+    {"application/x-cbr", FileType::Cbr, ".cbr"},
+    {"application/vnd.comicbook-rar", FileType::Cbr, ".cbr"},
+};
+
+// "application/pdf; charset=binary" -> FileType::PDF. FileType::Unknown when the
+// type is not one the reader should take over (including an empty header).
+FileType TouchBrowserFileTypeFromContentType(Str contentType) {
+    if (!contentType) {
+        return FileType::Unknown;
+    }
+    Str s = contentType;
+    int semi = str::IndexOfChar(s, ';');
+    if (semi >= 0) {
+        s = Str(s.s, semi);
+    }
+    // header values may be padded; trim both ends
+    while (s.len > 0 && str::IsWs(s.s[0])) {
+        s = Str(s.s + 1, s.len - 1);
+    }
+    while (s.len > 0 && str::IsWs(s.s[s.len - 1])) {
+        s = Str(s.s, s.len - 1);
+    }
+    if (s.len == 0) {
+        return FileType::Unknown;
+    }
+    for (const TouchBrowserMimeMap& m : gTouchBrowserMimes) {
+        if (str::EqI(s, Str(m.mime))) {
+            return m.ft;
+        }
+    }
+    return FileType::Unknown;
+}
+
+// the extension to save a content-type-detected document under, since its URL
+// has none (that is the whole reason we fell back to the header)
+TempStr TouchBrowserExtForFileType(FileType ft) {
+    for (const TouchBrowserMimeMap& m : gTouchBrowserMimes) {
+        if (m.ft == ft) {
+            return str::DupTemp(Str(m.ext));
+        }
+    }
+    return str::DupTemp(StrL(".dat"));
+}
+
 // Short host label for a bookmark chip: strip the scheme, then the path
 // (everything from the first '/'), then a leading "www." so chips stay short.
 // E.g. "https://www.google.com/search" -> "google.com".

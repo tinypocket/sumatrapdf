@@ -16,9 +16,16 @@
 // the app's AnimateUI preference; animations are on only when both this and
 // the OS-wide setting allow them
 static bool gAnimAppEnabled = true;
+// the "more elaborate animations" sub-preference; only consulted when
+// gAnimAppEnabled is on, so the base setting always wins
+static bool gAnimElaborate = false;
 
 void AnimSetAppEnabled(bool enabled) {
     gAnimAppEnabled = enabled;
+}
+
+void AnimSetElaborate(bool enabled) {
+    gAnimElaborate = enabled;
 }
 
 bool AnimEnabled() {
@@ -30,6 +37,10 @@ bool AnimEnabled() {
         return true;
     }
     return enabled != FALSE;
+}
+
+bool AnimElaborate() {
+    return gAnimElaborate && AnimEnabled();
 }
 
 // Milliseconds off the monotonic performance counter. GetTickCount64 would do

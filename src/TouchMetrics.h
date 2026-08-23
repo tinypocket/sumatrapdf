@@ -73,6 +73,10 @@
 #define kTabPillMinDx 130
 #define kTabPillMaxDx 190
 #define kTabPillInactiveMaxDx 190
+// "larger tabs" setting: same strip, more room per label
+#define kTabPillLargeMinDx 180
+#define kTabPillLargeMaxDx 280
+#define kTitleBarTabsLargeDy 60
 #define kTabCloseDy 24 // close button inside a finger-sized title-bar tab
 #define kTabPillGap 4  // horizontal gap between two tab pills
 

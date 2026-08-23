@@ -31,6 +31,7 @@
 #include "Toolbar.h"
 #include "Rail.h"
 #include "Tabs.h"
+#include "Favorites.h"
 #include "TopBar.h"
 #include "Theme.h"
 #include "Translations.h"
@@ -123,6 +124,7 @@ static TopBarSlot gTopBarSlots[] = {
     {TopBarItem::ZoomLabel, TbIcon::None, kTopBarZoomEdit, 3, true, false},
     {TopBarItem::Button, TbIcon::ZoomIn, CmdZoomIn, 3, true, false},
     {TopBarItem::Button, TbIcon::SmartWidth, kTopBarSmartWidth, 4, true, false},
+    {TopBarItem::Button, TbIcon::RotateRight, CmdRotateRight, 4, true, false},
     // dark-mode toggles: Contrast = dark mode on the document pages,
     // Moon = light/dark theme for the app chrome (kept in both 2a and 4a)
     {TopBarItem::Button, TbIcon::Contrast, CmdInvertColors, 5, true, false},
@@ -214,6 +216,8 @@ struct TopBarWnd : Wnd {
     void CommitEdit();
     void CancelEdit();
     void AddCurrentPageBookmark();
+    // rebuilds savedPages/savedPageNames from the document's stored favorites
+    void RefreshSavedPages();
     Rect PreviewAnchorRect(const Rect& slotRect);
     void ShowPreview(HWND anchorHwnd, Rect anchorRect);
     void PinPreview(HWND anchorHwnd, Rect anchorRect);
@@ -313,20 +317,48 @@ void TopBarWnd::PinPreview(HWND anchorHwnd, Rect anchorRect) {
     }
 }
 
+// The tray is a view onto the document's favorites, not its own list: these
+// two vectors are a cache rebuilt from the store, so a page saved here shows up
+// in the Favorites pane and survives a restart.
+void TopBarWnd::RefreshSavedPages() {
+    // an in-flight rename holds an index into these vectors; rebuilding under
+    // it would retarget the edit at a different favorite
+    if (savedRenamingIdx >= 0) {
+        return;
+    }
+    savedPages.Reset();
+    savedPageNames.Reset();
+    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    Str path = (tab && !tab->IsAboutTab()) ? tab->filePath : Str{};
+    Vec<Favorite*>* favs = GetFileFavorites(path);
+    if (!favs) {
+        return;
+    }
+    for (Favorite* f : *favs) {
+        if (!f || f->isTemporary) {
+            continue;
+        }
+        savedPages.Append(f->pageNo);
+        savedPageNames.Append(f->name ? f->name : StrL(""));
+    }
+}
+
 void TopBarWnd::RemoveSavedPage(int pageNo) {
     int idx = savedPages.Find(pageNo);
-    if (idx >= 0) {
-        savedPages.RemoveAt(idx);
-        if (idx < len(savedPageNames)) {
-            savedPageNames.RemoveAt(idx);
-        }
-        if (savedRenamingIdx == idx) {
-            CancelSavedPageRename();
-        } else if (savedRenamingIdx > idx) {
-            savedRenamingIdx--;
-        }
-        HwndInvalidate(hwnd, false);
+    if (idx < 0) {
+        return;
     }
+    if (savedRenamingIdx == idx) {
+        CancelSavedPageRename();
+    } else if (savedRenamingIdx > idx) {
+        savedRenamingIdx--;
+    }
+    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    if (tab && tab->filePath) {
+        DelFavorite(tab->filePath, pageNo);
+    }
+    RefreshSavedPages();
+    HwndInvalidate(hwnd, false);
 }
 
 TempStr TopBarWnd::SavedPageLabelTemp(int idx) {
@@ -364,6 +396,10 @@ void TopBarWnd::CommitSavedPageRename() {
         name = StrL("");
     }
     savedPageNames.SetAt(savedRenamingIdx, name);
+    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    if (tab && tab->filePath && savedRenamingIdx < len(savedPages)) {
+        RenameFavorite(tab->filePath, savedPages[savedRenamingIdx], name);
+    }
     savedRenamingIdx = -1;
     savedRenameSelectAll = false;
     savedRenameText[0] = 0;
@@ -1538,13 +1574,17 @@ void TopBarWnd::AddCurrentPageBookmark() {
         return;
     }
     int page = win->ctrl->CurrentPageNo();
-    if (!savedPages.Contains(page)) {
-        savedPages.Append(page);
-        savedPageNames.Append(StrL(""));
-        // Keep the newly-created pill visible when the tray already overflows.
-        savedScrollX = INT_MAX;
-        HwndInvalidate(hwnd, false);
+    if (savedPages.Contains(page)) {
+        return;
     }
+    // titled by the ToC heading covering the page when there is one, so a saved
+    // page reads as its section name rather than "p. 12"
+    TempStr name = FavoriteDefaultNameTemp(win, page);
+    AddFavoriteQuiet(win, page, name);
+    RefreshSavedPages();
+    // Keep the newly-created pill visible when the tray already overflows.
+    savedScrollX = INT_MAX;
+    HwndInvalidate(hwnd, false);
 }
 
 LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {

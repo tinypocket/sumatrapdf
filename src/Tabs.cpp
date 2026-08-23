@@ -624,6 +624,64 @@ static void MainWindowNewTab(MainWindow* win) {
     HwndSendCommand(win->hwndFrame, CmdOpenFile);
 }
 
+int TouchTitleBarDy() {
+    if (!SettingsUseTabs()) {
+        return kTitleBarDy;
+    }
+    return TabsLargerTabs() ? kTitleBarTabsLargeDy : kTitleBarTabsDy;
+}
+
+// The "..." next to the + in the tab bar. Small, self-contained menu: the
+// things you reach for *about the tab strip itself*, which have no other home
+// in the touch chrome (the classic menu bar is hidden there).
+static void MainWindowTabMenu(MainWindow* win) {
+    if (!win || !win->tabsCtrl) {
+        return;
+    }
+    constexpr int kTabMenuReopen = 1;
+    constexpr int kTabMenuTheme = 2;
+    constexpr int kTabMenuLargerTabs = 3;
+
+    HMENU popup = CreatePopupMenu();
+    bool canReopen = RecentlyCloseDocumentsCount() > 0;
+    uint reopenFlags = MF_STRING | (canReopen ? MF_ENABLED : (MF_DISABLED | MF_GRAYED));
+    AppendMenuW(popup, reopenFlags, kTabMenuReopen, L"Reopen last closed tab	Ctrl+Shift+T");
+    AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
+    bool larger = gGlobalPrefs->largerTabs;
+    AppendMenuW(popup, MF_STRING | (larger ? MF_CHECKED : MF_UNCHECKED), kTabMenuLargerTabs, L"Larger tabs");
+    bool isDark = !IsLightColor(ThemeWindowBackgroundColor());
+    AppendMenuW(popup, MF_STRING | (isDark ? MF_CHECKED : MF_UNCHECKED), kTabMenuTheme, L"Dark mode");
+    MarkMenuOwnerDraw(popup);
+
+    Rect r = win->tabsCtrl->menuButtonRect;
+    Point pt = HwndClientToScreen(win->tabsCtrl->hwnd, Point{r.x, r.y + r.dy});
+    uint flags = TPM_RETURNCMD | TPM_LEFTBUTTON;
+    int cmdId = TrackPopupMenu(popup, flags, pt.x, pt.y, 0, win->hwndFrame, nullptr);
+    FreeMenuOwnerDrawInfoData(popup);
+    DestroyMenu(popup);
+
+    switch (cmdId) {
+        case kTabMenuReopen:
+            HwndSendCommand(win->hwndFrame, CmdReopenLastClosedFile);
+            break;
+        case kTabMenuTheme:
+            HwndSendCommand(win->hwndFrame, CmdToggleLightDarkTheme);
+            break;
+        case kTabMenuLargerTabs: {
+            gGlobalPrefs->largerTabs = !gGlobalPrefs->largerTabs;
+            TabsSetLargerTabs(gGlobalPrefs->largerTabs);
+            SaveSettings();
+            // the strip height changes, so the frame has to redo its caption
+            // layout, not just repaint the tabs
+            for (MainWindow* w : gWindows) {
+                ScheduleUiUpdate(w, kUiForceRelayout | kUiToolbarDirty);
+                HwndInvalidate(w->hwndFrame, true);
+            }
+            break;
+        }
+    }
+}
+
 static void MainWindowPreview(MainWindow* win) {
     ShowTouchDocumentPreview(win, win->tabsCtrl->hwnd, win->tabsCtrl->previewButtonRect);
 }
@@ -689,6 +747,7 @@ void CreateTabbar(MainWindow* win) {
     tabsCtrl->onContextMenu = MkFunc1Void(TabsContextMenu);
     tabsCtrl->onTabMigration = MkFunc1(MainWindowTabMigration, win);
     tabsCtrl->onNewTab = MkFunc0(MainWindowNewTab, win);
+    tabsCtrl->onTabMenu = MkFunc0(MainWindowTabMenu, win);
     tabsCtrl->onPreview = MkFunc0(MainWindowPreview, win);
     tabsCtrl->onPreviewHover = MkFunc1(MainWindowPreviewHover, win);
     tabsCtrl->Create(args);
@@ -785,6 +844,10 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate) {
         newTab->tooltip = nullptr;
         newTab->isPinned = true;
         newTab->canClose = true;
+        // In the touch chrome this tab hosts the Library/Web view, which the
+        // rail already represents - showing it in the strip too made the
+        // Library look like an open document. Classic chrome keeps its Home tab.
+        newTab->isHidden = IsTouchChrome(win);
         newTab->userData = (UINT_PTR)homeTab;
         int insertedIdx = tabs->InsertTab(idx, newTab, !deferUpdate);
         ReportIf(insertedIdx != 0);
@@ -828,6 +891,8 @@ bool SelectTouchHomeTab(MainWindow* win) {
     info->text = str::Dup(StrL("Home"));
     info->isPinned = true;
     info->canClose = true;
+    // only reached from the rail, i.e. the touch chrome: never a strip tab
+    info->isHidden = true;
     info->userData = (UINT_PTR)homeTab;
     // Inserting at index 0 selects the new native tab immediately. Save the
     // document model before that happens, then load the About model explicitly;

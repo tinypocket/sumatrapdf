@@ -40,6 +40,13 @@ struct WebViewEvents {
     // the page's document title changed (fires on load and on any later change).
     // The in-product browser labels its tabs with it.
     void (*documentTitleChanged)(void* ctx, Str title) = nullptr;
+    // The HTTP response for a TOP-LEVEL document navigation arrived (headers
+    // only; the body is still streaming). `contentType` is the raw Content-Type
+    // header, "" when the server sent none. This is the only reliable way to
+    // learn that a URL with no file extension is really a PDF - by the time the
+    // page has loaded, WebView2's built-in Edge PDF viewer is already showing
+    // it. Fires before the document renders, so the host can take over.
+    void (*mainDocumentResponse)(void* ctx, Str url, Str contentType) = nullptr;
     // maps an accelerator key press inside the webview to an app command id to
     // post (WM_COMMAND) to the top-level window, or 0 to leave it to the
     // webview, or kWebViewForwardKey to re-post the key itself. Lets the host
@@ -121,6 +128,11 @@ struct WebviewWnd : Wnd {
     void RebuildBindScript();
     void GoBack();
     void GoForward();
+    // the document's current title (""/empty when there is none). WebView2 only
+    // raises documentTitleChanged when the title CHANGES, so a reload of the
+    // same page never re-reports it - a host that dropped its copy on
+    // navigationStarting has to ask for it again once the load completes.
+    TempStr GetDocumentTitle() const;
     void SetZoomPercent(int zoom);
     int GetZoomPercent() const;
     bool CanGoBack() const;
@@ -167,6 +179,10 @@ struct WebviewWnd : Wnd {
     bool hasLastBounds = false;
     WStr userDataFolder;
     WStr resourceUriPrefix;
+    // URI of the top-level navigation currently in flight, kept only so
+    // WebResourceResponseReceived can recognise the main document's response
+    // when Chromium's Sec-Fetch-Dest header isn't there to say so
+    Str pendingNavUrl;
     WebViewResourceProvider resourceProvider;
     WebViewEvents events;
     bool forwardAppAccelerators = true;

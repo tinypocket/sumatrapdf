@@ -82,4 +82,30 @@ void BrowserUrl_UnitTests() {
     utassert(TouchBrowserFileTypeIsDownloadableDoc(FileType::Cbz));
     utassert(TouchBrowserFileTypeIsDownloadableDoc(FileType::Xps));
     utassert(TouchBrowserFileTypeIsDownloadableDoc(FileType::Chm));
+
+    // Content-Type based detection: the fallback for URLs with no ".pdf" in
+    // them (query-driven downloads, extension-less routes, redirects), which is
+    // what made a PDF link render inside Edge's built-in viewer instead of
+    // opening as a SumatraPDF tab.
+    utassert(TouchBrowserFileTypeFromContentType(StrL("application/pdf")) == FileType::PDF);
+    utassert(TouchBrowserFileTypeFromContentType(StrL("APPLICATION/PDF")) == FileType::PDF);
+    utassert(TouchBrowserFileTypeFromContentType(StrL("application/pdf; charset=binary")) == FileType::PDF);
+    utassert(TouchBrowserFileTypeFromContentType(StrL("  application/pdf  ")) == FileType::PDF);
+    utassert(TouchBrowserFileTypeFromContentType(StrL("application/epub+zip")) == FileType::Epub);
+    utassert(TouchBrowserFileTypeFromContentType(StrL("image/vnd.djvu")) == FileType::DjVu);
+    // ordinary web content must never be taken over
+    utassert(TouchBrowserFileTypeFromContentType(StrL("text/html")) == FileType::Unknown);
+    utassert(TouchBrowserFileTypeFromContentType(StrL("text/html; charset=utf-8")) == FileType::Unknown);
+    utassert(TouchBrowserFileTypeFromContentType(StrL("image/png")) == FileType::Unknown);
+    utassert(TouchBrowserFileTypeFromContentType(StrL("text/plain")) == FileType::Unknown);
+    utassert(TouchBrowserFileTypeFromContentType(StrL("application/json")) == FileType::Unknown);
+    // octet-stream says nothing: servers use it for everything
+    utassert(TouchBrowserFileTypeFromContentType(StrL("application/octet-stream")) == FileType::Unknown);
+    utassert(TouchBrowserFileTypeFromContentType(StrL("")) == FileType::Unknown);
+    utassert(TouchBrowserFileTypeFromContentType(Str()) == FileType::Unknown);
+    // every mapped type is one the browser is allowed to pull out, and has an
+    // extension to save it under (its URL has none, or we would not be here)
+    utassert(TouchBrowserFileTypeIsDownloadableDoc(TouchBrowserFileTypeFromContentType(StrL("application/pdf"))));
+    utassert(str::Eq(TouchBrowserExtForFileType(FileType::PDF), StrL(".pdf")));
+    utassert(str::Eq(TouchBrowserExtForFileType(FileType::Epub), StrL(".epub")));
 }

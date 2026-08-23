@@ -4645,6 +4645,35 @@ bool MaybeSaveAnnotations(WindowTab* tab) {
     return true;
 }
 
+static Kind kNotifTabClosed = "tabClosed";
+
+// Closing a tab is one tap on a small target, so it gets hit by accident.
+// Offer a few seconds to take it back. The link runs CmdReopenLastClosedFile,
+// which pops the same stack RememberRecentlyClosedDocument just pushed onto,
+// so this is the existing Ctrl+Shift+T with a visible affordance.
+static void ShowTabClosedUndoToast(MainWindow* win, WindowTab* tab) {
+    if (!win || !tab || tab->IsAboutTab() || !tab->filePath) {
+        return;
+    }
+    // only the touch chrome closes tabs with a finger; the classic chrome has
+    // its own habits and shouldn't grow a toast on every close
+    if (!IsTouchChrome(win)) {
+        return;
+    }
+    TempStr name = path::GetBaseNameTemp(tab->filePath);
+    NotificationCreateArgs args;
+    args.hwndParent = win->hwndCanvas;
+    args.groupId = kNotifTabClosed;
+    args.timeoutMs = kNotifDefaultTimeOut; // 3 seconds, as asked
+    args.corner = NotifCorner::BottomLeft;
+    // ParseTip link syntax is markdown [text](target), not HTML; a "Cmd..."
+    // target is resolved to a command id and sent to the frame on click
+    args.msg = fmt("Closed %s   [Undo](CmdReopenLastClosedFile)", name);
+    // a second close replaces the first toast rather than stacking
+    RemoveNotificationsForGroup(win->hwndCanvas, kNotifTabClosed);
+    ShowNotification(args);
+}
+
 void CloseTab(WindowTab* tab, bool quitIfLast) {
     if (!tab) {
         return;
@@ -4682,6 +4711,10 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
     if (!IsMainWindowValid(win)) {
         return;
     }
+
+    // past every "don't actually close" bail-out above, so the tab really is
+    // going away and offering undo can't contradict what happened
+    ShowTabClosedUndoToast(win, tab);
 
     // Stop eventual TTS reading
     StopReadAloudIfSourceTab(tab);
@@ -6112,7 +6145,7 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
             int tabHeight = GetTabbarHeight(win->hwndFrame);
             int captionHeight = tabHeight + 2;
             if (IsTouchChrome(win)) {
-                captionHeight = DpiScale(win->hwndFrame, SettingsUseTabs() ? kTitleBarTabsDy : kTitleBarDy);
+                captionHeight = DpiScale(win->hwndFrame, TouchTitleBarDy());
             }
             if (showingMenuBar) {
                 int menuBarDy = GetMenuBarRebarHeight(win);
@@ -6131,7 +6164,7 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
                     // Tabs stay inside the title strip, exactly as they do
                     // while the menu is hidden. Revealing the classic menu
                     // adds only its own 32px row.
-                    int touchTitleDy = SettingsUseTabs() ? kTitleBarTabsDy : kTitleBarDy;
+                    int touchTitleDy = TouchTitleBarDy();
                     captionHeight = DpiScale(win->hwndFrame, touchTitleDy) + menuBarDy;
                 } else {
                     // menu bar row + optional tabs row

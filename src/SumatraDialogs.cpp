@@ -888,6 +888,9 @@ static INT_PTR CALLBACK Dialog_Settings_Proc(HWND hDlg, UINT msg, WPARAM wp, LPA
             EnableWindow(GetDlgItem(hDlg, IDC_CHECK_FOR_UPDATES), HasPermission(Perm::InternetAccess));
             CheckDlgButton(hDlg, IDC_REMEMBER_OPENED_FILES, prefs->rememberOpenedFiles ? BST_CHECKED : BST_UNCHECKED);
             CheckDlgButton(hDlg, IDC_ANIMATE_UI, prefs->animateUI ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hDlg, IDC_ELABORATE_ANIMATIONS, prefs->elaborateAnimations ? BST_CHECKED : BST_UNCHECKED);
+            // a sub-option of the checkbox above it: meaningless on its own
+            EnableWindow(GetDlgItem(hDlg, IDC_ELABORATE_ANIMATIONS), prefs->animateUI);
 
             HwndSetText(hDlg, _TRA("SumatraPDF Options"));
             HwndSetDlgItemText(hDlg, IDC_SECTION_VIEW, _TRA("View"));
@@ -901,6 +904,7 @@ static INT_PTR CALLBACK Dialog_Settings_Proc(HWND hDlg, UINT msg, WPARAM wp, LPA
             HwndSetDlgItemText(hDlg, IDC_CHECK_FOR_UPDATES, _TRA("Automatically check for &updates"));
             HwndSetDlgItemText(hDlg, IDC_REMEMBER_OPENED_FILES, _TRA("Remember &opened files"));
             HwndSetDlgItemText(hDlg, IDC_ANIMATE_UI, _TRA("&Animate buttons when clicked"));
+            HwndSetDlgItemText(hDlg, IDC_ELABORATE_ANIMATIONS, _TRA("Use more &elaborate animations"));
             HwndSetDlgItemText(hDlg, IDC_SECTION_INVERSESEARCH, _TRA("Set inverse search command line"));
             HwndSetDlgItemText(hDlg, IDC_CMDLINE_LABEL,
                                _TRA("Enter the command line to invoke when you double-click on the PDF document:"));
@@ -934,8 +938,10 @@ static INT_PTR CALLBACK Dialog_Settings_Proc(HWND hDlg, UINT msg, WPARAM wp, LPA
                     prefs->checkForUpdates = (BST_CHECKED == IsDlgButtonChecked(hDlg, IDC_CHECK_FOR_UPDATES));
                     prefs->rememberOpenedFiles = (BST_CHECKED == IsDlgButtonChecked(hDlg, IDC_REMEMBER_OPENED_FILES));
                     prefs->animateUI = (BST_CHECKED == IsDlgButtonChecked(hDlg, IDC_ANIMATE_UI));
-                    // push it down to wingui, which has no access to app prefs
+                    prefs->elaborateAnimations = (BST_CHECKED == IsDlgButtonChecked(hDlg, IDC_ELABORATE_ANIMATIONS));
+                    // push them down to wingui, which has no access to app prefs
                     AnimSetAppEnabled(prefs->animateUI);
+                    AnimSetElaborate(prefs->elaborateAnimations);
                     if (prefs->enableTeXEnhancements && CanAccessDisk()) {
                         TempStr tmp = HwndGetTextTemp(GetDlgItem(hDlg, IDC_CMDLINE));
                         str::ReplaceWithCopy(&prefs->inverseSearchCmdLine, tmp);
@@ -953,9 +959,18 @@ static INT_PTR CALLBACK Dialog_Settings_Proc(HWND hDlg, UINT msg, WPARAM wp, LPA
                 }
                     return TRUE;
 
+                case IDC_ANIMATE_UI: {
+                    // the "more elaborate" sub-option only means anything while
+                    // the base setting is on, so it follows it live
+                    bool animate = (BST_CHECKED == IsDlgButtonChecked(hDlg, IDC_ANIMATE_UI));
+                    EnableWindow(GetDlgItem(hDlg, IDC_ELABORATE_ANIMATIONS), animate);
+                }
+                    return TRUE;
+
                 case IDC_DEFAULT_SHOW_TOC:
                 case IDC_REMEMBER_STATE_PER_DOCUMENT:
                 case IDC_CHECK_FOR_UPDATES:
+                case IDC_ELABORATE_ANIMATIONS:
                     return TRUE;
             }
             break;

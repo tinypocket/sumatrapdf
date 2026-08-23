@@ -15,9 +15,16 @@ constexpr int kAnimMarkerMs = 160;
 constexpr uint kAnimTickMs = 16;
 
 bool AnimEnabled();
+// True only when AnimEnabled() AND the app's "more elaborate animations"
+// preference are both on. Surfaces that are deliberately static at the base
+// level (the browser chrome's hover/press states) ask this instead of
+// AnimEnabled(), so turning the sub-option off restores their old snap.
+bool AnimElaborate();
 // The app's own "animate UI" preference. wingui must not read app prefs, so the
 // app pushes it down here at startup and whenever the setting changes.
 void AnimSetAppEnabled(bool);
+// The app's "more elaborate animations" sub-preference, pushed down the same way
+void AnimSetElaborate(bool);
 double AnimNowMs();
 float AnimEaseOut(float t);
 COLORREF AnimLerpColor(COLORREF from, COLORREF to, float t);

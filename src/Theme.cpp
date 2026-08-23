@@ -1061,8 +1061,14 @@ COLORREF ThemeTouchSurfaceColor() {
 // as disabled at tab size - the file name in an inactive tab was hard to read -
 // so pull it most of the way back toward the normal text color. The selected
 // tab still stands out through its pill background and heavier weight.
+// Label color for an unselected tab. Muting it at all was the mistake: the
+// filename is the whole point of the tab, and an unselected tab has no pill
+// behind it, so it sits directly on the bar with less to separate it already.
+// Selection is signalled by the pill fill plus the heavier font (fSelected vs
+// fNormal), which is enough - so unselected labels get the full text color and
+// stay just as readable as the selected one.
 COLORREF ThemeTabInactiveTextColor() {
-    return BlendColors(ThemeWindowTextColor(), ThemeWindowDarkerTextColor(), 65);
+    return ThemeWindowTextColor();
 }
 
 COLORREF ThemeTextFieldColor() {

@@ -2459,8 +2459,10 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
 
     LoadSettings();
     UpdateGlobalPrefs(flags);
-    // wingui has no access to app prefs, so push the animation setting down
+    // wingui has no access to app prefs, so push the animation settings down
     AnimSetAppEnabled(gGlobalPrefs->animateUI);
+    AnimSetElaborate(gGlobalPrefs->elaborateAnimations);
+    TabsSetLargerTabs(gGlobalPrefs->largerTabs);
     if (gMyWindowWasEmbedded) {
         str::ReplaceWithCopy(&gGlobalPrefs->scrollbars, "windows");
     }

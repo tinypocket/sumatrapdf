@@ -2,6 +2,9 @@
    License: GPLv3 */
 
 int GetTabbarHeight(HWND, float factor = 1.f);
+// height of the touch chrome's title/tab strip, in unscaled px: depends on
+// whether tabs are shown at all and on the "larger tabs" setting
+int TouchTitleBarDy();
 
 void SaveCurrentWindowTab(MainWindow*);
 void LoadModelIntoTab(WindowTab*);
