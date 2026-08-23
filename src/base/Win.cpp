@@ -2700,8 +2700,22 @@ bool HwndIsVisible(HWND hwnd) {
     return ::IsWindowVisible(hwnd);
 }
 
+// this window's own WS_VISIBLE bit, regardless of whether its ancestors are
+// visible (unlike IsWindowVisible, which is false as soon as any of them is not)
+bool HwndIsStyleVisible(HWND hwnd) {
+    return bit::IsMaskSet(GetWindowLong(hwnd, GWL_STYLE), WS_VISIBLE);
+}
+
 void HwndSetVisible(HWND hwnd, bool visible) {
-    if (HwndIsVisible(hwnd) == visible) {
+    // the no-op check must look at this window's own WS_VISIBLE bit, not at
+    // IsWindowVisible(): that one is false whenever an ancestor is hidden, and
+    // then "hide me" looked like it was already done and was silently skipped.
+    // RelayoutFrame hits this every time: it sends the frame WM_SETREDRAW FALSE,
+    // which DefWindowProc implements by clearing the frame's WS_VISIBLE, so no
+    // child could be hidden for the rest of the relayout (the custom top bar
+    // stayed on screen over the Library view; issue: switching to Library with a
+    // document open hid the search box and the content header behind it).
+    if (HwndIsStyleVisible(hwnd) == visible) {
         return;
     }
     ShowWindow(hwnd, visible ? SW_SHOW : SW_HIDE);

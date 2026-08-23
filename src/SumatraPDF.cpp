@@ -6338,11 +6338,11 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     }
 
     if (win->hwndTouchSidebarCollapse) {
-        // Relayout suppresses redraw on the frame above. IsWindowVisible() is
-        // therefore false for every child while this code runs, so the
-        // HwndSetVisible() no-op optimization cannot be used to hide a stale
-        // edge control: update its own WS_VISIBLE bit unconditionally.
-        ShowWindow(win->hwndTouchSidebarCollapse, showTouchCollapse ? SW_SHOW : SW_HIDE);
+        // Relayout suppresses redraw on the frame above, so IsWindowVisible() is
+        // false for every child while this code runs. HwndSetVisible() compares
+        // the window's own WS_VISIBLE bit precisely so that hiding still works
+        // here (it used to silently do nothing).
+        HwndSetVisible(win->hwndTouchSidebarCollapse, showTouchCollapse);
         if (showTouchCollapse) {
             int dy = DpiScale(win->hwndFrame, kSidebarCollapseDy);
             Rect toggle{touchPanelX + win->sidebarDx - dy / 2,

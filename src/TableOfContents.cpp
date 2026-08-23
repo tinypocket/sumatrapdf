@@ -1821,12 +1821,13 @@ static void LayoutTocContainer(MainWindow* win) {
         SetWindowPos(win->hwndTocSticky, HWND_TOP, 0, bodyY, rc.dx, stickyDy, SWP_NOACTIVATE);
         bool bookmarks = win->touchPanelMode == TouchPanelMode::Bookmarks;
         bool search = win->touchPanelMode == TouchPanelMode::Search;
-        // Set the child WS_VISIBLE bits even when the whole panel is currently
-        // hidden. HwndSetVisible() uses IsWindowVisible(), which also examines
-        // ancestors and can incorrectly no-op here; the stale tree would then
-        // cover Search after opening it from Home or Library.
-        ShowWindow(win->tocFilterEdit->hwnd, bookmarks || search ? SW_SHOW : SW_HIDE);
-        ShowWindow(win->tocTreeView->hwnd, bookmarks ? SW_SHOW : SW_HIDE);
+        // Sets the child WS_VISIBLE bits even when the whole panel is currently
+        // hidden: HwndSetVisible() compares that bit rather than
+        // IsWindowVisible() (which also examines ancestors and would no-op
+        // here, leaving the stale tree covering Search after opening it from
+        // Home or Library).
+        HwndSetVisible(win->tocFilterEdit->hwnd, bookmarks || search);
+        HwndSetVisible(win->tocTreeView->hwnd, bookmarks);
         UpdateTocStickyHeader(win);
         return;
     }

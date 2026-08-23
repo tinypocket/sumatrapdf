@@ -72,6 +72,7 @@ bool HwndIsMouseOverRect(HWND hwnd, const Rect& r);
 HWND HwndSetFocus(HWND hwnd);
 bool HwndIsFocused(HWND);
 bool HwndIsVisible(HWND hwnd);
+bool HwndIsStyleVisible(HWND hwnd);
 void HwndSetVisible(HWND hwnd, bool visible);
 void HwndShow(HWND hwnd);
 void HwndHide(HWND hwnd);
