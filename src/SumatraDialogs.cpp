@@ -3,6 +3,7 @@
 
 #include "base/Base.h"
 #include "wingui/DialogSizer.h"
+#include "wingui/Anim.h"
 #include "base/Win.h"
 
 #include "Settings.h"
@@ -886,6 +887,7 @@ static INT_PTR CALLBACK Dialog_Settings_Proc(HWND hDlg, UINT msg, WPARAM wp, LPA
             CheckDlgButton(hDlg, IDC_CHECK_FOR_UPDATES, prefs->checkForUpdates ? BST_CHECKED : BST_UNCHECKED);
             EnableWindow(GetDlgItem(hDlg, IDC_CHECK_FOR_UPDATES), HasPermission(Perm::InternetAccess));
             CheckDlgButton(hDlg, IDC_REMEMBER_OPENED_FILES, prefs->rememberOpenedFiles ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hDlg, IDC_ANIMATE_UI, prefs->animateUI ? BST_CHECKED : BST_UNCHECKED);
 
             HwndSetText(hDlg, _TRA("SumatraPDF Options"));
             HwndSetDlgItemText(hDlg, IDC_SECTION_VIEW, _TRA("View"));
@@ -898,6 +900,7 @@ static INT_PTR CALLBACK Dialog_Settings_Proc(HWND hDlg, UINT msg, WPARAM wp, LPA
             HwndSetDlgItemText(hDlg, IDC_USE_TABS, _TRA("Use &tabs"));
             HwndSetDlgItemText(hDlg, IDC_CHECK_FOR_UPDATES, _TRA("Automatically check for &updates"));
             HwndSetDlgItemText(hDlg, IDC_REMEMBER_OPENED_FILES, _TRA("Remember &opened files"));
+            HwndSetDlgItemText(hDlg, IDC_ANIMATE_UI, _TRA("&Animate buttons when clicked"));
             HwndSetDlgItemText(hDlg, IDC_SECTION_INVERSESEARCH, _TRA("Set inverse search command line"));
             HwndSetDlgItemText(hDlg, IDC_CMDLINE_LABEL,
                                _TRA("Enter the command line to invoke when you double-click on the PDF document:"));
@@ -930,6 +933,9 @@ static INT_PTR CALLBACK Dialog_Settings_Proc(HWND hDlg, UINT msg, WPARAM wp, LPA
                     prefs->useTabs = (BST_CHECKED == IsDlgButtonChecked(hDlg, IDC_USE_TABS));
                     prefs->checkForUpdates = (BST_CHECKED == IsDlgButtonChecked(hDlg, IDC_CHECK_FOR_UPDATES));
                     prefs->rememberOpenedFiles = (BST_CHECKED == IsDlgButtonChecked(hDlg, IDC_REMEMBER_OPENED_FILES));
+                    prefs->animateUI = (BST_CHECKED == IsDlgButtonChecked(hDlg, IDC_ANIMATE_UI));
+                    // push it down to wingui, which has no access to app prefs
+                    AnimSetAppEnabled(prefs->animateUI);
                     if (prefs->enableTeXEnhancements && CanAccessDisk()) {
                         TempStr tmp = HwndGetTextTemp(GetDlgItem(hDlg, IDC_CMDLINE));
                         str::ReplaceWithCopy(&prefs->inverseSearchCmdLine, tmp);

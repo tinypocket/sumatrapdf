@@ -1347,6 +1347,12 @@ const globalPrefs: Field[] = [
   ).ver("3.8"),
   // saved & honored, but hidden from the advanced settings dialog (edited via
   // the "Automatically check for updates" checkbox in Options instead)
+  field(
+    "AnimateUI",
+    Bool,
+    true,
+    "if true, buttons animate briefly when pressed or hovered; turn off for a completely static UI",
+  ).ver("3.8"),
   field("CheckForUpdates", Bool, true, "if true, check at startup whether an update is available").internal(),
   emptyLine(),
   comment("Settings below are not recognized by the current version"),

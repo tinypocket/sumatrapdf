@@ -996,6 +996,10 @@ BrowserBookmarks =
 ; later (introduced in version 3.8)
 BrowserDownloads =
 
+; if true, buttons animate briefly when pressed or hovered; turn off for a
+; completely static UI (introduced in version 3.8)
+AnimateUI = true
+
 ; if true, check at startup whether an update is available
 CheckForUpdates = true
 ```

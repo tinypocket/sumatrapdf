@@ -13,7 +13,18 @@
 // button, a press starts), never per frame, and a cache would have to be
 // invalidated from a WM_SETTINGCHANGE handler that the animating windows -
 // which are child windows - never see.
+// the app's AnimateUI preference; animations are on only when both this and
+// the OS-wide setting allow them
+static bool gAnimAppEnabled = true;
+
+void AnimSetAppEnabled(bool enabled) {
+    gAnimAppEnabled = enabled;
+}
+
 bool AnimEnabled() {
+    if (!gAnimAppEnabled) {
+        return false;
+    }
     BOOL enabled = TRUE;
     if (!SystemParametersInfo(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0)) {
         return true;

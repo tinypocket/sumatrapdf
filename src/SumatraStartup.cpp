@@ -22,6 +22,7 @@
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
+#include "wingui/Anim.h"
 
 #include "Settings.h"
 #include "DisplayMode.h"
@@ -2458,6 +2459,8 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
 
     LoadSettings();
     UpdateGlobalPrefs(flags);
+    // wingui has no access to app prefs, so push the animation setting down
+    AnimSetAppEnabled(gGlobalPrefs->animateUI);
     if (gMyWindowWasEmbedded) {
         str::ReplaceWithCopy(&gGlobalPrefs->scrollbars, "windows");
     }

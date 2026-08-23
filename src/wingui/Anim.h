@@ -15,6 +15,9 @@ constexpr int kAnimMarkerMs = 160;
 constexpr uint kAnimTickMs = 16;
 
 bool AnimEnabled();
+// The app's own "animate UI" preference. wingui must not read app prefs, so the
+// app pushes it down here at startup and whenever the setting changes.
+void AnimSetAppEnabled(bool);
 double AnimNowMs();
 float AnimEaseOut(float t);
 COLORREF AnimLerpColor(COLORREF from, COLORREF to, float t);
