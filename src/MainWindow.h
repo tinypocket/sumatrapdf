@@ -136,6 +136,8 @@ enum class TouchPanelMode {
     Search,
     Annotations,
     Attachments,
+    // "PDF favorites": saved pages across every document, grouped by file
+    Favorites,
 };
 
 enum class TouchView {

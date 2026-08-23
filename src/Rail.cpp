@@ -68,6 +68,11 @@ static RailItem gRailItems[] = {
     {TbIcon::Search, TouchPanelMode::Search, TouchView::Doc, 0, false, false},
     {TbIcon::Annotation, TouchPanelMode::Annotations, TouchView::Doc, 0, false, false},
     {TbIcon::Attachment, TouchPanelMode::Attachments, TouchView::Doc, 0, false, false},
+    // "PDF favorites": saved pages across EVERY document, grouped by file, so
+    // a favorite in another PDF is one tap away (it opens that PDF at that
+    // page). Lives in the document sidebar, so like the other panel items it
+    // needs some document open to be shown at all.
+    {TbIcon::Bookmark, TouchPanelMode::Favorites, TouchView::Doc, 0, false, false},
     // Recent used to be a rail item of its own; it's now the Library's first
     // sidebar row, so the Library is the single browsing destination
     {TbIcon::Library, TouchPanelMode::Bookmarks, TouchView::Library, 0, true, false},

@@ -1190,6 +1190,32 @@ void RenameFavorite(Str filePath, int pageNo, Str newName) {
     SaveSettings();
 }
 
+// Every file that has at least one favorite, most-recently-used first. Backs
+// the "PDF favorites" panel, which groups by document so a favorite in a file
+// you do not currently have open is still one tap away.
+void GetFilesWithFavorites(Vec<FileState*>& out) {
+    out.Reset();
+    if (!gFileHistory.states) {
+        return;
+    }
+    int n = len(*gFileHistory.states);
+    for (int i = 0; i < n; i++) {
+        FileState* fs = (*gFileHistory.states)[i];
+        if (!fs || !fs->favorites || fs->isMissing) {
+            continue;
+        }
+        int nFav = 0;
+        for (Favorite* f : *fs->favorites) {
+            if (f && !f->isTemporary) {
+                nFav++;
+            }
+        }
+        if (nFav > 0) {
+            out.Append(fs);
+        }
+    }
+}
+
 // the favorites of one document, in sorted order; nullptr when it has none
 Vec<Favorite*>* GetFileFavorites(Str filePath) {
     if (!filePath) {

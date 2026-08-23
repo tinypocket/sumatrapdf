@@ -1229,6 +1229,7 @@ if not exist ..\.work\translations.txt type nul &gt; ..\.work\translations.txt
     <ClInclude Include="..\src\ImageSaveCropResize.h" />
     <ClInclude Include="..\src\Installer.h" />
     <ClInclude Include="..\src\JxlReader.h" />
+    <ClInclude Include="..\src\KineticScroll.h" />
     <ClInclude Include="..\src\LinkFollow.h" />
     <ClInclude Include="..\src\MainWindow.h" />
     <ClInclude Include="..\src\MarkdownModel.h" />
@@ -1249,7 +1250,6 @@ if not exist ..\.work\translations.txt type nul &gt; ..\.work\translations.txt
     <ClInclude Include="..\src\PngOptimizer.h" />
     <ClInclude Include="..\src\Print.h" />
     <ClInclude Include="..\src\ProgressUpdateUI.h" />
-    <ClInclude Include="..\src\KineticScroll.h" />
     <ClInclude Include="..\src\Rail.h" />
     <ClInclude Include="..\src\ReadAloudHighlight.h" />
     <ClInclude Include="..\src\ReadAloudPlaybackBar.h" />
@@ -1433,6 +1433,7 @@ if not exist ..\.work\translations.txt type nul &gt; ..\.work\translations.txt
     <ClCompile Include="..\src\Installer.cpp" />
     <ClCompile Include="..\src\InstallerCommon.cpp" />
     <ClCompile Include="..\src\JxlReader.cpp" />
+    <ClCompile Include="..\src\KineticScroll.cpp" />
     <ClCompile Include="..\src\LinkFollow.cpp" />
     <ClCompile Include="..\src\MainWindow.cpp" />
     <ClCompile Include="..\src\MarkdownModel.cpp" />
@@ -1462,7 +1463,6 @@ if not exist ..\.work\translations.txt type nul &gt; ..\.work\translations.txt
     <ClCompile Include="..\src\PdfTools.cpp" />
     <ClCompile Include="..\src\PngOptimizer.cpp" />
     <ClCompile Include="..\src\Print.cpp" />
-    <ClCompile Include="..\src\KineticScroll.cpp" />
     <ClCompile Include="..\src\Rail.cpp" />
     <ClCompile Include="..\src\ReadAloudHighlight.cpp" />
     <ClCompile Include="..\src\ReadAloudPlaybackBar.cpp" />

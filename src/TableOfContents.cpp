@@ -1846,6 +1846,8 @@ static Str TouchPanelTitle(TouchPanelMode mode) {
             return StrL("Annotations");
         case TouchPanelMode::Attachments:
             return StrL("Attachments");
+        case TouchPanelMode::Favorites:
+            return StrL("Favorites");
         default:
             return StrL("Bookmarks");
     }
@@ -2008,6 +2010,41 @@ static void CollectAttachmentItems(TocItem* item, Vec<TocItem*>& items) {
     }
 }
 
+// A flattened row list for the favorites panel: a header row per document
+// followed by that document's saved pages. Paint, hit-testing and the scroll
+// extent all build it the same way, so they cannot disagree about what sits
+// at a given y (the class of bug that made search results untappable).
+struct TouchFavRow {
+    bool isHeader = false;
+    FileState* fs = nullptr;
+    Favorite* fav = nullptr; // null on a header row
+};
+
+static void CollectTouchFavRows(Vec<TouchFavRow>& rows) {
+    rows.Reset();
+    Vec<FileState*> files;
+    GetFilesWithFavorites(files);
+    for (FileState* fs : files) {
+        TouchFavRow hdr;
+        hdr.isHeader = true;
+        hdr.fs = fs;
+        rows.Append(hdr);
+        for (Favorite* f : *fs->favorites) {
+            if (!f || f->isTemporary) {
+                continue;
+            }
+            TouchFavRow r;
+            r.fs = fs;
+            r.fav = f;
+            rows.Append(r);
+        }
+    }
+}
+
+static int TouchFavRowsTop(MainWindow* win) {
+    return DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) - win->touchPanelScrollY;
+}
+
 static int TouchPanelMaxScroll(MainWindow* win) {
     Rect client = HwndClientRect(win->hwndTocBox);
     int contentBottom = client.dy;
@@ -2026,6 +2063,12 @@ static int TouchPanelMaxScroll(MainWindow* win) {
         EngineMupdfGetAnnotations(win->AsFixed()->GetEngine(), annotations);
         contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) +
                         len(annotations) * DpiScale(win->hwndTocBox, TouchSidebarListRowDy()) +
+                        DpiScale(win->hwndTocBox, 12);
+    } else if (win->touchPanelMode == TouchPanelMode::Favorites) {
+        Vec<TouchFavRow> rows;
+        CollectTouchFavRows(rows);
+        contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) +
+                        len(rows) * DpiScale(win->hwndTocBox, TouchSidebarListRowDy()) +
                         DpiScale(win->hwndTocBox, 12);
     } else if (win->touchPanelMode == TouchPanelMode::Attachments && win->ctrl) {
         Vec<TocItem*> attachments;
@@ -2148,6 +2191,60 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
         if (last > first) {
             return;
         }
+    }
+    if (mode == TouchPanelMode::Favorites) {
+        Vec<TouchFavRow> rows;
+        CollectTouchFavRows(rows);
+        HWND hw = win->hwndTocBox;
+        int rowDy = DpiScale(hw, TouchSidebarListRowDy());
+        int y0 = TouchFavRowsTop(win);
+        if (len(rows) == 0) {
+            TempStr empty = str::DupTemp(StrL("No saved pages yet. Tap the bookmark button to save one."));
+            Rect r{DpiScale(hw, 16), y0 + DpiScale(hw, 8), rc.dx - DpiScale(hw, 32), rowDy * 2};
+            HFONT f = HdcGetUiFont(hdc, kPanelRowFontSize);
+            ScopedSelectObject sel(hdc, f);
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            HdcDrawText(hdc, empty, r, DT_LEFT | DT_WORDBREAK);
+            return;
+        }
+        WindowTab* curTab = win->CurrentTab();
+        Str curPath = (curTab && !curTab->IsAboutTab()) ? curTab->filePath : Str{};
+        for (int i = 0; i < len(rows); i++) {
+            const TouchFavRow& row = rows[i];
+            Rect r{DpiScale(hw, 12), y0 + i * rowDy, rc.dx - DpiScale(hw, 24), rowDy};
+            if (r.y + r.dy < 0 || r.y > rc.dy) {
+                continue; // scrolled out of view
+            }
+            if (row.isHeader) {
+                // the document this group belongs to; the open one is marked
+                TempStr name = path::GetBaseNameTemp(row.fs->filePath);
+                bool isCurrent = curPath && str::Eq(row.fs->filePath, curPath);
+                HFONT f = HdcGetUiFont(hdc, kPanelSubFontSize, kFontWeightStrong);
+                ScopedSelectObject sel(hdc, f);
+                SetTextColor(hdc, isCurrent ? ThemeWindowLinkColor() : ThemeWindowDarkerTextColor());
+                Rect tr = r;
+                tr.x += DpiScale(hw, 4);
+                HdcDrawText(hdc, name, tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                continue;
+            }
+            // one saved page: its name, and the page number on the right
+            TempStr label = FavReadableNameTemp(row.fav);
+            HFONT f = HdcGetUiFont(hdc, kPanelRowFontSize);
+            ScopedSelectObject sel(hdc, f);
+            SetTextColor(hdc, ThemeWindowTextColor());
+            Rect tr = r;
+            tr.x += DpiScale(hw, 20);
+            tr.dx -= DpiScale(hw, 20 + 56);
+            HdcDrawText(hdc, label, tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            TempStr pageStr = fmt("%d", row.fav->pageNo);
+            HFONT fp = HdcGetUiFont(hdc, kPanelPageFontSize);
+            ScopedSelectObject selp(hdc, fp);
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            Rect pr{r.x + r.dx - DpiScale(hw, 52), r.y, DpiScale(hw, 44), r.dy};
+            HdcDrawText(hdc, pageStr, pr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        }
+        return;
     }
     if (mode == TouchPanelMode::Annotations && win->AsFixed()) {
         Vec<Annotation*> annotations;
@@ -2330,6 +2427,24 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
         win->tocFilterEdit->SetText({});
         HwndSetFocus(win->tocFilterEdit->hwnd);
         return true;
+    }
+    if (win->touchPanelMode == TouchPanelMode::Favorites) {
+        Vec<TouchFavRow> rows;
+        CollectTouchFavRows(rows);
+        int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
+        int y0 = TouchFavRowsTop(win);
+        // same origin and row height the paint pass used, so the row under the
+        // finger is the row that was drawn there
+        if (rowDy > 0 && pt.y >= y0) {
+            int idx = (pt.y - y0) / rowDy;
+            if (idx >= 0 && idx < len(rows) && !rows[idx].isHeader) {
+                // GoToFavorite opens the document first when it is not the
+                // current one, so a favorite in another PDF just works
+                GoToFavorite(win, rows[idx].fs, rows[idx].fav);
+                return true;
+            }
+        }
+        return false;
     }
     if (win->touchPanelMode == TouchPanelMode::Thumbnails && win->ctrl) {
         int count = win->ctrl->PageCount();

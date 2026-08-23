@@ -243,6 +243,9 @@
     <ClInclude Include="..\src\JxlReader.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\KineticScroll.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\LinkFollow.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -301,9 +304,6 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\ProgressUpdateUI.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\KineticScroll.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\Rail.h">
@@ -746,6 +746,9 @@
     <ClCompile Include="..\src\JxlReader.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\KineticScroll.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\LinkFollow.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -831,9 +834,6 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Print.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\KineticScroll.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Rail.cpp">

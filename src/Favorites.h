@@ -35,6 +35,7 @@ TempStr FavoriteDefaultNameTemp(MainWindow* win, int pageNo);
 void AddFavoriteQuiet(MainWindow* win, int pageNo, Str name);
 void RenameFavorite(Str filePath, int pageNo, Str newName);
 Vec<Favorite*>* GetFileFavorites(Str filePath);
+void GetFilesWithFavorites(Vec<FileState*>& out);
 void RebuildFavMenu(MainWindow* win, HMENU menu);
 void CreateFavorites(MainWindow* win);
 void ToggleFavorites(MainWindow* win); // sidebar

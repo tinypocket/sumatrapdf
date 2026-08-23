@@ -426,6 +426,10 @@ constexpr int kTbProgFinishMs = 180;
 constexpr int kTbProgFadeMs = 280;
 constexpr float kTbProgCreepTo = 0.85f;
 constexpr UINT_PTR kTbProgTimerId = 71;
+// hover cross-fade / press sink, only while ElaborateAnimations is on
+constexpr UINT_PTR kTbHoverTimerId = 72;
+// how deep a pressed chrome button sinks, matching the top bar
+constexpr int kTbPressInset = 2;
 
 // nav-row escape hatch shown when the page turns out to be a document
 #define kTbOpenDocLabel "Open in SumatraPDF"
@@ -2496,6 +2500,25 @@ struct TbChromeWnd : Wnd {
     AnimVal progVal;  // 0..1 of the bar's width
     AnimVal progFade; // 1 while loading, eases to 0 after the bar hits 100%
     TbProgState progState = TbProgState::Idle;
+
+    // --- ElaborateAnimations: hover cross-fade + press sink ---------------
+    // Two hover values, not one: when the pointer moves from one button
+    // straight to the next, the button being left has to fade out while the
+    // new one fades in. A single value would make the old one snap.
+    AnimTimer hoverTimer;
+    TbHit animHot;     // the button hotIn applies to
+    AnimVal hotIn;     // 0 -> 1 as the pointer arrives
+    TbHit animPrevHot; // the button hotOut applies to
+    AnimVal hotOut;    // 1 -> 0 as the pointer leaves
+    TbHit animPressed;
+    AnimVal pressVal;
+
+    void SetHotAnimated(const TbHit& next);
+    void SetPressedAnimated(const TbHit& next);
+    void OnHoverTick();
+    // 0..1 hover / press weight for one part, whatever the animation state
+    float HoverAmount(TbPart part, int idx) const;
+    float PressAmount(TbPart part, int idx) const;
 };
 
 // Enter in the URL field navigates (prefixing https:// when no scheme is typed)
@@ -2534,6 +2557,7 @@ TbChromeWnd::TbChromeWnd() {
 TbChromeWnd::~TbChromeWnd() {
     // before ~Wnd tears the window down, so no timer outlives the object
     progTimer.Stop();
+    hoverTimer.Stop();
     delete tooltip;
     if (urlBrush) {
         DeleteObject(urlBrush);
@@ -2566,6 +2590,7 @@ bool TbChromeWnd::Create(TouchBrowser* browser) {
     SendMessageW(hwndUrl, WM_SETFONT, (WPARAM)tb->hFont, TRUE);
     SetWindowSubclass(hwndUrl, TbUrlEditProc, NextSubclassId(), (DWORD_PTR)tb);
     progTimer.Init(hwnd, kTbProgTimerId);
+    hoverTimer.Init(hwnd, kTbHoverTimerId);
     return true;
 }
 
@@ -2664,6 +2689,76 @@ void TbChromeWnd::SyncProgressToActiveTab() {
 // One frame. Invalidates only the 3px strip and stops the timer the moment
 // nothing is moving - including while a slow page is still loading, where the
 // bar simply rests at kTbProgCreepTo until the navigation ends.
+// Hover and press are two stops on one colour path (rest -> hover -> pressed),
+// the same idiom the rail and top bar use, so the whole chrome feels of a piece.
+float TbChromeWnd::HoverAmount(TbPart part, int idx) const {
+    if (!AnimElaborate()) {
+        return (hot.part == part && hot.idx == idx) ? 1.0f : 0.0f;
+    }
+    if (animHot.part == part && animHot.idx == idx) {
+        return hotIn.Value();
+    }
+    if (animPrevHot.part == part && animPrevHot.idx == idx) {
+        return hotOut.Value();
+    }
+    // hot but never animated (e.g. the setting was switched on mid-hover)
+    return (hot.part == part && hot.idx == idx) ? 1.0f : 0.0f;
+}
+
+float TbChromeWnd::PressAmount(TbPart part, int idx) const {
+    bool isPressed = pressed.part == part && pressed.idx == idx;
+    if (!AnimElaborate()) {
+        return isPressed ? 1.0f : 0.0f;
+    }
+    if (animPressed.part == part && animPressed.idx == idx) {
+        return pressVal.Value();
+    }
+    return isPressed ? 1.0f : 0.0f;
+}
+
+void TbChromeWnd::SetHotAnimated(const TbHit& next) {
+    if (TbSameHit(hot, next)) {
+        return;
+    }
+    if (AnimElaborate()) {
+        // the button being left fades out from wherever it currently is, so
+        // sweeping across a row leaves a trail rather than a series of snaps
+        animPrevHot = hot;
+        hotOut.Set(HoverAmount(hot.part, hot.idx));
+        hotOut.SetTarget(0.0f, kAnimHoverMs);
+        animHot = next;
+        hotIn.Set(HoverAmount(next.part, next.idx));
+        hotIn.SetTarget(next.part == TbPart::None ? 0.0f : 1.0f, kAnimHoverMs);
+        hoverTimer.Start();
+    }
+    hot = next;
+    UpdateTooltip(hot);
+    HwndInvalidate(hwnd, false);
+}
+
+void TbChromeWnd::SetPressedAnimated(const TbHit& next) {
+    if (TbSameHit(pressed, next)) {
+        return;
+    }
+    if (AnimElaborate()) {
+        bool down = next.part != TbPart::None;
+        animPressed = down ? next : pressed;
+        pressVal.Set(PressAmount(animPressed.part, animPressed.idx));
+        pressVal.SetTarget(down ? 1.0f : 0.0f, down ? kAnimPressMs : kAnimPressReleaseMs);
+        hoverTimer.Start();
+    }
+    pressed = next;
+    HwndInvalidate(hwnd, false);
+}
+
+void TbChromeWnd::OnHoverTick() {
+    bool moving = hotIn.IsAnimating() || hotOut.IsAnimating() || pressVal.IsAnimating();
+    HwndInvalidate(hwnd, false);
+    if (!moving) {
+        hoverTimer.Stop();
+    }
+}
+
 void TbChromeWnd::OnProgTick() {
     bool running = false;
     switch (progState) {
@@ -2886,13 +2981,19 @@ void TbChromeWnd::Draw(HDC hdc) {
 
     Layout(hdc);
 
-    auto btnBg = [&](TbPart part, int idx) {
-        bool isHot = hot.part == part && hot.idx == idx;
-        bool isPressed = pressed.part == part && pressed.idx == idx;
-        if (isPressed) {
-            return ThemeEdgeColor();
+    // rest -> hover -> pressed as one colour path. With ElaborateAnimations off
+    // the weights are hard 0 or 1, which reproduces the original snap exactly.
+    auto btnBg = [&](TbPart part, int idx) -> COLORREF {
+        float h = HoverAmount(part, idx);
+        float pr = PressAmount(part, idx);
+        COLORREF c = hotBg;
+        if (h > 0.0f) {
+            c = AnimLerpColor(hotBg, ThemeDisabledEdgeColor(), h);
         }
-        return isHot ? ThemeDisabledEdgeColor() : hotBg;
+        if (pr > 0.0f) {
+            c = AnimLerpColor(c, ThemeEdgeColor(), pr);
+        }
+        return c;
     };
 
     // --- row 1: tab strip
@@ -3153,6 +3254,10 @@ LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_ERASEBKGND) {
         return TRUE;
     }
+    if (msg == WM_TIMER && wp == kTbHoverTimerId) {
+        OnHoverTick();
+        return 0;
+    }
     if (msg == WM_TIMER && wp == kTbProgTimerId) {
         OnProgTick();
         return 0;
@@ -3179,11 +3284,7 @@ LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_MOUSEMOVE) {
         Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         TbHit h = HitTest(pt);
-        if (!TbSameHit(h, hot)) {
-            hot = h;
-            UpdateTooltip(h);
-            HwndInvalidate(hw, false);
-        }
+        SetHotAnimated(h);
         TRACKMOUSEEVENT tme{};
         tme.cbSize = sizeof(tme);
         tme.dwFlags = TME_LEAVE;
@@ -3193,9 +3294,7 @@ LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_MOUSELEAVE) {
         if (hot.part != TbPart::None) {
-            hot = {};
-            UpdateTooltip(hot);
-            HwndInvalidate(hw, false);
+            SetHotAnimated({});
         }
         return 0;
     }
@@ -3228,21 +3327,20 @@ LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_LBUTTONDOWN) {
         Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-        pressed = HitTest(pt);
-        if (pressed.part != TbPart::None) {
+        TbHit down = HitTest(pt);
+        SetPressedAnimated(down);
+        if (down.part != TbPart::None) {
             SetCapture(hw);
-            HwndInvalidate(hw, false);
         }
         return 0;
     }
     if (msg == WM_LBUTTONUP) {
         Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         TbHit was = pressed;
-        pressed = {};
+        SetPressedAnimated({});
         if (GetCapture() == hw) {
             ReleaseCapture();
         }
-        HwndInvalidate(hw, false);
         if (was.part == TbPart::None) {
             return 0;
         }
@@ -3254,8 +3352,7 @@ LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_CAPTURECHANGED) {
         if (pressed.part != TbPart::None) {
-            pressed = {};
-            HwndInvalidate(hw, false);
+            SetPressedAnimated({});
         }
         return 0;
     }
