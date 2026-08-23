@@ -2507,8 +2507,11 @@ static void DrawTouchFileCardPath(MainWindow* win, HDC hdc, Str filePath, FileSt
     }
 }
 
-static void DrawTouchFileCard(MainWindow* win, HDC hdc, FileState* fs, const Rect& card, bool showProgress) {
-    DrawTouchFileCardPath(win, hdc, fs->filePath, fs, nullptr, card, showProgress);
+static void DrawTouchFileCard(MainWindow* win, HDC hdc, FileState* fs, const Rect& card, bool showProgress,
+                              const Rect* linkClip = nullptr) {
+    // pinnable: the Recent surface gets the same pin badge the Library grid
+    // has, so a file can be pinned (or unpinned) without going to the Library
+    DrawTouchFileCardPath(win, hdc, fs->filePath, fs, nullptr, card, showProgress, linkClip, false, true);
 }
 
 static int TouchCardColumns(HWND hwnd, int width) {
@@ -2707,7 +2710,9 @@ static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc
             int row = i / columns;
             Rect card{contentX + col * (cardDx + gap), y + row * (cardBlockDy + gap), cardDx, cardDy};
             if (card.y + cardBlockDy >= contentRc.y && card.y < contentBottom) {
-                DrawTouchFileCard(win, hdc, group[i], card, showProgress);
+                // clip the card's links to the scrolling pane, or a badge on a
+                // half-scrolled card stays clickable outside it
+                DrawTouchFileCard(win, hdc, group[i], card, showProgress, &contentRc);
             }
         }
         int rows = TouchCardRows(len(group), columns);
