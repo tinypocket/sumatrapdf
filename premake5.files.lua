@@ -1339,6 +1339,8 @@ function test_util_files()
   })
   files {
     "src/tools/test_util.cpp",
+    -- KineticScroll's easing/fling asks AnimEnabled()/AnimNowMs()/AnimEaseOut()
+    "src/wingui/Anim.cpp",
   }
 end
 
