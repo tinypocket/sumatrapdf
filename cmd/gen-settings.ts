@@ -1366,6 +1366,12 @@ const globalPrefs: Field[] = [
     "if true (and AnimateUI is also true), animate more of the UI: in the web browser the tabs, favorites and nav buttons cross-fade on hover and sink when pressed instead of switching instantly. Ignored when AnimateUI is false",
   ).ver("3.8"),
   field(
+    "SmartMargins",
+    Bool,
+    false,
+    "if true, the blank top and bottom margins of each page are cropped out of the layout, so less scrolling is needed to reach the next page's content. Page width is unaffected",
+  ).ver("3.8"),
+  field(
     "LargerTabs",
     Bool,
     false,

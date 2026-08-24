@@ -26,6 +26,7 @@
 #include "SumatraPDF.h"
 #include "MainWindow.h"
 #include "WindowTab.h"
+#include "Menu.h"
 #include "Commands.h"
 #include "SvgIcons.h"
 #include "Toolbar.h"
@@ -112,6 +113,7 @@ constexpr int kTopBarPageEdit = -101;
 constexpr int kTopBarBookmark = -102;
 constexpr int kTopBarZoomEdit = -103;
 constexpr int kTopBarSmartWidth = -104;
+constexpr int kTopBarOverflow = -105;
 
 static TopBarSlot gTopBarSlots[] = {
     {TopBarItem::Preview, TbIcon::WindowStack, kTopBarPreview, 0, false, false},
@@ -129,7 +131,9 @@ static TopBarSlot gTopBarSlots[] = {
     // Moon = light/dark theme for the app chrome (kept in both 2a and 4a)
     {TopBarItem::Button, TbIcon::Contrast, CmdInvertColors, 5, true, false},
     {TopBarItem::Button, TbIcon::Moon, CmdToggleLightDarkTheme, 5, true, false},
-    {TopBarItem::Overflow, TbIcon::Settings, 0, 6, true, false},
+    // was decorative (cmdId 0 is skipped by SlotFromPoint); now opens a
+    // small menu for the view options that have no room of their own
+    {TopBarItem::Overflow, TbIcon::Settings, kTopBarOverflow, 6, true, false},
 };
 
 constexpr int kTopBarSlotCount = (int)dimof(gTopBarSlots);
@@ -216,6 +220,7 @@ struct TopBarWnd : Wnd {
     void CommitEdit();
     void CancelEdit();
     void AddCurrentPageBookmark();
+    void ShowOverflowMenu(const Rect& anchor);
     // rebuilds savedPages/savedPageNames from the document's stored favorites
     void RefreshSavedPages();
     Rect PreviewAnchorRect(const Rect& slotRect);
@@ -1569,6 +1574,45 @@ void TopBarWnd::CancelEdit() {
     HwndInvalidate(hwnd, false);
 }
 
+// The top bar's "..." menu: view options that have no room of their own.
+void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
+    if (!win) {
+        return;
+    }
+    constexpr int kOverflowSmartMargins = 1;
+
+    HMENU popup = CreatePopupMenu();
+    bool on = gGlobalPrefs->smartMargins;
+    bool hasDoc = win->AsFixed() != nullptr;
+    uint flags = MF_STRING | (on ? MF_CHECKED : MF_UNCHECKED) | (hasDoc ? MF_ENABLED : (MF_DISABLED | MF_GRAYED));
+    AppendMenuW(popup, flags, kOverflowSmartMargins, L"Smart margins");
+    MarkMenuOwnerDraw(popup);
+
+    Point pt = HwndClientToScreen(hwnd, Point{anchor.x, anchor.y + anchor.dy});
+    int cmd = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_LEFTBUTTON, pt.x, pt.y, 0, win->hwndFrame, nullptr);
+    FreeMenuOwnerDrawInfoData(popup);
+    DestroyMenu(popup);
+
+    if (cmd != kOverflowSmartMargins) {
+        return;
+    }
+    gGlobalPrefs->smartMargins = !gGlobalPrefs->smartMargins;
+    SaveSettings();
+    // Every page's laid-out height changes, so relayout and put the view back
+    // where it was (same shape as ToggleMangaMode).
+    for (MainWindow* w : gWindows) {
+        DisplayModel* dm = w->AsFixed();
+        if (!dm) {
+            continue;
+        }
+        ScrollState state = dm->GetScrollState();
+        dm->Relayout(dm->GetZoomVirtual(), dm->GetRotation());
+        dm->SetScrollState(state);
+        w->RedrawAll(true);
+    }
+    HwndInvalidate(hwnd, false);
+}
+
 void TopBarWnd::AddCurrentPageBookmark() {
     if (!win || !win->ctrl) {
         return;
@@ -1877,6 +1921,8 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 PinPreview(hwnd, PreviewAnchorRect(slotRects[idx]));
             } else if (slot.cmdId == kTopBarBookmark) {
                 AddCurrentPageBookmark();
+            } else if (slot.cmdId == kTopBarOverflow) {
+                ShowOverflowMenu(slotRects[idx]);
             } else if (slot.cmdId == kTopBarSmartWidth) {
                 if (win->ctrl->GetZoomVirtual() == kZoomSmartWidth) {
                     float manualZoom = win->ctrl->GetZoomVirtual(true);

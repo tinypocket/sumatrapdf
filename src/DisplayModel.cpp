@@ -315,6 +315,56 @@ void DisplayModel::GetDisplayState(FileState* fs) {
     fs->decryptionKey = engine->decryptionKey.s ? str::Dup(engine->decryptionKey.s) : nullptr;
 }
 
+// how much blank page is left above and below the content when trimming, so a
+// cropped page still reads as a page rather than as text butted against an edge
+constexpr float kSmartMarginPadPt = 6.0f;
+
+RectF DisplayModel::PageDisplayBox(int pageNo) const {
+    RectF media = PageMediaBox(pageNo);
+    if (!gGlobalPrefs->smartMargins || media.IsEmpty()) {
+        return media;
+    }
+    PageInfo* pageInfo = GetPageInfo(pageNo);
+    if (!pageInfo) {
+        return media;
+    }
+    if (pageInfo->contentBox.IsEmpty()) {
+        pageInfo->contentBox = engine->PageContentBox(pageNo);
+    }
+    RectF content = pageInfo->contentBox;
+    if (content.IsEmpty()) {
+        return media; // blank page, or the engine can't tell: leave it alone
+    }
+    // Trim vertically only. The width is what the zoom is computed from, so
+    // touching it would change how large the text renders - the user asked for
+    // less scrolling, not a different zoom.
+    float top = std::max(media.y, content.y - kSmartMarginPadPt);
+    float bottom = std::min(media.y + media.dy, content.y + content.dy + kSmartMarginPadPt);
+    if (bottom <= top) {
+        return media;
+    }
+    RectF box = media;
+    box.y = top;
+    box.dy = bottom - top;
+    return box;
+}
+
+PointF DisplayModel::PageCropOffset(int pageNo, float zoom) const {
+    if (!gGlobalPrefs->smartMargins) {
+        return PointF();
+    }
+    RectF media = PageMediaBox(pageNo);
+    RectF display = PageDisplayBox(pageNo);
+    if (media == display) {
+        return PointF();
+    }
+    // Let Transform place both boxes, so this stays correct under rotation:
+    // what is "the top margin" in page space can be any edge on screen.
+    RectF mediaDev = engine->Transform(media, pageNo, zoom, rotation);
+    RectF displayDev = engine->Transform(display, pageNo, zoom, rotation);
+    return PointF(displayDev.x - mediaDev.x, displayDev.y - mediaDev.y);
+}
+
 SizeF DisplayModel::PageSizeAfterRotation(int pageNo, bool fitToContent) const {
     PageInfo* pageInfo = GetPageInfo(pageNo);
     ReportIf(!pageInfo);
@@ -326,6 +376,11 @@ SizeF DisplayModel::PageSizeAfterRotation(int pageNo, bool fitToContent) const {
         }
     }
 
+    // Deliberately the MEDIA box, not the display box: this size is what the
+    // zoom is calculated from (CalcZoomReal). Feeding it the trimmed height
+    // made fit-page solve for a much shorter page and roughly double the zoom,
+    // which blew the page out past the viewport width. Smart margins changes
+    // how much space a page occupies, never how large it renders.
     RectF pageBox = PageMediaBox(pageNo);
     RectF box = fitToContent ? pageInfo->contentBox : pageBox;
     return engine->Transform(box, pageNo, 1.0, rotation).Size();
@@ -943,7 +998,8 @@ void DisplayModel::Relayout(float newZoomVirtual, int newRotation) {
             if (!layoutPage || !PageShown(pageNo)) {
                 continue;
             }
-            layoutPage->mediaBox = PageMediaBox(pageNo);
+            // the trimmed box, so the blank band is not laid out at all
+            layoutPage->mediaBox = PageDisplayBox(pageNo);
             layoutPage->zoomReal = GetZoomReal(pageNo);
         }
 
@@ -1114,6 +1170,12 @@ Point DisplayModel::CvtToScreen(int pageNo, PointF pt) {
     float zoom = getZoomSafe(this, pageNo, pageInfo);
 
     PointF p = engine->Transform(pt, pageNo, zoom, rotation);
+    // pageOnScreen is sized from the display box, so page-space coordinates
+    // have to lose the trimmed margin too - otherwise selection, links and
+    // search highlights all sit one margin away from what is drawn
+    PointF crop = PageCropOffset(pageNo, zoom);
+    p.x -= crop.x;
+    p.y -= crop.y;
     // don't add the full 0.5 for rounding to account for precision errors
     Rect r = pageInfo->pageOnScreen;
     p.x += 0.499f + (float)r.x;
@@ -1144,6 +1206,10 @@ PointF DisplayModel::CvtFromScreen(Point pt, int pageNo) {
     PointF p = PointF((float)pt.x - 0.499f - (float)r.x, (float)pt.y - 0.499f - (float)r.y);
 
     float zoom = getZoomSafe(this, pageNo, pageInfo);
+    // inverse of the shift applied in CvtToScreen
+    PointF crop = PageCropOffset(pageNo, zoom);
+    p.x += crop.x;
+    p.y += crop.y;
     return engine->Transform(p, pageNo, zoom, rotation, true);
 }
 

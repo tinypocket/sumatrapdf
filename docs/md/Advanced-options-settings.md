@@ -1011,6 +1011,11 @@ AnimateUI = true
 ; (introduced in version 3.8)
 ElaborateAnimations = false
 
+; if true, the blank top and bottom margins of each page are cropped out of the
+; layout, so less scrolling is needed to reach the next page's content. Page
+; width is unaffected (introduced in version 3.8)
+SmartMargins = false
+
 ; if true, the document tabs in the title bar are taller and wider with larger
 ; text; easier to read and to hit with a finger (introduced in version 3.8)
 LargerTabs = false

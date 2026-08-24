@@ -135,6 +135,16 @@ struct DisplayModel : DocController {
 
     PageInfo* GetPageInfo(int pageNo) const;
     RectF PageMediaBox(int pageNo) const;
+    // The part of a page actually shown. Equals the media box unless "smart
+    // margins" is on, which trims the blank band above and below the content so
+    // less scrolling is needed to reach the next page. Layout, rendering and
+    // coordinate mapping must ALL use this, or the page renders at one size
+    // into a rect of another and every hit-tested thing (selection, links,
+    // annotations, search highlights) shifts by the trimmed margin.
+    RectF PageDisplayBox(int pageNo) const;
+    // device-space offset of the display box within the media box at this
+    // zoom/rotation; zero unless smart margins trimmed something
+    PointF PageCropOffset(int pageNo, float zoom) const;
 
     /* current rotation selected by user */
     int GetRotation() const;

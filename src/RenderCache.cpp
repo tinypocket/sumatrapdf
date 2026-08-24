@@ -305,8 +305,14 @@ static RectF GetTileRect(RectF pagerect, TilePosition tile) {
 }
 
 // get the coordinates of a specific tile
-static Rect GetTileRectDevice(EngineBase* engine, int pageNo, int rotation, float zoom, TilePosition tile) {
-    RectF mediabox = engine->PageMediabox(pageNo);
+// These take the DisplayModel rather than the engine on purpose: what is drawn
+// for a page is its DISPLAY box (see DisplayModel::PageDisplayBox), which with
+// smart margins on is shorter than the engine's media box. Reading the media
+// box here while the layout reserved space for the display box is exactly how
+// the render and the layout would disagree.
+static Rect GetTileRectDevice(DisplayModel* dm, int pageNo, int rotation, float zoom, TilePosition tile) {
+    EngineBase* engine = dm->GetEngine();
+    RectF mediabox = dm->PageDisplayBox(pageNo);
     if (tile.res > 0 && tile.res != INVALID_TILE_RES) {
         mediabox = GetTileRect(mediabox, tile);
     }
@@ -314,15 +320,21 @@ static Rect GetTileRectDevice(EngineBase* engine, int pageNo, int rotation, floa
     return pixelbox.Round();
 }
 
-static RectF GetTileRectUser(EngineBase* engine, int pageNo, int rotation, float zoom, TilePosition tile) {
-    Rect pixelbox = GetTileRectDevice(engine, pageNo, rotation, zoom, tile);
-    return engine->Transform(ToRectF(pixelbox), pageNo, zoom, rotation, true);
+static RectF GetTileRectUser(DisplayModel* dm, int pageNo, int rotation, float zoom, TilePosition tile) {
+    Rect pixelbox = GetTileRectDevice(dm, pageNo, rotation, zoom, tile);
+    return dm->GetEngine()->Transform(ToRectF(pixelbox), pageNo, zoom, rotation, true);
 }
 
-static Rect GetTileOnScreen(EngineBase* engine, int pageNo, int rotation, float zoom, TilePosition tile,
+static Rect GetTileOnScreen(DisplayModel* dm, int pageNo, int rotation, float zoom, TilePosition tile,
                             Rect pageOnScreen) {
-    Rect bbox = GetTileRectDevice(engine, pageNo, rotation, zoom, tile);
-    bbox.Offset(pageOnScreen.x, pageOnScreen.y);
+    Rect bbox = GetTileRectDevice(dm, pageNo, rotation, zoom, tile);
+    // The tile rect is in the page's own device space, where the display box
+    // starts at the crop offset rather than at 0. pageOnScreen is already the
+    // *display* box's rect, so offsetting by it alone would push the bitmap
+    // down by that margin - the page then renders one margin too low and gets
+    // clipped by the bottom of its own rect.
+    PointF crop = dm->PageCropOffset(pageNo, zoom);
+    bbox.Offset(pageOnScreen.x - (int)crop.x, pageOnScreen.y - (int)crop.y);
     return bbox;
 }
 
@@ -338,7 +350,7 @@ static bool IsTileVisible(DisplayModel* dm, int pageNo, TilePosition tile, float
     int rotation = dm->GetRotation();
     float zoom = dm->GetZoomReal(pageNo);
     Rect r = pageInfo->pageOnScreen;
-    Rect tileOnScreen = GetTileOnScreen(engine, pageNo, rotation, zoom, tile, r);
+    Rect tileOnScreen = GetTileOnScreen(dm, pageNo, rotation, zoom, tile, r);
     // consider nearby tiles visible depending on the fuzz factor
     tileOnScreen.x -= (int)((float)tileOnScreen.dx * fuzz * 0.5);
     tileOnScreen.dx = (int)((float)tileOnScreen.dx * (fuzz + 1));
@@ -719,7 +731,7 @@ bool RenderCache::Render(DisplayModel* dm, int pageNo, int rotation, float zoom,
     newRequest->rotation = rotation;
     newRequest->zoom = zoom;
     if (tile) {
-        newRequest->pageRect = GetTileRectUser(dm->GetEngine(), pageNo, rotation, zoom, *tile);
+        newRequest->pageRect = GetTileRectUser(dm, pageNo, rotation, zoom, *tile);
         newRequest->tile = *tile;
     } else if (pageRect) {
         newRequest->pageRect = *pageRect;
@@ -1151,7 +1163,7 @@ int RenderCache::Paint(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, PageI
 
     while (len(queue) > 0) {
         TilePosition tile = queue.PopAt(0);
-        Rect tileOnScreen = GetTileOnScreen(dm->GetEngine(), pageNo, rotation, zoom, tile, pi->pageOnScreen);
+        Rect tileOnScreen = GetTileOnScreen(dm, pageNo, rotation, zoom, tile, pi->pageOnScreen);
         if (tileOnScreen.IsEmpty()) {
             // display an error message when only empty tiles should be drawn (i.e. on page loading errors)
             renderDelayMin = std::min(RENDER_DELAY_FAILED, renderDelayMin);
