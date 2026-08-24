@@ -128,6 +128,7 @@ static SeqStrings gCommandNames =
     "CmdOpenWithPdfDjvuBookmarker\0"
     "CmdOpenWithKnownExternalViewerLast\0"
     "CmdOpenSelectedDocument\0"
+    "CmdOpenSelectedDocumentNewCopy\0"
     "CmdPinSelectedDocument\0"
     "CmdForgetSelectedDocument\0"
     "CmdExpandAll\0"
@@ -398,6 +399,7 @@ static i32 gCommandIds[] = {
     CmdOpenWithPdfDjvuBookmarker,
     CmdOpenWithKnownExternalViewerLast,
     CmdOpenSelectedDocument,
+    CmdOpenSelectedDocumentNewCopy,
     CmdPinSelectedDocument,
     CmdForgetSelectedDocument,
     CmdExpandAll,
@@ -668,6 +670,7 @@ SeqStrings gCommandDescriptions =
     "Open With Pdf&Djvu Bookmarker\0"
     "don't use\0"
     "Open Selected Document\0"
+    "Open Another Copy\0"
     "Pin Selected Document\0"
     "Remove Selected Document From History\0"
     "Expand All\0"

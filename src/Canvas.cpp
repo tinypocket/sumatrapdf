@@ -3857,6 +3857,10 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
             HomePageKineticTick(win);
             break;
 
+        case kAboutHoldTimerID:
+            HomePageOnHoldTimer(win);
+            break;
+
         case HIDE_FWDSRCHMARK_TIMER_ID:
             win->fwdSearchMark.hideStep++;
             if (1 == win->fwdSearchMark.hideStep) {

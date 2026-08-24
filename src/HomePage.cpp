@@ -4474,6 +4474,24 @@ static void UpdateLibraryScrollTimer(MainWindow* win) {
     }
 }
 
+// Tap-and-hold fired: treat it exactly like a right-click at the point the
+// finger went down, so touch and mouse reach the same menu. The pan is
+// cancelled first, or releasing the finger afterwards would also tap the card.
+void HomePageOnHoldTimer(MainWindow* win) {
+    if (!win || !win->hwndCanvas) {
+        return;
+    }
+    KillTimer(win->hwndCanvas, kAboutHoldTimerID);
+    if (!IsTouchChrome(win) || win->touchAboutPanMoved || win->touchAboutPointerId == 0) {
+        return;
+    }
+    Point pt = win->touchAboutPanStart;
+    win->touchAboutPointerId = 0;
+    win->touchAboutPanArea = 0;
+    win->touchAboutSuppressMouseUp = true;
+    OnAboutContextMenu(win, pt.x, pt.y);
+}
+
 // One tick of the Library's scroll momentum: advance both columns, publish the
 // result into the ScrollY fields the paint code reads, repaint.
 void HomePageKineticTick(MainWindow* win) {
@@ -4634,6 +4652,9 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
         KsDragBegin(area == 3 ? win->libraryTreeKs : win->libraryFilesKs, pt.y);
         win->touchAboutPanMoved = false;
         win->touchAboutSuppressMouseUp = false;
+        // a finger has no right button: hold still on a card for ~500ms and the
+        // same context menu opens (Open Another Copy, Pin, ...)
+        SetTimer(win->hwndCanvas, kAboutHoldTimerID, 500, nullptr);
         return true;
     }
     if (pointerId != win->touchAboutPointerId) {
@@ -4649,6 +4670,8 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
         }
         if (!win->touchAboutPanMoved) {
             win->touchAboutPanMoved = true;
+            // it became a drag, so it is not a hold
+            KillTimer(win->hwndCanvas, kAboutHoldTimerID);
             str::FreePtr(&win->urlOnLastButtonDown);
             CloseTouchLibraryTransientUi(win);
         }
@@ -4671,6 +4694,7 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
     }
     if (msg == WM_POINTERUP) {
         Point pt = TouchAboutPointerPos(win, lp);
+        KillTimer(win->hwndCanvas, kAboutHoldTimerID);
         int area = win->touchAboutPanArea;
         bool moved = win->touchAboutPanMoved;
         // let go of a flick and the list keeps going, then coasts to a stop

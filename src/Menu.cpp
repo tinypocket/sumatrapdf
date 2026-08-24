@@ -1137,6 +1137,12 @@ static MenuDef menuDefContextStart[] = {
         CmdOpenSelectedDocument,
     },
     {
+        // opens a second (or third...) view of a file that is already open,
+        // instead of switching to the existing tab
+        _TRN("Open Another Copy"),
+        CmdOpenSelectedDocumentNewCopy,
+    },
+    {
         _TRN("Show in folder"),
         CmdShowInFolder,
     },
@@ -1878,6 +1884,15 @@ void OnAboutContextMenu(MainWindow* win, int x, int y) {
         LoadArgs args(path, win);
         args.activateExisting = !IsCtrlPressed();
         args.activateExistingInWindow = true;
+        LoadDocument(&args);
+        return;
+    }
+
+    if (CmdOpenSelectedDocumentNewCopy == cmd) {
+        // activateExisting is what makes a second open switch to the tab that
+        // already has the file; off, the load creates another tab for it
+        LoadArgs args(path, win);
+        args.activateExisting = false;
         LoadDocument(&args);
         return;
     }

@@ -121,6 +121,7 @@ export const commands = [
     "CmdOpenWithPdfDjvuBookmarker", "Open With Pdf&Djvu Bookmarker",
     "CmdOpenWithKnownExternalViewerLast", "don't use",
     "CmdOpenSelectedDocument", "Open Selected Document",
+    "CmdOpenSelectedDocumentNewCopy", "Open Another Copy",
     "CmdPinSelectedDocument", "Pin Selected Document",
     "CmdForgetSelectedDocument", "Remove Selected Document From History",
     "CmdExpandAll", "Expand All",

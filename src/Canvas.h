@@ -36,4 +36,7 @@ constexpr UINT_PTR kTextSelectCaretTimerID = 12;
 constexpr UINT_PTR kSelectionToolbarShowTimerID = 13;
 // drives Library scroll easing / fling while it is moving
 constexpr UINT_PTR kLibraryScrollTimerID = 14;
+// tap-and-hold on a Recent/Library card opens the same context menu as a
+// right-click (there is no right button on a touchscreen)
+constexpr UINT_PTR kAboutHoldTimerID = 15;
 constexpr uint kSelectionToolbarShowDelayInMs = 500;
