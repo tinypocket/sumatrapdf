@@ -290,7 +290,18 @@ static void ExitAfterStartingUpdater() {
     ::ExitProcess(0);
 }
 
-static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
+// What the user picked in the update dialog. Nothing is fetched before this
+// returns Download: an update is announced, and the bytes only move once the
+// user has actually said yes.
+enum class UpdateChoice {
+    Dismiss,
+    Download, // confirmed, but the installer is not on disk yet
+};
+
+// Takes ownership of updateInfo. Only ever called after the user confirmed.
+static void StartUpdateDownload(HWND hwndForNotif, UpdateInfo* updateInfo, bool installWhenDone);
+
+static UpdateChoice NotifyUserOfUpdate(UpdateInfo* updateInfo) {
     auto installerPathAuto = updateInfo->installerPath;
     // auto-install path: the user already opted in via the "Download and update"
     // link, so skip the confirmation dialog and just install (issue: pre-release
@@ -304,7 +315,7 @@ static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
         } else {
             logf("NotifyUserOfUpdate: auto-install requested but installer not downloaded\n");
         }
-        return;
+        return UpdateChoice::Dismiss;
     }
 
     auto mainInstr = _TRA("New version available");
@@ -361,17 +372,19 @@ static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
     SaveSettings();
     if (!doInstall) {
         file::Delete(installerPath);
-        return;
+        return UpdateChoice::Dismiss;
     }
 
-    // if installer not downloaded tell user to download from website
+    // Nothing has been downloaded yet - that is the normal case now, since the
+    // check only announces the update. The user just confirmed, so the caller
+    // goes and fetches it.
     if (!didDownloadInstaller) {
-        SumatraLaunchBrowser(kWebisteDownloadPageURL);
-        return;
+        return UpdateChoice::Download;
     }
 
     StartInstallerAutoUpgrade(installerPath);
     ExitAfterStartingUpdater();
+    return UpdateChoice::Dismiss;
 }
 
 struct UpdateProgressData {
@@ -476,10 +489,16 @@ void DownloadAndInstallPendingUpdate(MainWindow* win) {
         delete updateInfo;
         return;
     }
-    gUpdateAutoInstall = true;
-
-    HWND hwndForNotif = win->hwndCanvas;
     updateInfo->hwndParent = win->hwndFrame;
+    // clicking the Update button IS the confirmation, so install when it lands
+    StartUpdateDownload(win->hwndCanvas, updateInfo, true);
+}
+
+// The only place a download is started. Every caller reaches it from an
+// explicit user action - the caption's Update button, the toast's "Update now",
+// or the confirmation dialog - so an update never downloads on its own.
+static void StartUpdateDownload(HWND hwndForNotif, UpdateInfo* updateInfo, bool installWhenDone) {
+    gUpdateAutoInstall = installWhenDone;
 
     // progress notification updated by UpdateDownloadProgressNotif (same group)
     NotificationCreateArgs nargs;
@@ -736,20 +755,29 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
     if (!updateInfo->dlURL) {
         logf("ShowAutoUpdateDialog: didn't find download url. Auto update data:\n%s\n", ToStr(*data));
         RemoveNotificationsForGroup(win->hwndCanvas, kNotifUpdateCheckInProgress);
-        NotifyUserOfUpdate(updateInfo);
+        // nothing to fetch ourselves, so a confirmation sends them to the
+        // download page rather than doing nothing
+        if (NotifyUserOfUpdate(updateInfo) == UpdateChoice::Download) {
+            Str dlPage = GetPrivateUpdateFeedURL() ? GetExpectedDownloadOrigin() : StrL(kWebisteDownloadPageURL);
+            SumatraLaunchBrowser(dlPage);
+        }
         delete updateInfo;
         return 0;
     }
 
-    // download the installer to make update feel instant to the user
-    logf("ShowAutoUpdateDialog: starting to download '%s'\n", updateInfo->dlURL);
-    gUpdateCheckInProgress = true;
-
-    auto* fnData = new DownloadUpdateAsyncData;
-    fnData->hwndForNotif = hwndForNotif;
-    fnData->updateInfo = updateInfo;
-    auto fn = MkFunc0<DownloadUpdateAsyncData>(DownloadUpdateAsync, fnData);
-    RunAsync(fn, "DownloadUpdateAsync");
+    // A manual "Check for update" announces what it found and asks first. It
+    // used to download the installer right here, before the user had agreed to
+    // anything, and only then put up the confirmation dialog - so declining
+    // still cost a full installer download.
+    RemoveNotificationsForGroup(hwndForNotif, kNotifUpdateCheckInProgress);
+    UpdateChoice choice = NotifyUserOfUpdate(updateInfo);
+    if (choice != UpdateChoice::Download) {
+        delete updateInfo;
+        return 0;
+    }
+    // confirmed: fetch it, and install once it lands - they already said yes,
+    // so do not ask a second time
+    StartUpdateDownload(hwndForNotif, updateInfo, true);
     return 0;
 }
 
