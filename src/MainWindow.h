@@ -411,6 +411,14 @@ struct MainWindow {
     // value everything paints from; these drive them (see HomePageKineticTick).
     KineticScroll libraryTreeKs;
     KineticScroll libraryFilesKs;
+    // Library back/forward history. Each entry is a folder path, or
+    // kLibraryNavRecent for the Recent surface. libraryNavPos indexes the
+    // current spot; going back moves it down rather than truncating, so
+    // forward stays available until a new destination is chosen.
+    StrVec libraryNavStack;
+    int libraryNavPos = -1;
+    // set while replaying an entry, so applying it doesn't push it again
+    bool libraryNavReplaying = false;
     int librarySidebarDx = 0;
     bool librarySidebarResizing = false;
     int librarySidebarResizeStartX = 0;

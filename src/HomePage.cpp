@@ -2984,9 +2984,14 @@ bool HandleTouchLibraryLink(MainWindow* win, Str url) {
         return false;
     }
     if (str::Eq(url, kLinkLibraryRecent)) {
+        LibraryNavPush(win, Str(kLibraryNavRecent));
         win->libraryRecentSelected = true;
         win->libraryFilesScrollY = 0;
         str::FreePtr(&win->libraryRowMenuPath);
+    } else if (str::Eq(url, kLinkLibraryBack)) {
+        LibraryNavGo(win, -1);
+    } else if (str::Eq(url, kLinkLibraryForward)) {
+        LibraryNavGo(win, 1);
     } else if (str::TrimPrefix(url, kLinkLibraryMenuPrefix)) {
         str::ReplaceWithCopy(&win->libraryRowMenuPath, url);
     } else if (str::TrimPrefix(url, kLinkLibraryPinPrefix)) {
@@ -3046,10 +3051,66 @@ bool HandleTouchLibraryLink(MainWindow* win, Str url) {
     return true;
 }
 
+// --- Library back/forward -----------------------------------------------
+// The Recent surface and every folder the user opens are one history, so Back
+// walks out of a folder and on into Recent the same way a browser would.
+
+void LibraryNavPush(MainWindow* win, Str entry) {
+    if (!win || !entry || win->libraryNavReplaying) {
+        return;
+    }
+    // re-selecting where we already are is not a new destination
+    if (win->libraryNavPos >= 0 && win->libraryNavPos < len(win->libraryNavStack) &&
+        str::Eq(win->libraryNavStack[win->libraryNavPos], entry)) {
+        return;
+    }
+    // The Library always opens on Recent, but nothing navigates *to* it at
+    // startup, so the first push would otherwise leave Back with nowhere to go.
+    // Seed that implicit starting point.
+    if (len(win->libraryNavStack) == 0 && !str::Eq(entry, Str(kLibraryNavRecent))) {
+        win->libraryNavStack.Append(Str(kLibraryNavRecent));
+        win->libraryNavPos = 0;
+    }
+    // choosing a new destination after going back drops the forward entries
+    while (len(win->libraryNavStack) > win->libraryNavPos + 1) {
+        win->libraryNavStack.RemoveAt(len(win->libraryNavStack) - 1);
+    }
+    win->libraryNavStack.Append(entry);
+    win->libraryNavPos = len(win->libraryNavStack) - 1;
+}
+
+bool LibraryNavCanGo(MainWindow* win, int delta) {
+    if (!win) {
+        return false;
+    }
+    int next = win->libraryNavPos + delta;
+    return next >= 0 && next < len(win->libraryNavStack);
+}
+
+void LibraryNavGo(MainWindow* win, int delta) {
+    if (!LibraryNavCanGo(win, delta)) {
+        return;
+    }
+    win->libraryNavPos += delta;
+    Str entry = win->libraryNavStack[win->libraryNavPos];
+    // replaying, so the destination we land on must not be pushed again
+    win->libraryNavReplaying = true;
+    if (str::Eq(entry, Str(kLibraryNavRecent))) {
+        win->libraryRecentSelected = true;
+        win->libraryFilesScrollY = 0;
+        str::FreePtr(&win->libraryRowMenuPath);
+        win->RedrawAll(true);
+    } else {
+        SelectTouchLibraryFolder(win, entry);
+    }
+    win->libraryNavReplaying = false;
+}
+
 void SelectTouchLibraryFolder(MainWindow* win, Str folderPath) {
     if (!win || !folderPath) {
         return;
     }
+    LibraryNavPush(win, folderPath);
     str::ReplaceWithCopy(&win->librarySelectedFolderPath, folderPath);
     win->libraryRecentSelected = false;
     win->libraryFilesScrollY = 0;
@@ -3810,7 +3871,47 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         win->staticLinks.Append(new StaticLink(listView, Str(kLinkLibraryListView), StrL("List view")));
     }
 
-    Rect header{leftDx + DpiScale(hdc, 24), 0, std::max(0, headerAction.x - leftDx - DpiScale(hdc, 40)), headerDy};
+    // Back / Forward at the head of the row, ahead of the title. Greyed when
+    // there is nowhere to go, so the pair is always in the same place rather
+    // than appearing and disappearing under the finger.
+    int navDy = DpiScale(hdc, 34);
+    int navGap = DpiScale(hdc, 4);
+    int navX = leftDx + DpiScale(hdc, 20);
+    Rect backRc{navX, (headerDy - navDy) / 2, navDy, navDy};
+    Rect fwdRc{navX + navDy + navGap, backRc.y, navDy, navDy};
+    {
+        Gdiplus::Graphics gfx(hdc);
+        gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        for (int i = 0; i < 2; i++) {
+            bool isBack = (i == 0);
+            Rect r = isBack ? backRc : fwdRc;
+            bool enabled = LibraryNavCanGo(win, isBack ? -1 : 1);
+            COLORREF fg = enabled ? ThemeWindowTextColor() : ThemeWindowDarkerTextColor();
+            if (enabled) {
+                FillHomeRoundRect(hdc, r, r.dy / 2, ThemeHotBackgroundColor());
+            }
+            // a chevron drawn as two strokes: no icon asset needed and it
+            // scales cleanly with dpi
+            Gdiplus::Pen pen(GdiRgbFromCOLORREF(fg), (Gdiplus::REAL)std::max(1, DpiScale(hdc, 2)));
+            pen.SetStartCap(Gdiplus::LineCapRound);
+            pen.SetEndCap(Gdiplus::LineCapRound);
+            int cx = r.x + r.dx / 2;
+            int cy = r.y + r.dy / 2;
+            int arm = DpiScale(hdc, 5);
+            int tipX = isBack ? cx + arm / 2 : cx - arm / 2;
+            int backX = isBack ? cx - arm / 2 : cx + arm / 2;
+            gfx.DrawLine(&pen, tipX, cy - arm, backX, cy);
+            gfx.DrawLine(&pen, backX, cy, tipX, cy + arm);
+            if (enabled) {
+                Str target = isBack ? Str(kLinkLibraryBack) : Str(kLinkLibraryForward);
+                Str tip = isBack ? StrL("Back") : StrL("Forward");
+                win->staticLinks.Append(new StaticLink(r, target, tip));
+            }
+        }
+    }
+
+    int titleX = fwdRc.x + fwdRc.dx + DpiScale(hdc, 12);
+    Rect header{titleX, 0, std::max(0, headerAction.x - titleX - DpiScale(hdc, 16)), headerDy};
     SetTextColor(hdc, ThemeWindowTextColor());
     Str headerTitle = selectedName;
     if (recentSelected) {

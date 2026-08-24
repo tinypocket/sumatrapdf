@@ -32,6 +32,11 @@ constexpr const char* kLinkHomePinFilePrefix = "<HomePage,PinFile>";
 constexpr const char* kLinkHomeOpenTabPrefix = "<HomePage,OpenTab>";
 constexpr const char* kLinkHomeCloseTabPrefix = "<HomePage,CloseTab>";
 constexpr const char* kLinkLibraryRecent = "<Library,Recent>";
+constexpr const char* kLinkLibraryBack = "<Library,Back>";
+constexpr const char* kLinkLibraryForward = "<Library,Forward>";
+// stack entry standing for the Recent surface; a real folder path never
+// contains angle brackets, so it cannot collide
+constexpr const char* kLibraryNavRecent = "<Recent>";
 constexpr const char* kLinkLibraryFolderPrefix = "<Library,Folder>";
 constexpr const char* kLinkLibraryTogglePrefix = "<Library,Toggle>";
 constexpr const char* kLinkLibraryAddFolder = "<Library,AddFolder>";
@@ -59,6 +64,12 @@ void HomePageOnMouseWheel(MainWindow* win, int delta, Point canvasPt);
 void HomePageKineticTick(MainWindow* win);
 // tap-and-hold on a card opened the context menu
 void HomePageOnHoldTimer(MainWindow* win);
+
+// Library back/forward. A destination is pushed when the user picks it; going
+// back/forward replays an entry without pushing it again.
+void LibraryNavPush(MainWindow* win, Str entry);
+bool LibraryNavCanGo(MainWindow* win, int delta);
+void LibraryNavGo(MainWindow* win, int delta);
 void HomePageOnMouseHWheel(MainWindow* win, int delta);
 bool HomePageOnLibraryResizeMouse(MainWindow* win, UINT msg, int x, int y);
 bool HomePageSetLibraryResizeCursor(MainWindow* win);
