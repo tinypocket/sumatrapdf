@@ -2674,7 +2674,8 @@ static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc
     if (len(pillRects) > 0) {
         Rect labelRc{contentX, y, contentDx, DpiScale(hdc, 18)};
         SetTextColor(hdc, ThemeWindowDarkerTextColor());
-        HdcDrawText(hdc, StrL("FOLDERS"), labelRc, DT_SINGLELINE | DT_NOPREFIX, HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
+        HdcDrawText(hdc, StrL("RECENT FOLDERS"), labelRc, DT_SINGLELINE | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
         y += DpiScale(hdc, 31);
         HFONT pillFont = HdcGetUiFont(hdc, 13);
         ScopedSelectObject selPill(hdc, pillFont);
@@ -4505,7 +4506,13 @@ static void SyncLibraryScrollBounds(MainWindow* win) {
 }
 
 void HomePageOnMouseWheel(MainWindow* win, int delta, Point canvasPt) {
-    if (IsTouchChrome(win) && win->touchView == TouchView::Library) {
+    // Match the PAINT gate exactly (see the IsTouchChrome branch in the about
+    // page draw): under the touch chrome this canvas is always the Library
+    // surface. Testing touchView == Library here instead meant that opening
+    // with no document - where the Library draws but touchView is still Doc -
+    // fell through to the classic home-page scroller, which moves a different
+    // variable, so the Recent screen could not be scrolled at all.
+    if (IsTouchChrome(win)) {
         if (win->libraryManageFoldersOpen) {
             return;
         }
@@ -4586,16 +4593,20 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
         Rect canvas = HwndClientRect(win->hwndCanvas);
         int headerDy = DpiScale(win->hwndCanvas, 64);
         int area = 0;
-        if (win->touchView == TouchView::Library && TouchLibrarySplitterHitRect(win).Contains(pt)) {
+        // No touchView test: this handler only runs for the touch chrome's about
+        // canvas, which always draws the Library surface (same gate the paint
+        // path uses). Requiring touchView == Library here broke drag-scrolling
+        // whenever the app opened with no document, where the Library is on
+        // screen but touchView is still Doc.
+        if (TouchLibrarySplitterHitRect(win).Contains(pt)) {
             area = 5;
-        } else if (win->touchView == TouchView::Library && pt.y >= headerDy) {
+        } else if (pt.y >= headerDy) {
             int leftDx = TouchLibrarySidebarDx(win);
             int manageTop = canvas.dy - DpiScale(win->hwndCanvas, 64);
             if (pt.x < leftDx) {
                 area = pt.y < manageTop ? 3 : 0;
             } else {
-                // the Recent pane's "currently open" strip also pans sideways
-                area = win->homeOpenCarouselRect.Contains(pt) ? 2 : 4;
+                area = 4;
             }
         }
         if (area == 0) {
