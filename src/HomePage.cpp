@@ -2024,6 +2024,34 @@ static void FillHomeRoundRect(HDC hdc, const Rect& r, int radius, COLORREF col, 
     RoundRect(hdc, r.x, r.y, r.x + r.dx, r.y + r.dy, d, d);
 }
 
+// Translucent rounded fill. GDI's RoundRect has no alpha, and the Library
+// feedback overlay has to sit on top of cards, rows and pills without knowing
+// what is underneath, so this goes through GDI+ where the brush carries alpha.
+// defined with the rest of the Library feedback code, below
+static void DrawLibraryFeedback(MainWindow* win, HDC hdc);
+
+static void FillHomeRoundRectAlpha(HDC hdc, const Rect& r, int radius, COLORREF col, u8 alpha) {
+    if (alpha == 0 || r.dx <= 0 || r.dy <= 0) {
+        return;
+    }
+    Gdiplus::Graphics gfx(hdc);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    int d = std::min(radius * 2, std::min(r.dx, r.dy));
+    Gdiplus::GraphicsPath path;
+    if (d > 1) {
+        path.AddArc(r.x, r.y, d, d, 180.0f, 90.0f);
+        path.AddArc(r.x + r.dx - d, r.y, d, d, 270.0f, 90.0f);
+        path.AddArc(r.x + r.dx - d, r.y + r.dy - d, d, d, 0.0f, 90.0f);
+        path.AddArc(r.x, r.y + r.dy - d, d, d, 90.0f, 90.0f);
+        path.CloseFigure();
+    } else {
+        path.AddRectangle(Gdiplus::Rect(r.x, r.y, r.dx, r.dy));
+    }
+    Gdiplus::Color c(alpha, GetRValue(col), GetGValue(col), GetBValue(col));
+    Gdiplus::SolidBrush br(c);
+    gfx.FillPath(&br, &path);
+}
+
 static void DrawHomeViewButton(HDC hdc, HIMAGELIST himl, Rect r, TbIcon icon, bool selected) {
     if (selected) {
         Rect chip = r;
@@ -4094,6 +4122,8 @@ void DrawHomePage(MainWindow* win, HDC hdc) {
         // the Library is the only browsing destination; Recent is one of its
         // sidebar rows (win->libraryRecentSelected)
         DrawTouchLibraryPageV2(win, hdc);
+        // after the content, so it sits on top of whatever the link covers
+        DrawLibraryFeedback(win, hdc);
         return;
     }
 
@@ -4572,6 +4602,144 @@ static void UpdateLibraryScrollTimer(MainWindow* win) {
         SetTimer(win->hwndCanvas, kLibraryScrollTimerID, kAnimTickMs, nullptr);
     } else {
         KillTimer(win->hwndCanvas, kLibraryScrollTimerID);
+    }
+}
+
+// --- Library hover / press feedback -------------------------------------
+// Base-level (AnimateUI) feedback: until now the Library answered a click with
+// nothing but a cursor change, so tapping a folder felt dead until the whole
+// view swapped.
+
+// Owned here rather than on MainWindow (see the note in MainWindow.h). Only
+// one Library surface is interacted with at a time, so a single set of state
+// plus the window that owns it is enough; switching windows resets it.
+static MainWindow* gFeedbackWin = nullptr;
+static Str gLibraryHotTarget;
+static Str gLibraryPressedTarget;
+static AnimVal gLibraryHotVal;
+static AnimVal gLibraryPressVal;
+
+static void ResetLibraryFeedbackIfOtherWindow(MainWindow* win) {
+    if (gFeedbackWin == win) {
+        return;
+    }
+    gFeedbackWin = win;
+    str::ReplaceWithCopy(&gLibraryHotTarget, Str{});
+    str::ReplaceWithCopy(&gLibraryPressedTarget, Str{});
+    gLibraryHotVal.Set(0.0f);
+    gLibraryPressVal.Set(0.0f);
+}
+
+static void UpdateLibraryFeedbackTimer(MainWindow* win) {
+    if (!win || !win->hwndCanvas) {
+        return;
+    }
+    bool moving = gLibraryHotVal.IsAnimating() || gLibraryPressVal.IsAnimating();
+    if (moving) {
+        SetTimer(win->hwndCanvas, kLibraryFeedbackTimerID, kAnimTickMs, nullptr);
+    } else {
+        KillTimer(win->hwndCanvas, kLibraryFeedbackTimerID);
+    }
+}
+
+void HomePageFeedbackTick(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    HwndInvalidate(win->hwndCanvas, false);
+    UpdateLibraryFeedbackTimer(win);
+}
+
+void HomePageSetHotLink(MainWindow* win, Str target) {
+    if (!win) {
+        return;
+    }
+    ResetLibraryFeedbackIfOtherWindow(win);
+    if (str::Eq(gLibraryHotTarget, target)) {
+        return;
+    }
+    str::ReplaceWithCopy(&gLibraryHotTarget, target);
+    if (AnimEnabled()) {
+        // ease from wherever it is, so sweeping across rows trails rather than
+        // flicking between them
+        gLibraryHotVal.SetTarget(target ? 1.0f : 0.0f, kAnimHoverMs);
+        UpdateLibraryFeedbackTimer(win);
+    } else {
+        gLibraryHotVal.Set(target ? 1.0f : 0.0f);
+    }
+    HwndInvalidate(win->hwndCanvas, false);
+}
+
+void HomePageSetPressedLink(MainWindow* win, Str target) {
+    if (!win) {
+        return;
+    }
+    ResetLibraryFeedbackIfOtherWindow(win);
+    if (str::Eq(gLibraryPressedTarget, target)) {
+        return;
+    }
+    str::ReplaceWithCopy(&gLibraryPressedTarget, target);
+    bool down = !!target; // Str has an explicit bool test, not a null compare
+    if (AnimEnabled()) {
+        gLibraryPressVal.SetTarget(down ? 1.0f : 0.0f, down ? kAnimPressMs : kAnimPressReleaseMs);
+        UpdateLibraryFeedbackTimer(win);
+    } else {
+        gLibraryPressVal.Set(down ? 1.0f : 0.0f);
+    }
+    HwndInvalidate(win->hwndCanvas, false);
+}
+
+// look the link's CURRENT rect up by target: static links are rebuilt every
+// paint and their rects move as the pane scrolls
+static bool FindLinkRect(MainWindow* win, Str target, Rect* out) {
+    if (!target) {
+        return false;
+    }
+    for (StaticLink* l : win->staticLinks) {
+        if (l && str::Eq(l->target, target)) {
+            *out = l->rect;
+            return true;
+        }
+    }
+    return false;
+}
+
+// One overlay for the whole surface, drawn after the content: hover lightens,
+// press darkens and sinks slightly. Keyed by target so every interactive
+// element gets it without touching its own draw code.
+static void DrawLibraryFeedback(MainWindow* win, HDC hdc) {
+    float hotAmt = gLibraryHotVal.Value();
+    float pressAmt = gLibraryPressVal.Value();
+    struct Layer {
+        Str target;
+        float amt;
+        bool press;
+    };
+    Layer layers[2] = {{gLibraryHotTarget, hotAmt, false}, {gLibraryPressedTarget, pressAmt, true}};
+    for (const Layer& layer : layers) {
+        if (layer.amt <= 0.01f || !layer.target) {
+            continue;
+        }
+        Rect r;
+        if (!FindLinkRect(win, layer.target, &r) || r.IsEmpty()) {
+            continue;
+        }
+        if (layer.press) {
+            int inset = (int)((float)DpiScale(hdc, 2) * layer.amt + 0.5f);
+            r.x += inset;
+            r.y += inset;
+            r.dx -= inset * 2;
+            r.dy -= inset * 2;
+        }
+        if (r.dx <= 0 || r.dy <= 0) {
+            continue;
+        }
+        // alpha-blended so it reads on both the light and dark themes without
+        // needing to know what is underneath
+        u8 alpha = (u8)((layer.press ? 38.0f : 20.0f) * layer.amt);
+        COLORREF col = ThemeWindowTextColor();
+        int radius = std::min(DpiScale(hdc, 10), std::min(r.dx, r.dy) / 2);
+        FillHomeRoundRectAlpha(hdc, r, radius, col, alpha);
     }
 }
 

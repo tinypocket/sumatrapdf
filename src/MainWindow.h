@@ -417,6 +417,10 @@ struct MainWindow {
     // forward stays available until a new destination is chosen.
     StrVec libraryNavStack;
     int libraryNavPos = -1;
+    // Library hover/press feedback lives in HomePage.cpp rather than here: the
+    // AnimVal/AnimTimer types would drag wingui/Anim.h into this header, and
+    // these headers have no include guards (they rely on a fixed include
+    // order), so anything including both would double-define its constants.
     // set while replaying an entry, so applying it doesn't push it again
     bool libraryNavReplaying = false;
     int librarySidebarDx = 0;

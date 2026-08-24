@@ -205,6 +205,7 @@ static LRESULT OnSetCursorAbout(MainWindow* win, HWND hwnd) {
         StaticLink* link = nullptr;
         if (GetStaticLinkAtTemp(win->staticLinks, pt.x, pt.y, &link)) {
             SetCursorCached(IDC_HAND);
+            HomePageSetHotLink(win, link ? link->target : Str{});
             // File entries: selection/tip are driven only by real WM_MOUSEMOVE
             // (and keyboard). Do not call HomePageOnHover here — after arrow-key
             // selection the canvas invalidates and WM_SETCURSOR would snap the
@@ -217,6 +218,7 @@ static LRESULT OnSetCursorAbout(MainWindow* win, HWND hwnd) {
             // not on a link — hide tip; keyboard selection outline stays
             win->DeleteToolTip();
             SetCursorCached(IDC_ARROW);
+            HomePageSetHotLink(win, Str{});
         }
         return TRUE;
     }
@@ -308,6 +310,15 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
             break;
 
         case WM_MOUSEMOVE:
+            {
+                // Hover feedback from the move's own coordinates. The
+                // WM_SETCURSOR path hit-tests the real cursor position, which
+                // is right for the cursor but leaves the highlight stale when
+                // the surface scrolls or repaints under a still pointer.
+                StaticLink* hotLink = nullptr;
+                GetStaticLinkAtTemp(win->staticLinks, x, y, &hotLink);
+                HomePageSetHotLink(win, hotLink ? hotLink->target : Str{});
+            }
             if (HomePageOnLibraryResizeMouse(win, msg, x, y)) {
                 return 0;
             }
@@ -326,6 +337,12 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
             if (win->touchAboutPointerId == 0) {
                 win->touchAboutSuppressMouseUp = false;
             }
+            {
+                // press feedback: the link under the finger sinks and darkens
+                StaticLink* downLink = nullptr;
+                GetStaticLinkAtTemp(win->staticLinks, x, y, &downLink);
+                HomePageSetPressedLink(win, downLink ? downLink->target : Str{});
+            }
             OnMouseLeftButtonDownAbout(win, x, y, wp);
             return 0;
 
@@ -333,6 +350,7 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
             if (HomePageOnLibraryResizeMouse(win, msg, x, y)) {
                 return 0;
             }
+            HomePageSetPressedLink(win, Str{});
             if (win->touchAboutSuppressMouseUp) {
                 win->touchAboutSuppressMouseUp = false;
                 str::FreePtr(&win->urlOnLastButtonDown);

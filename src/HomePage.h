@@ -65,6 +65,12 @@ void HomePageKineticTick(MainWindow* win);
 // tap-and-hold on a card opened the context menu
 void HomePageOnHoldTimer(MainWindow* win);
 
+// Library hover / press feedback. The canvas reports which link is under the
+// pointer and which is held down; the draw pass paints one overlay for it.
+void HomePageSetHotLink(MainWindow* win, Str target);
+void HomePageSetPressedLink(MainWindow* win, Str target);
+void HomePageFeedbackTick(MainWindow* win);
+
 // Library back/forward. A destination is pushed when the user picks it; going
 // back/forward replays an entry without pushing it again.
 void LibraryNavPush(MainWindow* win, Str entry);

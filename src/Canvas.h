@@ -39,4 +39,6 @@ constexpr UINT_PTR kLibraryScrollTimerID = 14;
 // tap-and-hold on a Recent/Library card opens the same context menu as a
 // right-click (there is no right button on a touchscreen)
 constexpr UINT_PTR kAboutHoldTimerID = 15;
+// drives the Library's hover / press feedback while it is easing
+constexpr UINT_PTR kLibraryFeedbackTimerID = 16;
 constexpr uint kSelectionToolbarShowDelayInMs = 500;
