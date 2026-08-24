@@ -819,6 +819,9 @@ struct TabInfo {
 // bridge for the app's "larger tabs" pref (wingui does not read GlobalPrefs)
 void TabsSetLargerTabs(bool larger);
 bool TabsLargerTabs();
+// bridge for the app's "two row tabs" pref (wrap the label onto a second line)
+void TabsSetTwoRowTabs(bool twoRow);
+bool TabsTwoRowTabs();
 
 struct TabsCtrl : Wnd {
     struct CreateArgs {
@@ -884,6 +887,8 @@ struct TabsCtrl : Wnd {
     Rect addButtonRect;
     // last item size handed to the native control (see LayoutTabs)
     int lastNativeTabDx = -1;
+    // Hover cross-fade state lives in TabsCtrl.cpp: AnimVal/AnimTimer would
+    // need wingui/Anim.h here, and this header has no include guard.
     // "..." overflow next to the + : reopen last closed tab, tab size, theme
     Rect menuButtonRect;
     Func0 onPreview;

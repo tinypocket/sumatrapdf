@@ -9,6 +9,7 @@
 
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
+#include "wingui/Anim.h"
 
 #include "Theme.h"
 #include "TouchMetrics.h"
@@ -63,11 +64,76 @@ void TabsCtrl::ScheduleRepaint() {
 
 // Calculates tab's elements, based on its width and height.
 // Generates a GraphicsPath, which is used for painting the tab, etc.
+// --- tab hover cross-fade -------------------------------------------------
+// Owned here rather than on TabsCtrl: AnimVal/AnimTimer would need Anim.h in
+// WinGui.h, which has no include guard. Only one tab strip is hovered at a
+// time, so one set of state plus the control that owns it is enough.
+constexpr UINT_PTR kTabHoverTimerId = 31;
+static TabsCtrl* gHoverCtrl = nullptr;
+static int gAnimHotTab = -1;
+static int gAnimPrevHotTab = -1;
+static AnimVal gTabHotIn;
+static AnimVal gTabHotOut;
+
+// 0..1 hover weight for one tab, whatever the animation state
+static float TabHoverAmount(TabsCtrl* ctrl, int idx, int tabUnderMouse) {
+    if (gHoverCtrl != ctrl || !AnimEnabled()) {
+        return (idx == tabUnderMouse) ? 1.0f : 0.0f;
+    }
+    if (idx == gAnimHotTab) {
+        return gTabHotIn.Value();
+    }
+    if (idx == gAnimPrevHotTab) {
+        return gTabHotOut.Value();
+    }
+    return (idx == tabUnderMouse) ? 1.0f : 0.0f;
+}
+
+static void UpdateTabHoverTimer(TabsCtrl* ctrl) {
+    if (!ctrl || !ctrl->hwnd) {
+        return;
+    }
+    if (gTabHotIn.IsAnimating() || gTabHotOut.IsAnimating()) {
+        SetTimer(ctrl->hwnd, kTabHoverTimerId, kAnimTickMs, nullptr);
+    } else {
+        KillTimer(ctrl->hwnd, kTabHoverTimerId);
+    }
+}
+
+static void SetTabHovered(TabsCtrl* ctrl, int idx) {
+    if (gHoverCtrl != ctrl) {
+        gHoverCtrl = ctrl;
+        gAnimHotTab = -1;
+        gAnimPrevHotTab = -1;
+        gTabHotIn.Set(0.0f);
+        gTabHotOut.Set(0.0f);
+    }
+    if (idx == gAnimHotTab) {
+        return;
+    }
+    if (AnimEnabled()) {
+        // the tab being left fades out from wherever it currently is
+        gAnimPrevHotTab = gAnimHotTab;
+        gTabHotOut.Set(gTabHotIn.Value());
+        gTabHotOut.SetTarget(0.0f, kAnimHoverMs);
+        gAnimHotTab = idx;
+        gTabHotIn.Set(0.0f);
+        gTabHotIn.SetTarget(idx >= 0 ? 1.0f : 0.0f, kAnimHoverMs);
+        UpdateTabHoverTimer(ctrl);
+    } else {
+        gAnimHotTab = idx;
+        gAnimPrevHotTab = -1;
+    }
+    HwndScheduleRepaint(ctrl->hwnd);
+}
+
 // The app's "larger tabs" preference, pushed down from app code the same way
 // AnimSetAppEnabled bridges the animation pref: wingui must not read
 // GlobalPrefs itself. Scales the pill width; the strip height and font are
 // scaled by the app side (see TouchTitleBarTabsDy).
 static bool gLargerTabs = false;
+// wraps a long label onto a second line instead of cutting it with an ellipsis
+static bool gTwoRowTabs = false;
 
 void TabsSetLargerTabs(bool larger) {
     gLargerTabs = larger;
@@ -75,6 +141,14 @@ void TabsSetLargerTabs(bool larger) {
 
 bool TabsLargerTabs() {
     return gLargerTabs;
+}
+
+void TabsSetTwoRowTabs(bool twoRow) {
+    gTwoRowTabs = twoRow;
+}
+
+bool TabsTwoRowTabs() {
+    return gTwoRowTabs;
 }
 
 void TabsCtrl::LayoutTabs() {
@@ -395,8 +469,11 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
         bool isUnderMouse = tabUnderMouse == i;
         if (isSelected) {
             tabBgCol = tabBgSelected;
-        } else if (isUnderMouse) {
-            tabBgCol = tabBgHighlight;
+        } else {
+            float hoverAmt = TabHoverAmount(this, i, tabUnderMouse);
+            if (hoverAmt > 0.0f) {
+                tabBgCol = AnimLerpColor(tabBgBackground, tabBgHighlight, hoverAmt);
+            }
         }
 
         // bounded loop with a valid index: index tabs directly (avoids the
@@ -448,7 +525,20 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
         br.SetColor(GdipCol(textColor));
         WCHAR* ws = CWStrTemp(ti->text);
         Font* font = isSelected ? &fSelected : &fNormal;
-        gfx.DrawString(ws, -1, font, rTxt, &sf, &br);
+        if (gTwoRowTabs) {
+            // Two lines: wrap at a word if one fits, else mid-word, and clip
+            // the rest. sf is shared and configured for one no-wrap line, so
+            // this needs its own format rather than mutating it.
+            StringFormat sf2(StringFormat::GenericDefault());
+            sf2.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+            sf2.SetLineAlignment(StringAlignmentCenter);
+            if (IsTabsRtl(hwnd)) {
+                sf2.SetAlignment(Gdiplus::StringAlignmentFar);
+            }
+            gfx.DrawString(ws, -1, font, rTxt, &sf2, &br);
+        } else {
+            gfx.DrawString(ws, -1, font, rTxt, &sf, &br);
+        }
 
         // draw red dot after tab text for dirty (unsaved) tabs
         if (ti->isDirty) {
@@ -697,6 +787,8 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         canClose = tabState.tabInfo && tabState.tabInfo->canClose;
         overClose = tabState.overClose && canClose;
         lastMousePos = mousePos;
+        // hover cross-fade follows whatever the pointer is over
+        SetTabHovered(this, (msg == WM_MOUSELEAVE) ? -1 : tabUnderMouse);
         // TempStr msgName = WinMsgNameTemp(msg);
         //  logfa("msg; %s, tabUnderMouse: %d, overClose: %d\n", msgName, tabUnderMouse, (int)overClose);
     }
@@ -745,7 +837,16 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             LayoutTabs();
             break;
 
+        case WM_TIMER:
+            if (wp == kTabHoverTimerId) {
+                HwndScheduleRepaint(hwnd);
+                UpdateTabHoverTimer(this);
+                return 0;
+            }
+            break;
+
         case WM_MOUSELEAVE:
+            SetTabHovered(this, -1);
             if (previewHovered) {
                 previewHovered = false;
                 onPreviewHover.Call(false);

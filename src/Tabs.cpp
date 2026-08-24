@@ -628,7 +628,12 @@ int TouchTitleBarDy() {
     if (!SettingsUseTabs()) {
         return kTitleBarDy;
     }
-    return TabsLargerTabs() ? kTitleBarTabsLargeDy : kTitleBarTabsDy;
+    int dy = TabsLargerTabs() ? kTitleBarTabsLargeDy : kTitleBarTabsDy;
+    if (TabsTwoRowTabs()) {
+        // a wrapped label needs room for the second line
+        dy += kTabTwoRowExtraDy;
+    }
+    return dy;
 }
 
 // The "..." next to the + in the tab bar. Small, self-contained menu: the
@@ -641,6 +646,7 @@ static void MainWindowTabMenu(MainWindow* win) {
     constexpr int kTabMenuReopen = 1;
     constexpr int kTabMenuTheme = 2;
     constexpr int kTabMenuLargerTabs = 3;
+    constexpr int kTabMenuTwoRowTabs = 4;
 
     HMENU popup = CreatePopupMenu();
     bool canReopen = RecentlyCloseDocumentsCount() > 0;
@@ -649,6 +655,8 @@ static void MainWindowTabMenu(MainWindow* win) {
     AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
     bool larger = gGlobalPrefs->largerTabs;
     AppendMenuW(popup, MF_STRING | (larger ? MF_CHECKED : MF_UNCHECKED), kTabMenuLargerTabs, L"Larger tabs");
+    bool twoRow = gGlobalPrefs->twoRowTabs;
+    AppendMenuW(popup, MF_STRING | (twoRow ? MF_CHECKED : MF_UNCHECKED), kTabMenuTwoRowTabs, L"Two-row tab labels");
     bool isDark = !IsLightColor(ThemeWindowBackgroundColor());
     AppendMenuW(popup, MF_STRING | (isDark ? MF_CHECKED : MF_UNCHECKED), kTabMenuTheme, L"Dark mode");
     MarkMenuOwnerDraw(popup);
@@ -667,9 +675,15 @@ static void MainWindowTabMenu(MainWindow* win) {
         case kTabMenuTheme:
             HwndSendCommand(win->hwndFrame, CmdToggleLightDarkTheme);
             break;
+        case kTabMenuTwoRowTabs:
         case kTabMenuLargerTabs: {
-            gGlobalPrefs->largerTabs = !gGlobalPrefs->largerTabs;
-            TabsSetLargerTabs(gGlobalPrefs->largerTabs);
+            if (cmdId == kTabMenuTwoRowTabs) {
+                gGlobalPrefs->twoRowTabs = !gGlobalPrefs->twoRowTabs;
+                TabsSetTwoRowTabs(gGlobalPrefs->twoRowTabs);
+            } else {
+                gGlobalPrefs->largerTabs = !gGlobalPrefs->largerTabs;
+                TabsSetLargerTabs(gGlobalPrefs->largerTabs);
+            }
             SaveSettings();
             // the strip height changes, so the frame has to redo its caption
             // layout, not just repaint the tabs

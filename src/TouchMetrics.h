@@ -77,6 +77,8 @@
 #define kTabPillLargeMinDx 180
 #define kTabPillLargeMaxDx 280
 #define kTitleBarTabsLargeDy 60
+// extra strip height when a tab label wraps onto a second line
+#define kTabTwoRowExtraDy 16
 #define kTabCloseDy 24 // close button inside a finger-sized title-bar tab
 #define kTabPillGap 4  // horizontal gap between two tab pills
 

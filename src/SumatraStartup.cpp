@@ -2466,6 +2466,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     AnimSetAppEnabled(gGlobalPrefs->animateUI);
     AnimSetElaborate(gGlobalPrefs->elaborateAnimations);
     TabsSetLargerTabs(gGlobalPrefs->largerTabs);
+    TabsSetTwoRowTabs(gGlobalPrefs->twoRowTabs);
     if (gMyWindowWasEmbedded) {
         str::ReplaceWithCopy(&gGlobalPrefs->scrollbars, "windows");
     }

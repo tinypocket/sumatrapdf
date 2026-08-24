@@ -1372,6 +1372,12 @@ const globalPrefs: Field[] = [
     "if true, the blank top and bottom margins of each page are cropped out of the layout, so less scrolling is needed to reach the next page's content. Page width is unaffected",
   ).ver("3.8"),
   field(
+    "TwoRowTabs",
+    Bool,
+    false,
+    "if true, a tab's label wraps onto a second line instead of being cut short with an ellipsis, so more of a long filename is readable. Makes the tab strip taller",
+  ).ver("3.8"),
+  field(
     "LargerTabs",
     Bool,
     false,

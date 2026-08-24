@@ -1016,6 +1016,11 @@ ElaborateAnimations = false
 ; width is unaffected (introduced in version 3.8)
 SmartMargins = false
 
+; if true, a tab's label wraps onto a second line instead of being cut short
+; with an ellipsis, so more of a long filename is readable. Makes the tab strip
+; taller (introduced in version 3.8)
+TwoRowTabs = false
+
 ; if true, the document tabs in the title bar are taller and wider with larger
 ; text; easier to read and to hit with a finger (introduced in version 3.8)
 LargerTabs = false
