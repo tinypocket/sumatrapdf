@@ -2124,6 +2124,9 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     MainWindow* win = nullptr;
     bool showStartPage = false;
     bool restoreSession = false;
+    // declared up here with restoreSession: a goto Exit below would otherwise
+    // jump over its initialization
+    bool reopenAfterUpdate = false;
     HANDLE hMutex = nullptr;
     HWND existingInstanceHwnd = nullptr;
     HWND existingHwnd = nullptr;
@@ -2622,7 +2625,34 @@ ContinueOpenWindow:
     gInitialSessionData = gGlobalPrefs->sessionData;
     gGlobalPrefs->sessionData = new Vec<SessionData*>();
 
-    restoreSession = SettingsRestoreSession() && (len(*gInitialSessionData) > 0) && !NeedsWindowEmbeddingHacks();
+    // A just-installed update left a one-shot marker asking for the documents
+    // that were open before the handover to come back, even for users who keep
+    // session restore off. Consume it here so it applies exactly once.
+    if (gGlobalPrefs->reopenOnce) {
+        for (Str s : *gGlobalPrefs->reopenOnce) {
+            if (str::EqI(s, StrL("SessionData"))) {
+                reopenAfterUpdate = true;
+                break;
+            }
+        }
+        if (reopenAfterUpdate) {
+            for (Str s : *gGlobalPrefs->reopenOnce) {
+                str::Free(s);
+            }
+            gGlobalPrefs->reopenOnce->Reset();
+            // NOT left empty: the serializer skips an empty array
+            // ("prevent empty arrays from being replaced with the defaults")
+            // and SaveSettings then preserves the previous text, so the marker
+            // would survive and silently turn into permanent session restore.
+            // One empty entry makes the field non-empty, so it is rewritten as
+            // "ReopenOnce =", which no longer matches the SessionData marker.
+            gGlobalPrefs->reopenOnce->Append(str::Dup(StrL("")));
+            log("restoring documents that were open before an update");
+        }
+    }
+
+    restoreSession = (SettingsRestoreSession() || reopenAfterUpdate) && (len(*gInitialSessionData) > 0) &&
+                     !NeedsWindowEmbeddingHacks();
     if (!SettingsUseTabs() && (existingInstanceHwnd != nullptr)) {
         // do not restore a session if tabs are disabled and SumatraPDF is already running
         // TODO: maybe disable restoring if tabs are disabled?

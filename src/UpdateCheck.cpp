@@ -249,6 +249,28 @@ static bool ShouldCheckForUpdate(UpdateCheck updateCheckType) {
     return true;
 }
 
+// Remember what is open so the freshly installed copy can put it back.
+// ReopenOnce has been in the settings schema all along, documented as "data
+// required for reloading documents after an auto-update", but nothing ever
+// read or wrote it - so an update silently lost the user's open documents.
+// The marker is one-shot: startup restores, then clears it, so this does not
+// become a permanent session-restore for someone who has that turned off.
+static void RememberOpenFilesForUpdate() {
+    Vec<Str>* reopen = gGlobalPrefs->reopenOnce;
+    if (!reopen) {
+        reopen = new Vec<Str>();
+        gGlobalPrefs->reopenOnce = reopen;
+    }
+    for (Str s : *reopen) {
+        str::Free(s);
+    }
+    reopen->Reset();
+    reopen->Append(str::Dup(StrL("SessionData")));
+    // SaveSettings runs RememberSessionState, which fills sessionData with the
+    // open windows and their tabs
+    SaveSettings();
+}
+
 void StartInstallerAutoUpgrade(Str installerPath) {
     bool privateFeed = !!GetPrivateUpdateFeedURL();
     if (!privateFeed) {
@@ -277,6 +299,9 @@ void StartInstallerAutoUpgrade(Str installerPath) {
         cmd.Append(fmt(R"( -sleep-ms 2000 -exit-when-done -update-self-to "%s")", GetSelfExePathTemp()));
     }
     logf("StartInstallerAutoUpgrade: installer cmd: '%s'\n", ToStr(cmd));
+    // last thing before handing over: the settings file must be on disk before
+    // the installer replaces us
+    RememberOpenFilesForUpdate();
     CreateProcessHelper(installerPath, ToStr(cmd));
 }
 
