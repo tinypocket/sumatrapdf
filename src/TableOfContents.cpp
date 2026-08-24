@@ -2083,11 +2083,21 @@ static int TouchPanelMaxScroll(MainWindow* win) {
     return std::max(0, contentBottom - client.dy);
 }
 
+static void PaintTouchPanelPress(MainWindow* win, HDC hdc);
+
 static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
     TouchPanelMode mode = win->touchPanelMode;
     if (mode == TouchPanelMode::Bookmarks) {
         return;
     }
+    // drawn at the end of every return path below
+    struct PressOverlay {
+        MainWindow* w;
+        HDC dc;
+        ~PressOverlay() {
+            PaintTouchPanelPress(w, dc);
+        }
+    } pressOverlay{win, hdc};
     Rect rc = HwndClientRect(win->hwndTocBox);
     HdcFillRect(hdc, Rect{0, DpiScale(win->hwndTocBox, kPanelHeaderDy), rc.dx, rc.dy}, ThemeHotBackgroundColor());
     SetBkMode(hdc, TRANSPARENT);
@@ -2420,6 +2430,138 @@ static void PaintTouchFilterChrome(MainWindow* win, bool ownsBodyBelow) {
     HwndInvalidate(edit->hwnd, false);
 }
 
+constexpr UINT_PTR kTouchPanelPressTimerId = 22;
+
+// --- panel press feedback ------------------------------------------------
+// The panel's rows are pure tap targets and answered a tap with nothing until
+// the view changed, which on a touchscreen is the one place feedback matters
+// most. One overlay, same idea as the Library's.
+static MainWindow* gPanelPressWin = nullptr;
+static Rect gPanelPressRect;
+static AnimVal gPanelPressVal;
+
+// Which row/card sits under a point, for the modes whose rows are a simple
+// list. Bookmarks is a real TreeView with its own selection drawing, so it is
+// deliberately left alone.
+static bool TouchPanelHitRect(MainWindow* win, Point pt, Rect* out) {
+    if (!win || !win->hwndTocBox) {
+        return false;
+    }
+    HWND hwnd = win->hwndTocBox;
+    Rect client = HwndClientRect(hwnd);
+    TouchPanelMode mode = win->touchPanelMode;
+
+    if (mode == TouchPanelMode::Thumbnails && win->ctrl) {
+        int count = win->ctrl->PageCount();
+        for (int i = 0; i < count; i++) {
+            Rect r = TouchThumbnailRect(win, i);
+            if (r.Contains(pt)) {
+                *out = r;
+                return true;
+            }
+        }
+        return false;
+    }
+    if (mode == TouchPanelMode::Search) {
+        for (int i = 0; i < len(win->findMatches); i++) {
+            Rect r = TouchSearchResultRect(win, i);
+            if (r.Contains(pt)) {
+                *out = r;
+                return true;
+            }
+        }
+        return false;
+    }
+    // Favorites / Annotations / Attachments all lay rows out the same way
+    if (mode == TouchPanelMode::Favorites || mode == TouchPanelMode::Annotations ||
+        mode == TouchPanelMode::Attachments) {
+        int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
+        int y0 = DpiScale(hwnd, kPanelHeaderDy + 12) - win->touchPanelScrollY;
+        if (rowDy <= 0 || pt.y < y0) {
+            return false;
+        }
+        int idx = (pt.y - y0) / rowDy;
+        if (idx < 0) {
+            return false;
+        }
+        if (mode == TouchPanelMode::Favorites) {
+            // the per-document group headings are not tap targets, so they must
+            // not light up either - feedback has to mean something will happen
+            Vec<TouchFavRow> rows;
+            CollectTouchFavRows(rows);
+            if (idx >= len(rows) || rows[idx].isHeader) {
+                return false;
+            }
+        }
+        *out = Rect{DpiScale(hwnd, 12), y0 + idx * rowDy, client.dx - DpiScale(hwnd, 24), rowDy};
+        return true;
+    }
+    return false;
+}
+
+static void UpdatePanelPressTimer(MainWindow* win) {
+    if (!win || !win->hwndTocBox) {
+        return;
+    }
+    if (gPanelPressVal.IsAnimating()) {
+        SetTimer(win->hwndTocBox, kTouchPanelPressTimerId, kAnimTickMs, nullptr);
+    } else {
+        KillTimer(win->hwndTocBox, kTouchPanelPressTimerId);
+    }
+}
+
+static void SetTouchPanelPressed(MainWindow* win, Point pt, bool down) {
+    if (!win) {
+        return;
+    }
+    Rect r;
+    bool hit = down && TouchPanelHitRect(win, pt, &r);
+    if (hit) {
+        gPanelPressWin = win;
+        gPanelPressRect = r;
+    }
+    float target = hit ? 1.0f : 0.0f;
+    if (AnimEnabled()) {
+        gPanelPressVal.SetTarget(target, hit ? kAnimPressMs : kAnimPressReleaseMs);
+        UpdatePanelPressTimer(win);
+    } else {
+        gPanelPressVal.Set(target);
+    }
+    HwndInvalidate(win->hwndTocBox, false);
+}
+
+static void PaintTouchPanelPress(MainWindow* win, HDC hdc) {
+    if (gPanelPressWin != win) {
+        return;
+    }
+    float amt = gPanelPressVal.Value();
+    if (amt <= 0.01f || gPanelPressRect.IsEmpty()) {
+        return;
+    }
+    Rect r = gPanelPressRect;
+    int inset = (int)((float)DpiScale(win->hwndTocBox, 2) * amt + 0.5f);
+    r.x += inset;
+    r.y += inset;
+    r.dx -= inset * 2;
+    r.dy -= inset * 2;
+    if (r.dx <= 0 || r.dy <= 0) {
+        return;
+    }
+    Gdiplus::Graphics gfx(hdc);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    COLORREF col = ThemeWindowTextColor();
+    Gdiplus::Color c((u8)(38.0f * amt), GetRValue(col), GetGValue(col), GetBValue(col));
+    Gdiplus::SolidBrush br(c);
+    int d = std::min(DpiScale(win->hwndTocBox, 10) * 2, std::min(r.dx, r.dy));
+    Gdiplus::GraphicsPath path;
+    path.AddArc(r.x, r.y, d, d, 180.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y, d, d, 270.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y + r.dy - d, d, d, 0.0f, 90.0f);
+    path.AddArc(r.x, r.y + r.dy - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+    gfx.FillPath(&br, &path);
+}
+
 static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
     HWND hwnd = win->hwndTocBox;
     if (win->tocFilterEdit && HwndIsVisible(win->tocFilterEdit->hwnd) &&
@@ -2612,6 +2754,11 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             break;
 
         case WM_TIMER:
+            if (wp == kTouchPanelPressTimerId) {
+                HwndInvalidate(hwnd, false);
+                UpdatePanelPressTimer(win);
+                return 0;
+            }
             if (wp == kTouchPanelScrollTimerId) {
                 bool moving = KsTick(win->touchPanelKs);
                 win->touchPanelScrollY = KsPos(win->touchPanelKs);
@@ -2630,10 +2777,12 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             break;
 
         case WM_LBUTTONDOWN:
+            SetTouchPanelPressed(win, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}, true);
             CloseTouchDocumentOverlays(win);
             break;
 
         case WM_LBUTTONUP:
+            SetTouchPanelPressed(win, Point{}, false);
             if (ActivateTouchPanelAt(win, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)})) {
                 return 0;
             }
@@ -2645,6 +2794,7 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                 win->touchPanelPointerStart = HwndScreenToClient(hwnd, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
                 win->touchPanelPointerStartScrollY = win->touchPanelScrollY;
                 win->touchPanelPointerMoved = false;
+                SetTouchPanelPressed(win, win->touchPanelPointerStart, true);
                 // touching a coasting list catches it
                 SyncTouchPanelScroll(win);
                 KsStop(win->touchPanelKs);
@@ -2664,6 +2814,8 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                     win->touchPanelPointerMoved = true;
                 }
                 if (win->touchPanelPointerMoved) {
+                    // became a drag, so it is no longer a press on a row
+                    SetTouchPanelPressed(win, Point{}, false);
                     KsDragUpdate(win->touchPanelKs, pt.y);
                     win->touchPanelScrollY = KsPos(win->touchPanelKs);
                     HwndInvalidate(hwnd, false);
@@ -2676,6 +2828,7 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             if (LOWORD(wp) == win->touchPanelPointerId) {
                 Point pt = HwndScreenToClient(hwnd, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
                 bool activate = !win->touchPanelPointerMoved;
+                SetTouchPanelPressed(win, Point{}, false);
                 win->touchPanelPointerId = 0;
                 win->touchPanelPointerMoved = false;
                 // let go of a flick and the list coasts to a stop
