@@ -262,6 +262,16 @@ void SetTouchSidebarCollapsed(MainWindow* win, bool collapsed) {
     win->touchSidebarCollapsed = collapsed;
     win->uiState.tocVisible = !collapsed;
     win->uiState.favVisible = false;
+    // Record it on the tab as well. The classic chrome persists the panel's
+    // state through SetSidebarVisibility (which writes tab->showToc); the touch
+    // chrome sets uiState directly and used to leave showToc stale at true. So
+    // closing the panel here and then leaving fullscreen - or reopening the
+    // file later - restored it from that stale true and popped the panel back
+    // open. showToc is also what FileState saves per document.
+    WindowTab* tab = win->CurrentTab();
+    if (tab && !tab->IsAboutTab()) {
+        tab->showToc = !collapsed;
+    }
     UpdateRailForWindow(win);
     ScheduleUiUpdate(win, kUiForceRelayout | kUiSidebarDirty | kUiToolbarDirty);
 }
@@ -350,6 +360,11 @@ void SetTouchPanelMode(MainWindow* win, TouchPanelMode mode) {
     win->touchSidebarCollapsed = false;
     win->touchPanelScrollY = 0;
     win->uiState.tocVisible = true;
+    // opening a panel is the other half of the same state (see above)
+    WindowTab* panelTab = win->CurrentTab();
+    if (panelTab && !panelTab->IsAboutTab()) {
+        panelTab->showToc = true;
+    }
     win->uiState.favVisible = false;
     UpdateRailForWindow(win);
     ScheduleUiUpdate(win, kUiForceRelayout | kUiSidebarDirty);
