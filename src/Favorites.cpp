@@ -291,6 +291,11 @@ static void SortFileFavorites(FileState* fs) {
     if (!fs || !fs->favorites || len(*fs->favorites) < 2) {
         return;
     }
+    // Once the user has arranged them by hand, the stored order IS the order;
+    // re-sorting here would undo the drag on the next add or reload.
+    if (gGlobalPrefs->favoritesManualOrder) {
+        return;
+    }
     if (gGlobalPrefs->sortFavoritesByName) {
         VecSort(*fs->favorites, SortByName);
     } else {
@@ -1228,6 +1233,28 @@ void GetFilesWithFavorites(Vec<FileState*>& out) {
             out.Append(fs);
         }
     }
+}
+
+// Move a favorite within its own document, for drag-to-reorder in the panel.
+// Switches the whole feature to manual ordering, since a hand-made order that
+// the next sort discards would be worse than not offering it.
+bool MoveFavorite(Str filePath, int fromIdx, int toIdx) {
+    FileState* fs = GetFavByFilePath(filePath);
+    if (!fs || !fs->favorites) {
+        return false;
+    }
+    Vec<Favorite*>* favs = fs->favorites;
+    int n = len(*favs);
+    if (fromIdx < 0 || fromIdx >= n || toIdx < 0 || toIdx >= n || fromIdx == toIdx) {
+        return false;
+    }
+    Favorite* moved = (*favs)[fromIdx];
+    favs->RemoveAt(fromIdx);
+    favs->InsertAt(toIdx, moved);
+    gGlobalPrefs->favoritesManualOrder = true;
+    UpdateFavoritesTreeForAllWindows();
+    SaveSettings();
+    return true;
 }
 
 // the favorites of one document, in sorted order; nullptr when it has none

@@ -36,6 +36,8 @@ void AddFavoriteQuiet(MainWindow* win, int pageNo, Str name);
 void RenameFavorite(Str filePath, int pageNo, Str newName);
 Vec<Favorite*>* GetFileFavorites(Str filePath);
 void GetFilesWithFavorites(Vec<FileState*>& out);
+// drag-to-reorder within one document; switches to manual ordering
+bool MoveFavorite(Str filePath, int fromIdx, int toIdx);
 void RebuildFavMenu(MainWindow* win, HMENU menu);
 void CreateFavorites(MainWindow* win);
 void ToggleFavorites(MainWindow* win); // sidebar

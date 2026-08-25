@@ -1366,6 +1366,12 @@ const globalPrefs: Field[] = [
     "if true (and AnimateUI is also true), animate more of the UI: in the web browser the tabs, favorites and nav buttons cross-fade on hover and sink when pressed instead of switching instantly. Ignored when AnimateUI is false",
   ).ver("3.8"),
   field(
+    "FavoritesManualOrder",
+    Bool,
+    false,
+    "if true, favorites keep the order you dragged them into instead of being sorted by page or name. Set automatically the first time you re-order one",
+  ).ver("3.8"),
+  field(
     "SmartMargins",
     Bool,
     false,

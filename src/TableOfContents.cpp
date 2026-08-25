@@ -2054,6 +2054,32 @@ static int TouchFavRowsTop(MainWindow* win) {
 // the delete target on a favorite row, and the "add current page" button in the
 // panel header. Both are computed here so the paint and the hit test cannot
 // drift apart.
+// --- favorites drag-to-reorder -------------------------------------------
+// Only within one document: the panel groups by file, and moving a favorite
+// between documents would mean re-homing it, which is a different action.
+static MainWindow* gFavDragWin = nullptr;
+static int gFavDragFromRow = -1;   // index into the flattened row list
+static int gFavDragOverRow = -1;   // where it would land
+static bool gFavDragActive = false;
+
+static void ResetFavDrag() {
+    gFavDragWin = nullptr;
+    gFavDragFromRow = -1;
+    gFavDragOverRow = -1;
+    gFavDragActive = false;
+}
+
+// which flattened row a y lands on, or -1
+static int TouchFavRowAt(MainWindow* win, int y, int nRows) {
+    int rowDy = DpiScale(win->hwndTocBox, TouchSidebarListRowDy());
+    int y0 = TouchFavRowsTop(win);
+    if (rowDy <= 0 || y < y0) {
+        return -1;
+    }
+    int idx = (y - y0) / rowDy;
+    return (idx >= 0 && idx < nRows) ? idx : -1;
+}
+
 static Rect TouchFavDeleteRect(MainWindow* win, const Rect& row) {
     HWND hw = win->hwndTocBox;
     int d = DpiScale(hw, 26);
@@ -2302,6 +2328,22 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             Rect pr{r.x + r.dx - DpiScale(hw, 82), r.y, DpiScale(hw, 44), r.dy};
             HdcDrawText(hdc, pageStr, pr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
+            // where a dragged favorite would land
+            if (gFavDragActive && gFavDragWin == win && gFavDragOverRow == i && gFavDragFromRow != i) {
+                Gdiplus::Graphics dg(hdc);
+                Gdiplus::SolidBrush accent(GdiRgbFromCOLORREF(ThemeWindowLinkColor()));
+                bool below = gFavDragFromRow < i;
+                int lineY = below ? (r.y + r.dy - DpiScale(hw, 1)) : r.y;
+                dg.FillRectangle(&accent, r.x, lineY, r.dx, std::max(2, DpiScale(hw, 2)));
+            }
+            // the row being dragged reads as lifted
+            if (gFavDragActive && gFavDragWin == win && gFavDragFromRow == i) {
+                Gdiplus::Graphics dg(hdc);
+                COLORREF c = ThemeWindowTextColor();
+                Gdiplus::SolidBrush lift(Gdiplus::Color(28, GetRValue(c), GetGValue(c), GetBValue(c)));
+                dg.FillRectangle(&lift, r.x, r.y, r.dx, r.dy);
+            }
+
             // delete: a small x at the end of the row
             Rect del = TouchFavDeleteRect(win, r);
             Gdiplus::Graphics gfx(hdc);
@@ -2493,6 +2535,7 @@ static void PaintTouchFilterChrome(MainWindow* win, bool ownsBodyBelow) {
 }
 
 constexpr UINT_PTR kTouchPanelPressTimerId = 22;
+
 
 // --- panel press feedback ------------------------------------------------
 // The panel's rows are pure tap targets and answered a tap with nothing until
@@ -2853,11 +2896,83 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 
         case WM_LBUTTONDOWN:
             SetTouchPanelPressed(win, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}, true);
+            if (win->touchPanelMode == TouchPanelMode::Favorites) {
+                Vec<TouchFavRow> rows;
+                CollectTouchFavRows(rows);
+                int idx = TouchFavRowAt(win, GET_Y_LPARAM(lp), len(rows));
+                // headers are not draggable, and neither is the delete target
+                if (idx >= 0 && !rows[idx].isHeader) {
+                    Rect client = HwndClientRect(hwnd);
+                    int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
+                    Rect row{DpiScale(hwnd, 12), TouchFavRowsTop(win) + idx * rowDy,
+                             client.dx - DpiScale(hwnd, 24), rowDy};
+                    if (!TouchFavDeleteRect(win, row).Contains(Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)})) {
+                        gFavDragWin = win;
+                        gFavDragFromRow = idx;
+                        gFavDragOverRow = idx;
+                        gFavDragActive = false; // becomes a drag once it moves
+                        SetCapture(hwnd);
+                    }
+                }
+            }
             CloseTouchDocumentOverlays(win);
+            break;
+
+        case WM_MOUSEMOVE:
+            if (gFavDragWin == win && gFavDragFromRow >= 0) {
+                Vec<TouchFavRow> rows;
+                CollectTouchFavRows(rows);
+                int idx = TouchFavRowAt(win, GET_Y_LPARAM(lp), len(rows));
+                // only within the same document, and never onto a heading
+                if (idx >= 0 && !rows[idx].isHeader && rows[idx].fs == rows[gFavDragFromRow].fs) {
+                    if (idx != gFavDragOverRow) {
+                        gFavDragOverRow = idx;
+                        HwndInvalidate(hwnd, false);
+                    }
+                    if (idx != gFavDragFromRow) {
+                        gFavDragActive = true;
+                        SetTouchPanelPressed(win, Point{}, false);
+                    }
+                }
+                return 0;
+            }
             break;
 
         case WM_LBUTTONUP:
             SetTouchPanelPressed(win, Point{}, false);
+            if (gFavDragWin == win && gFavDragFromRow >= 0) {
+                bool wasDrag = gFavDragActive;
+                int from = gFavDragFromRow;
+                int to = gFavDragOverRow;
+                if (GetCapture() == hwnd) {
+                    ReleaseCapture();
+                }
+                ResetFavDrag();
+                if (wasDrag && from != to) {
+                    Vec<TouchFavRow> rows;
+                    CollectTouchFavRows(rows);
+                    if (from < len(rows) && to < len(rows) && rows[from].fs == rows[to].fs) {
+                        // flattened rows include headings, so convert to
+                        // indices within this document's own favorites
+                        int fromIdx = 0, toIdx = 0, seen = 0;
+                        for (int i = 0; i < len(rows); i++) {
+                            if (rows[i].isHeader || rows[i].fs != rows[from].fs) {
+                                continue;
+                            }
+                            if (i == from) {
+                                fromIdx = seen;
+                            }
+                            if (i == to) {
+                                toIdx = seen;
+                            }
+                            seen++;
+                        }
+                        MoveFavorite(rows[from].fs->filePath, fromIdx, toIdx);
+                    }
+                    HwndInvalidate(hwnd, false);
+                    return 0; // a drag is not a tap
+                }
+            }
             if (ActivateTouchPanelAt(win, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)})) {
                 return 0;
             }

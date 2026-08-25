@@ -1011,6 +1011,11 @@ AnimateUI = true
 ; (introduced in version 3.8)
 ElaborateAnimations = false
 
+; if true, favorites keep the order you dragged them into instead of being
+; sorted by page or name. Set automatically the first time you re-order one
+; (introduced in version 3.8)
+FavoritesManualOrder = false
+
 ; if true, the blank top and bottom margins of each page are cropped out of the
 ; layout, so less scrolling is needed to reach the next page's content. Page
 ; width is unaffected (introduced in version 3.8)
