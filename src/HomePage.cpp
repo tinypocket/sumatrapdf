@@ -3540,6 +3540,29 @@ static void DrawTouchLibraryFolderCard(MainWindow* win, HDC hdc, Str folderPath,
         win->staticLinks.Append(
             new StaticLink(linkRect, fmt("%s%s", Str(kLinkLibraryFolderPrefix), folderPath), folderPath));
     }
+
+    // Pin badge, same idiom as a file card's: folders could be pinned from the
+    // sidebar row's "..." but not from the card you are actually looking at.
+    // Appended after the whole-card link so the first-match hit test in
+    // GetStaticLinkAtTemp lets the badge win.
+    bool isPinned = TouchLibraryPathIn(gGlobalPrefs->libraryPinnedFolders, folderPath);
+    int badgeDx = DpiScale(hdc, 28);
+    Rect badge{card.x + card.dx - badgeDx - DpiScale(hdc, 6), card.y + DpiScale(hdc, 6), badgeDx, badgeDx};
+    Rect badgeLink = badge.Intersect(clip);
+    if (!badgeLink.IsEmpty()) {
+        COLORREF badgeBg = ThemeControlBackgroundColor();
+        FillHomeRoundRect(hdc, badge, badge.dy / 2, badgeBg);
+        COLORREF pinCol = isPinned ? ThemeWindowLinkColor() : ThemeWindowDarkerTextColor();
+        int pinDy = DpiScale(hdc, 16);
+        HIMAGELIST pinIml = GetTintedToolbarImageList(pinDy, pinCol, badgeBg);
+        if (pinIml) {
+            ImageList_Draw(pinIml, (int)TbIcon::Pin, hdc, badge.x + ((badge.dx - pinDy) / 2),
+                           badge.y + ((badge.dy - pinDy) / 2), ILD_NORMAL);
+        }
+        TempStr pinTarget = str::JoinTemp(kLinkLibraryPinPrefix, folderPath);
+        Str pinTip = isPinned ? _TRA("Unpin") : _TRA("Pin");
+        win->staticLinks.Append(new StaticLink(badgeLink, pinTarget, pinTip));
+    }
 }
 
 static void DrawTouchLibrarySolidFolderIcon(HDC hdc, const Rect& rect, COLORREF color) {
