@@ -138,6 +138,9 @@ static void OnMouseLeftButtonUpAbout(MainWindow* win, int x, int y, WPARAM /*key
         }
         if (fs) {
             fs->isPinned = !fs->isPinned;
+            // the link rects are still the ones the tap hit, so start the
+            // flight before the redraw rebuilds them
+            HomePageStartPinFlight(win, str::JoinTemp(kLinkHomePinFilePrefix, url), false, fs->isPinned);
             SaveSettings();
             win->DeleteToolTip();
             win->RedrawAll(true);

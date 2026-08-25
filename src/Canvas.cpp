@@ -3958,6 +3958,10 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
             HomePageOnHoldTimer(win);
             break;
 
+        case kPinFlightTimerID:
+            HomePagePinFlightTick(win);
+            break;
+
         case kLibraryFeedbackTimerID:
             HomePageFeedbackTick(win);
             break;

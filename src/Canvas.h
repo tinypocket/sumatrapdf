@@ -41,4 +41,5 @@ constexpr UINT_PTR kLibraryScrollTimerID = 14;
 constexpr UINT_PTR kAboutHoldTimerID = 15;
 // drives the Library's hover / press feedback while it is easing
 constexpr UINT_PTR kLibraryFeedbackTimerID = 16;
+constexpr UINT_PTR kPinFlightTimerID = 17;
 constexpr uint kSelectionToolbarShowDelayInMs = 500;

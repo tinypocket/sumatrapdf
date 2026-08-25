@@ -2038,6 +2038,7 @@ static void FillHomeRoundRect(HDC hdc, const Rect& r, int radius, COLORREF col, 
 // what is underneath, so this goes through GDI+ where the brush carries alpha.
 // defined with the rest of the Library feedback code, below
 static void DrawLibraryFeedback(MainWindow* win, HDC hdc);
+static void DrawPinFlight(MainWindow* win, HDC hdc);
 
 static void FillHomeRoundRectAlpha(HDC hdc, const Rect& r, int radius, COLORREF col, u8 alpha) {
     if (alpha == 0 || r.dx <= 0 || r.dy <= 0) {
@@ -2705,6 +2706,9 @@ static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc
         int rows = TouchCardRows(len(group), columns);
         y += rows * cardBlockDy + std::max(0, rows - 1) * gap + gap;
     };
+    // where a pin flight should land: the PINNED header's slot, whether or not
+    // the section is currently drawn (it is skipped when nothing is pinned)
+    HomePageSetPinAnchor(win, false, Rect{contentX, y, contentDx, DpiScale(hdc, 18)});
     drawGroup(StrL("PINNED"), pinned, false);
 
     // folder pills sit between the pinned files and the recent ones
@@ -3032,9 +3036,12 @@ bool HandleTouchLibraryLink(MainWindow* win, Str url) {
     } else if (str::TrimPrefix(url, kLinkLibraryMenuPrefix)) {
         str::ReplaceWithCopy(&win->libraryRowMenuPath, url);
     } else if (str::TrimPrefix(url, kLinkLibraryPinPrefix)) {
+        bool nowPinned = false;
         if (!TouchLibraryRemovePath(gGlobalPrefs->libraryPinnedFolders, url)) {
             TouchLibraryAddPath(&gGlobalPrefs->libraryPinnedFolders, url);
+            nowPinned = true;
         }
+        HomePageStartPinFlight(win, str::JoinTemp(kLinkLibraryPinPrefix, url), true, nowPinned);
         str::FreePtr(&win->libraryRowMenuPath);
         SaveSettings();
     } else if (str::TrimPrefix(url, kLinkLibraryHidePrefix)) {
@@ -3844,6 +3851,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                         HdcGetUiFont(hdc, 13));
         }
     } else {
+        HomePageSetPinAnchor(win, true, Rect{DpiScale(hdc, 16), y, leftDx - DpiScale(hdc, 32), DpiScale(hdc, 24)});
         bool hasPinned = false;
         Vec<Str>* pinned = gGlobalPrefs->libraryPinnedFolders;
         if (pinned) {
@@ -4174,6 +4182,7 @@ void DrawHomePage(MainWindow* win, HDC hdc) {
         DrawTouchLibraryPageV2(win, hdc);
         // after the content, so it sits on top of whatever the link covers
         DrawLibraryFeedback(win, hdc);
+        DrawPinFlight(win, hdc);
         return;
     }
 
@@ -4791,6 +4800,107 @@ static void DrawLibraryFeedback(MainWindow* win, HDC hdc) {
         int radius = std::min(DpiScale(hdc, 10), std::min(r.dx, r.dy) / 2);
         FillHomeRoundRectAlpha(hdc, r, radius, col, alpha);
     }
+}
+
+// Pinning moves an item somewhere else on the screen, and without a hint the
+// card simply vanishes from where it was. A small pin glyph flies from the
+// badge that was tapped to the PINNED section header, arcing up so the eye can
+// follow it. Unpinning flies the other way, back to the card.
+static MainWindow* gPinFlyWin = nullptr;
+static Point gPinFlyFrom;
+static Point gPinFlyTo;
+static AnimVal gPinFlyVal;
+static Rect gPinFilesAnchor;
+static Rect gPinFoldersAnchor;
+
+void HomePageSetPinAnchor(MainWindow* win, bool isFolder, Rect r) {
+    if (!win) {
+        return;
+    }
+    (isFolder ? gPinFoldersAnchor : gPinFilesAnchor) = r;
+}
+
+static void UpdatePinFlightTimer(MainWindow* win) {
+    if (!win || !win->hwndCanvas) {
+        return;
+    }
+    if (gPinFlyVal.IsAnimating()) {
+        SetTimer(win->hwndCanvas, kPinFlightTimerID, kAnimTickMs, nullptr);
+    } else {
+        KillTimer(win->hwndCanvas, kPinFlightTimerID);
+        gPinFlyWin = nullptr;
+    }
+}
+
+void HomePagePinFlightTick(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    HwndInvalidate(win->hwndCanvas, false);
+    UpdatePinFlightTimer(win);
+}
+
+void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool nowPinned) {
+    if (!win || !win->hwndCanvas || !AnimEnabled()) {
+        return;
+    }
+    Rect badge;
+    if (!FindLinkRect(win, target, &badge) || badge.IsEmpty()) {
+        return;
+    }
+    Rect anchor = isFolder ? gPinFoldersAnchor : gPinFilesAnchor;
+    if (anchor.IsEmpty()) {
+        return;
+    }
+    Point onCard{badge.x + badge.dx / 2, badge.y + badge.dy / 2};
+    Point onShelf{anchor.x + DpiScale(win->hwndCanvas, 9), anchor.y + anchor.dy / 2};
+    // pinning travels card -> shelf; unpinning is the same path run backwards
+    gPinFlyFrom = nowPinned ? onCard : onShelf;
+    gPinFlyTo = nowPinned ? onShelf : onCard;
+    gPinFlyWin = win;
+    gPinFlyVal.Set(0.0f);
+    gPinFlyVal.SetTarget(1.0f, kAnimPinFlightMs);
+    UpdatePinFlightTimer(win);
+    HwndInvalidate(win->hwndCanvas, false);
+}
+
+static void DrawPinFlight(MainWindow* win, HDC hdc) {
+    if (gPinFlyWin != win) {
+        return;
+    }
+    float t = gPinFlyVal.Value();
+    if (t <= 0.0f || t >= 1.0f) {
+        return;
+    }
+    // quadratic bezier with the control point lifted above the straight line,
+    // so the glyph arcs rather than sliding
+    float mx = (float)(gPinFlyFrom.x + gPinFlyTo.x) / 2.0f;
+    float my = (float)std::min(gPinFlyFrom.y, gPinFlyTo.y) - (float)DpiScale(hdc, 46);
+    float u = 1.0f - t;
+    float x = u * u * (float)gPinFlyFrom.x + 2.0f * u * t * mx + t * t * (float)gPinFlyTo.x;
+    float y = u * u * (float)gPinFlyFrom.y + 2.0f * u * t * my + t * t * (float)gPinFlyTo.y;
+    // shrinks as it arrives, and fades over the last third
+    int full = DpiScale(hdc, 22);
+    int dy = (int)((float)full * (1.0f - 0.45f * t) + 0.5f);
+    Rect glyph{(int)(x + 0.5f) - dy / 2, (int)(y + 0.5f) - dy / 2, dy, dy};
+    float alpha = t > 0.66f ? (1.0f - t) / 0.34f : 1.0f;
+
+    Gdiplus::Graphics gfx(hdc);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    COLORREF col = ThemeWindowLinkColor();
+    // a soft disc behind the glyph so it stays legible over cards and thumbnails
+    Gdiplus::SolidBrush halo(Gdiplus::Color((u8)(46.0f * alpha), GetRValue(col), GetGValue(col), GetBValue(col)));
+    int pad = DpiScale(hdc, 5);
+    gfx.FillEllipse(&halo, glyph.x - pad, glyph.y - pad, glyph.dx + 2 * pad, glyph.dy + 2 * pad);
+    Gdiplus::SolidBrush brush(Gdiplus::Color((u8)(255.0f * alpha), GetRValue(col), GetGValue(col), GetBValue(col)));
+    Gdiplus::PointF pts[] = {
+        {(float)glyph.x + glyph.dx * 0.27f, (float)glyph.y + glyph.dy * 0.16f},
+        {(float)glyph.x + glyph.dx * 0.73f, (float)glyph.y + glyph.dy * 0.16f},
+        {(float)glyph.x + glyph.dx * 0.73f, (float)glyph.y + glyph.dy * 0.84f},
+        {(float)glyph.x + glyph.dx * 0.50f, (float)glyph.y + glyph.dy * 0.65f},
+        {(float)glyph.x + glyph.dx * 0.27f, (float)glyph.y + glyph.dy * 0.84f},
+    };
+    gfx.FillPolygon(&brush, pts, dimofi(pts));
 }
 
 // Tap-and-hold fired: treat it exactly like a right-click at the point the

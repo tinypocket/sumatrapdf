@@ -11,6 +11,8 @@ constexpr int kAnimPressMs = 120;
 constexpr int kAnimPressReleaseMs = 160;
 constexpr int kAnimHoverMs = 140;
 constexpr int kAnimMarkerMs = 160;
+// long enough that the eye can follow the pin to where it lands
+constexpr int kAnimPinFlightMs = 380;
 // ~60 fps
 constexpr uint kAnimTickMs = 16;
 

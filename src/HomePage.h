@@ -70,6 +70,9 @@ void HomePageOnHoldTimer(MainWindow* win);
 void HomePageSetHotLink(MainWindow* win, Str target);
 void HomePageSetPressedLink(MainWindow* win, Str target);
 void HomePageFeedbackTick(MainWindow* win);
+void HomePagePinFlightTick(MainWindow* win);
+void HomePageSetPinAnchor(MainWindow* win, bool isFolder, Rect r);
+void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool nowPinned);
 
 // Library back/forward. A destination is pushed when the user picks it; going
 // back/forward replays an entry without pushing it again.
