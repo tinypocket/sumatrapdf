@@ -2106,6 +2106,14 @@ bool IsTopBarVisible(MainWindow* win) {
     if (!win || !win->hwndTopBar) {
         return false;
     }
+    // This is the document toolbar: with nothing open it has nothing to show
+    // and was drawing as an empty band. Testing touchView alone was not enough,
+    // because launching with no document leaves touchView at Doc while the
+    // Library is on screen - going to Web and back was what "fixed" it, since
+    // that finally set touchView.
+    if (!win->IsDocLoaded()) {
+        return false;
+    }
     if (win->isFullScreen) {
         return false;
     }

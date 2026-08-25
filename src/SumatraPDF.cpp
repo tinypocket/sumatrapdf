@@ -6211,7 +6211,10 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     // separately (see PositionOverlayToolbar below); don't touch its visibility
     // here so a relayout doesn't flash it on/off
     if (updateToolbars && !win->isToolbarOverlay) {
-        bool showRebar = win->isToolbarVisible && !IsTopBarVisible(win);
+        // The touch chrome replaces the rebar with the custom top bar, so the
+        // rebar must stay hidden even when the top bar itself is hidden (no
+        // document open) - otherwise the old toolbar fills the gap.
+        bool showRebar = win->isToolbarVisible && !IsTopBarVisible(win) && !IsTouchChrome(win);
         ShowWindow(win->hwndReBar, showRebar ? SW_SHOW : SW_HIDE);
     }
 
