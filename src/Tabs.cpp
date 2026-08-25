@@ -927,6 +927,15 @@ bool SelectTouchDocumentTab(MainWindow* win) {
     if (!win) {
         return false;
     }
+    // Already on a document? Stay there. This used to scan from the end and
+    // select whatever document it found first, so opening a panel while
+    // reading anything other than the last tab silently switched documents -
+    // e.g. clicking Bookmarks in a file with none jumped to a file that had
+    // some, instead of showing an empty panel for the file being read.
+    WindowTab* cur = win->CurrentTab();
+    if (cur && !cur->IsNonDocumentTab()) {
+        return true;
+    }
     for (int i = win->TabCount() - 1; i >= 0; i--) {
         WindowTab* tab = win->GetTab(i);
         if (tab && !tab->IsNonDocumentTab()) {

@@ -1942,6 +1942,15 @@ void HomePageUpdateCloseButton(MainWindow* win, int x, int y) {
         }
     }
 
+    // The touch chrome's cards carry their own pin badge and get their hover
+    // and press feedback from the Library overlay. This legacy close button
+    // drew a second, unexplained X in the corner on top of that, so it stays
+    // on the classic home page only.
+    if (IsTouchChrome(win)) {
+        HomePageHideCloseButton();
+        return;
+    }
+
     StaticLink* link = nullptr;
     TempStr target = GetStaticLinkAtTemp(win->staticLinks, x, y, &link);
     // a thumbnail link's target is an absolute file path; everything else (a
