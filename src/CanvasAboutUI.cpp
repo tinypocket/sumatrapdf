@@ -139,11 +139,12 @@ static void OnMouseLeftButtonUpAbout(MainWindow* win, int x, int y, WPARAM /*key
         if (fs) {
             fs->isPinned = !fs->isPinned;
             // the link rects are still the ones the tap hit, so start the
-            // flight before the redraw rebuilds them
+            // flight before HomePageStartPinFlight's own invalidate rebuilds
+            // them; it repaints the canvas either way, flight or not (see its
+            // comment for why a broader win->RedrawAll() would starve it)
             HomePageStartPinFlight(win, str::JoinTemp(kLinkHomePinFilePrefix, url), false, fs->isPinned);
             SaveSettings();
             win->DeleteToolTip();
-            win->RedrawAll(true);
         }
     } else if (HandleTouchHomeLink(win, url)) {
         // handled against the real native tab collection

@@ -4868,6 +4868,12 @@ static Point gPinFlyTo;
 static AnimVal gPinFlyVal;
 static Rect gPinFilesAnchor;
 static Rect gPinFoldersAnchor;
+// A copy of the page taken once, right after the real pin/unpin has been
+// painted, so every frame after that is a blit of this plus the moving glyph
+// instead of a full DrawHomePage() pass - measured at 80-100ms on a modest
+// library, which alone would make a 380ms flight choppy at best.
+static HBITMAP gPinFlySnapshot = nullptr;
+static Size gPinFlySnapshotSize;
 
 void HomePageSetPinAnchor(MainWindow* win, bool isFolder, Rect r) {
     if (!win) {
@@ -4876,36 +4882,53 @@ void HomePageSetPinAnchor(MainWindow* win, bool isFolder, Rect r) {
     (isFolder ? gPinFoldersAnchor : gPinFilesAnchor) = r;
 }
 
-static void UpdatePinFlightTimer(MainWindow* win) {
-    if (!win || !win->hwndCanvas) {
-        return;
+static void FreePinFlySnapshot() {
+    if (gPinFlySnapshot) {
+        DeleteObject(gPinFlySnapshot);
+        gPinFlySnapshot = nullptr;
     }
-    if (gPinFlyVal.IsAnimating()) {
-        SetTimer(win->hwndCanvas, kPinFlightTimerID, kAnimTickMs, nullptr);
-    } else {
-        KillTimer(win->hwndCanvas, kPinFlightTimerID);
-        gPinFlyWin = nullptr;
-    }
+    gPinFlySnapshotSize = Size{};
 }
 
-void HomePagePinFlightTick(MainWindow* win) {
-    if (!win) {
-        return;
+static void DrawPinFlight(MainWindow* win, HDC hdc);
+
+// Composites one frame: the static snapshot plus the glyph at its current
+// position, blitted straight to the screen.
+static void PaintPinFlightFrame(MainWindow* win, HWND hwnd) {
+    HDC hdcBuf = win->buffer->GetDC();
+    HDC hdcSnap = CreateCompatibleDC(hdcBuf);
+    HGDIOBJ old = SelectObject(hdcSnap, gPinFlySnapshot);
+    BitBlt(hdcBuf, 0, 0, gPinFlySnapshotSize.dx, gPinFlySnapshotSize.dy, hdcSnap, 0, 0, SRCCOPY);
+    SelectObject(hdcSnap, old);
+    DeleteDC(hdcSnap);
+    DrawPinFlight(win, hdcBuf);
+    HDC hdcScreen = GetDC(hwnd);
+    if (hdcScreen) {
+        win->buffer->Flush(hdcScreen);
+        ReleaseDC(hwnd, hdcScreen);
     }
-    HwndInvalidate(win->hwndCanvas, false);
-    UpdatePinFlightTimer(win);
 }
 
 void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool nowPinned) {
-    if (!win || !win->hwndCanvas || !AnimEnabled()) {
+    if (!win || !win->hwndCanvas) {
+        return;
+    }
+    // The pin badge and the PINNED section both live only on this canvas, so
+    // this is the one call the caller needs regardless of whether the flight
+    // itself can run - a plain toggle still has to repaint. Callers rely on
+    // this and do not invalidate anything themselves.
+    if (!AnimEnabled()) {
+        HwndInvalidate(win->hwndCanvas, false);
         return;
     }
     Rect badge;
     if (!FindLinkRect(win, target, &badge) || badge.IsEmpty()) {
+        HwndInvalidate(win->hwndCanvas, false);
         return;
     }
     Rect anchor = isFolder ? gPinFoldersAnchor : gPinFilesAnchor;
     if (anchor.IsEmpty()) {
+        HwndInvalidate(win->hwndCanvas, false);
         return;
     }
     Point onCard{badge.x + badge.dx / 2, badge.y + badge.dy / 2};
@@ -4916,8 +4939,78 @@ void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool now
     gPinFlyWin = win;
     gPinFlyVal.Set(0.0f);
     gPinFlyVal.SetTarget(1.0f, kAnimPinFlightMs);
-    UpdatePinFlightTimer(win);
-    HwndInvalidate(win->hwndCanvas, false);
+
+    // Paint the real, already-updated state once - the badge and PINNED
+    // section already reflect the new pin state - and snapshot it so every
+    // following frame is a cheap composite instead of a rebuild.
+    HWND hwnd = win->hwndCanvas;
+    HwndInvalidate(hwnd, false);
+    UpdateWindow(hwnd);
+    FreePinFlySnapshot();
+    if (win->buffer) {
+        HDC hdcBuf = win->buffer->GetDC();
+        HDC hdcScreen = GetDC(hwnd);
+        if (hdcScreen) {
+            Size sz = win->buffer->rect.Size();
+            if (sz.dx > 0 && sz.dy > 0) {
+                gPinFlySnapshot = CreateCompatibleBitmap(hdcScreen, sz.dx, sz.dy);
+                if (gPinFlySnapshot) {
+                    HDC hdcSnap = CreateCompatibleDC(hdcBuf);
+                    HGDIOBJ old = SelectObject(hdcSnap, gPinFlySnapshot);
+                    BitBlt(hdcSnap, 0, 0, sz.dx, sz.dy, hdcBuf, 0, 0, SRCCOPY);
+                    SelectObject(hdcSnap, old);
+                    DeleteDC(hdcSnap);
+                    gPinFlySnapshotSize = sz;
+                }
+            }
+            ReleaseDC(hwnd, hdcScreen);
+        }
+    }
+    if (!gPinFlySnapshot) {
+        gPinFlyWin = nullptr;
+        return; // nothing to composite onto; the real state is already shown
+    }
+
+    // Driven directly rather than through a WM_TIMER: that timer is the
+    // lowest-priority message Windows will synthesize, so even one other
+    // window with a pending repaint is enough to push it past this flight's
+    // whole 380ms and skip the animation outright - measured directly, the
+    // first tick sometimes did not arrive until well after the flight should
+    // have finished. Each frame here is two bitmap blits, so a plain Sleep
+    // loop is cheap, and unlike a timer it cannot be starved by anything else
+    // in the queue. Messages are pumped between frames so the app stays
+    // responsive; a second pin tap during the loop starts its own flight
+    // (same globals), and this loop notices and steps aside for it.
+    while (gPinFlyVal.IsAnimating() && gPinFlyWin == win && IsMainWindowValid(win) && IsWindow(hwnd)) {
+        PaintPinFlightFrame(win, hwnd);
+        MSG msg;
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+            // a message in this batch may have closed the window (or the
+            // whole app); win itself can be gone, not just the HWND
+            if (!IsMainWindowValid(win) || !IsWindow(hwnd)) {
+                break;
+            }
+        }
+        if (!IsMainWindowValid(win) || !IsWindow(hwnd)) {
+            break;
+        }
+        Sleep(kAnimTickMs);
+    }
+    // Only clean up if this call still owns the shared state: a second pin
+    // tap during the loop above starts its own flight (same globals) and
+    // takes over gPinFlyWin/gPinFlySnapshot, and that flight's own loop is
+    // responsible for freeing them, not this one.
+    if (gPinFlyWin == win) {
+        gPinFlyWin = nullptr;
+        FreePinFlySnapshot();
+        if (IsMainWindowValid(win) && IsWindow(hwnd)) {
+            // one real repaint to replace the last composited frame - which
+            // still shows the glyph - with the plain, finished page
+            HwndInvalidate(hwnd, false);
+        }
+    }
 }
 
 static void DrawPinFlight(MainWindow* win, HDC hdc) {

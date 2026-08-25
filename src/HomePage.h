@@ -70,7 +70,6 @@ void HomePageOnHoldTimer(MainWindow* win);
 void HomePageSetHotLink(MainWindow* win, Str target);
 void HomePageSetPressedLink(MainWindow* win, Str target);
 void HomePageFeedbackTick(MainWindow* win);
-void HomePagePinFlightTick(MainWindow* win);
 void HomePageSetPinAnchor(MainWindow* win, bool isFolder, Rect r);
 void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool nowPinned);
 
