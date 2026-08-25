@@ -2041,8 +2041,34 @@ static void CollectTouchFavRows(Vec<TouchFavRow>& rows) {
     }
 }
 
+// height of the strip holding the "add current page" button, when there is a
+// document to add a page from
+static int TouchFavAddStripDy(MainWindow* win) {
+    return win->IsDocLoaded() ? DpiScale(win->hwndTocBox, 40) : 0;
+}
+
 static int TouchFavRowsTop(MainWindow* win) {
-    return DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) - win->touchPanelScrollY;
+    return DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) + TouchFavAddStripDy(win) - win->touchPanelScrollY;
+}
+
+// the delete target on a favorite row, and the "add current page" button in the
+// panel header. Both are computed here so the paint and the hit test cannot
+// drift apart.
+static Rect TouchFavDeleteRect(MainWindow* win, const Rect& row) {
+    HWND hw = win->hwndTocBox;
+    int d = DpiScale(hw, 26);
+    return Rect{row.x + row.dx - d, row.y + (row.dy - d) / 2, d, d};
+}
+
+// Below the header band, not inside it: the panel title is a child window that
+// paints itself over that band, so anything drawn there disappears under it.
+static Rect TouchFavAddRect(MainWindow* win) {
+    HWND hw = win->hwndTocBox;
+    Rect client = HwndClientRect(hw);
+    int d = DpiScale(hw, 28);
+    int pad = DpiScale(hw, 14);
+    int y = DpiScale(hw, kPanelHeaderDy + 6);
+    return Rect{client.dx - d - pad, y, d, d};
 }
 
 static int TouchPanelMaxScroll(MainWindow* win) {
@@ -2219,6 +2245,28 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
         }
         WindowTab* curTab = win->CurrentTab();
         Str curPath = (curTab && !curTab->IsAboutTab()) ? curTab->filePath : Str{};
+        // add the page being read; nothing to add without a document
+        if (win->IsDocLoaded()) {
+            Rect add = TouchFavAddRect(win);
+            Gdiplus::Graphics gfx(hdc);
+            gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::SolidBrush bg(GdiRgbFromCOLORREF(ThemeTouchSurfaceColor()));
+            gfx.FillEllipse(&bg, add.x, add.y, add.dx, add.dy);
+            Gdiplus::Pen pen(GdiRgbFromCOLORREF(ThemeWindowLinkColor()),
+                             (Gdiplus::REAL)std::max(1, DpiScale(hw, 2)));
+            pen.SetStartCap(Gdiplus::LineCapRound);
+            pen.SetEndCap(Gdiplus::LineCapRound);
+            int acx = add.x + add.dx / 2;
+            int acy = add.y + add.dy / 2;
+            int aarm = DpiScale(hw, 7);
+            gfx.DrawLine(&pen, acx - aarm, acy, acx + aarm, acy);
+            gfx.DrawLine(&pen, acx, acy - aarm, acx, acy + aarm);
+            HFONT fa = HdcGetUiFont(hdc, kPanelSubFontSize);
+            ScopedSelectObject sela(hdc, fa);
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            Rect al{DpiScale(hw, 16), add.y, add.x - DpiScale(hw, 24), add.dy};
+            HdcDrawText(hdc, StrL("Add this page"), al, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
         for (int i = 0; i < len(rows); i++) {
             const TouchFavRow& row = rows[i];
             Rect r{DpiScale(hw, 12), y0 + i * rowDy, rc.dx - DpiScale(hw, 24), rowDy};
@@ -2251,8 +2299,22 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             HFONT fp = HdcGetUiFont(hdc, kPanelPageFontSize);
             ScopedSelectObject selp(hdc, fp);
             SetTextColor(hdc, ThemeWindowDarkerTextColor());
-            Rect pr{r.x + r.dx - DpiScale(hw, 52), r.y, DpiScale(hw, 44), r.dy};
+            Rect pr{r.x + r.dx - DpiScale(hw, 82), r.y, DpiScale(hw, 44), r.dy};
             HdcDrawText(hdc, pageStr, pr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+            // delete: a small x at the end of the row
+            Rect del = TouchFavDeleteRect(win, r);
+            Gdiplus::Graphics gfx(hdc);
+            gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::Pen delPen(GdiRgbFromCOLORREF(ThemeWindowDarkerTextColor()),
+                                (Gdiplus::REAL)std::max(1, DpiScale(hw, 1)));
+            delPen.SetStartCap(Gdiplus::LineCapRound);
+            delPen.SetEndCap(Gdiplus::LineCapRound);
+            int cx = del.x + del.dx / 2;
+            int cy = del.y + del.dy / 2;
+            int arm = DpiScale(hw, 5);
+            gfx.DrawLine(&delPen, cx - arm, cy - arm, cx + arm, cy + arm);
+            gfx.DrawLine(&delPen, cx + arm, cy - arm, cx - arm, cy + arm);
         }
         return;
     }
@@ -2575,11 +2637,24 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
         CollectTouchFavRows(rows);
         int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
         int y0 = TouchFavRowsTop(win);
+        // add the current page
+        if (win->IsDocLoaded() && TouchFavAddRect(win).Contains(pt)) {
+            int pageNo = win->ctrl->CurrentPageNo();
+            AddFavoriteQuiet(win, pageNo, FavoriteDefaultNameTemp(win, pageNo));
+            HwndInvalidate(hwnd, false);
+            return true;
+        }
         // same origin and row height the paint pass used, so the row under the
         // finger is the row that was drawn there
         if (rowDy > 0 && pt.y >= y0) {
             int idx = (pt.y - y0) / rowDy;
             if (idx >= 0 && idx < len(rows) && !rows[idx].isHeader) {
+                Rect row{DpiScale(hwnd, 12), y0 + idx * rowDy, HwndClientRect(hwnd).dx - DpiScale(hwnd, 24), rowDy};
+                if (TouchFavDeleteRect(win, row).Contains(pt)) {
+                    DelFavorite(rows[idx].fs->filePath, rows[idx].fav->pageNo);
+                    HwndInvalidate(hwnd, false);
+                    return true;
+                }
                 // GoToFavorite opens the document first when it is not the
                 // current one, so a favorite in another PDF just works
                 GoToFavorite(win, rows[idx].fs, rows[idx].fav);
