@@ -159,6 +159,22 @@ struct DisplayModel : DocController {
     void Relayout(float zoomVirtual, int rotation);
     // pages the user un-trimmed by hand (see PageDisplayBox)
     Vec<int> marginExpandedPages;
+    // Running header/footer bands, in points measured down from the top of the
+    // media box and up from its bottom. Detected once per document from a
+    // sample of pages; 0 means "none found". See DetectRunningHeaderFooter.
+    mutable bool smartHfChecked = false;
+    mutable float smartHfTopPt = 0.0f;
+    mutable float smartHfBottomPt = 0.0f;
+    void DetectRunningHeaderFooter() const;
+    // where one page's real text sits, and whether that page actually carries
+    // the running header/footer the document was found to have
+    struct PageBody {
+        float top = 0.0f;
+        float bottom = 0.0f;
+        bool hasHeader = false;
+        bool hasFooter = false;
+    };
+    bool PageBodyBand(int pageNo, PageBody* out) const;
 
     Rect GetViewPort() const;
     bool IsHScrollbarVisible() const;

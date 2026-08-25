@@ -936,6 +936,11 @@ struct GlobalPrefs {
     // out of the layout, so less scrolling is needed to reach the next
     // page's content. Page width is unaffected
     bool smartMargins;
+    // if true, smart margins also crops a running header and footer (a
+    // page number or a title repeated in the same place on most pages),
+    // trimming more of each page. Has no effect unless SmartMargins is
+    // true
+    bool smartHeaderFooter;
     // if true, a tab's label wraps onto a second line instead of being cut
     // short with an ellipsis, so more of a long filename is readable.
     // Makes the tab strip taller
@@ -1713,6 +1718,7 @@ static const FieldInfo gGlobalPrefsFields[] = {
     {offsetof(GlobalPrefs, favoritesInToolbar), SettingType::Bool, true, true},
     {offsetof(GlobalPrefs, favoritesManualOrder), SettingType::Bool, false, true},
     {offsetof(GlobalPrefs, smartMargins), SettingType::Bool, false, true},
+    {offsetof(GlobalPrefs, smartHeaderFooter), SettingType::Bool, false, true},
     {offsetof(GlobalPrefs, twoRowTabs), SettingType::Bool, false, true},
     {offsetof(GlobalPrefs, largerTabs), SettingType::Bool, false, true},
     {offsetof(GlobalPrefs, checkForUpdates), SettingType::Bool, true, true},
@@ -1721,7 +1727,7 @@ static const FieldInfo gGlobalPrefsFields[] = {
 };
 static const StructInfo gGlobalPrefsInfo = {
     sizeof(GlobalPrefs),
-    147,
+    148,
     gGlobalPrefsFields,
     "\0\0DefaultDisplayMode\0DefaultZoom\0DisableJavaScript\0AllowExternalImages\0EnableTeXEnhancements\0EscToExit\0Ful"
     "lPathInTitle\0InverseSearchCmdLine\0LazyLoading\0MainWindowBackground\0NoHomeTab\0HomePageSortByFrequentlyRead\0Ho"
@@ -1740,7 +1746,7 @@ static const StructInfo gGlobalPrefsInfo = {
     "PI\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0WindowState\0WindowPos\0SearchUIWindowPos\0FileStates\0Sessio"
     "nData\0ReopenOnce\0TimeOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0UpdateFeedURL\0BrowserHomePage\0BrowserBookma"
     "rks\0BrowserFavoriteTitles\0BrowserDownloads\0AnimateUI\0ElaborateAnimations\0FavoritesInToolbar\0FavoritesManualO"
-    "rder\0SmartMargins\0TwoRowTabs\0LargerTabs\0CheckForUpdates\0\0",
+    "rder\0SmartMargins\0SmartHeaderFooter\0TwoRowTabs\0LargerTabs\0CheckForUpdates\0\0",
     "\0\0default layout of pages. valid values: automatic, single page, facing, book view, continuous, continuous "
     "facing, continuous book view\0default zoom. valid values: fit page, fit width, fit height, fit content or percent "
     "like 100%\0if true, JavaScript in PDF documents is disabled (e.g. form-field calculations won't run)\0if true, a "
@@ -1853,10 +1859,12 @@ static const StructInfo gGlobalPrefsInfo = {
     "colour-coded, which opens that document's saved pages\0if true, favorites keep the order you dragged them into "
     "instead of being sorted by page or name. Set automatically the first time you re-order one\0if true, the blank "
     "top and bottom margins of each page are cropped out of the layout, so less scrolling is needed to reach the next "
-    "page's content. Page width is unaffected\0if true, a tab's label wraps onto a second line instead of being cut "
-    "short with an ellipsis, so more of a long filename is readable. Makes the tab strip taller\0if true, the document "
-    "tabs in the title bar are taller and wider with larger text; easier to read and to hit with a finger\0if true, "
-    "check at startup whether an update is available\0\0Settings below are not recognized by the current version",
+    "page's content. Page width is unaffected\0if true, smart margins also crops a running header and footer (a page "
+    "number or a title repeated in the same place on most pages), trimming more of each page. Has no effect unless "
+    "SmartMargins is true\0if true, a tab's label wraps onto a second line instead of being cut short with an "
+    "ellipsis, so more of a long filename is readable. Makes the tab strip taller\0if true, the document tabs in the "
+    "title bar are taller and wider with larger text; easier to read and to hit with a finger\0if true, check at "
+    "startup whether an update is available\0\0Settings below are not recognized by the current version",
     false};
 static const FieldInfo gTheme_1_Fields[] = {
     {offsetof(Theme, name), SettingType::String, (intptr_t)""},

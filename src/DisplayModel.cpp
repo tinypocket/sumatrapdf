@@ -319,6 +319,198 @@ void DisplayModel::GetDisplayState(FileState* fs) {
 // cropped page still reads as a page rather than as text butted against an edge
 constexpr float kSmartMarginPadPt = 6.0f;
 
+// A running header or footer is a line of text that sits by itself at the top
+// or bottom of most pages - a page number, a chapter title, a book title. The
+// engine's content box counts it as content, so smart margins keeps the whole
+// band even though it carries nothing the reader is reading. Detecting it needs
+// more than one page: a single page cannot tell a header apart from the first
+// line of a paragraph.
+
+// One horizontal band of text on a page, in page (unrotated, unzoomed) space.
+// `key` is the line's letters, lower-cased, with digits and punctuation
+// dropped, so "Chapter 3 - 41" and "Chapter 3 - 42" compare equal: a running
+// header keeps its wording and only its page number moves. Fixed-size so the
+// line stays trivially copyable inside a Vec.
+constexpr int kTextLineKeyMax = 64;
+
+struct TextLine {
+    float top;
+    float bottom;
+    char key[kTextLineKeyMax];
+    int keyLen;
+};
+
+static void AppendToKey(TextLine* line, int c) {
+    if (c >= 'A' && c <= 'Z') {
+        c += 'a' - 'A';
+    }
+    // ASCII letters only: enough to tell "the same header again" from "a
+    // different line of prose", and it sidesteps case folding outside ASCII
+    if (c < 'a' || c > 'z' || line->keyLen >= kTextLineKeyMax) {
+        return;
+    }
+    line->key[line->keyLen++] = (char)c;
+}
+
+static bool SameKey(const TextLine& a, const TextLine& b) {
+    // an empty key means "no letters at all" - a bare page number, which is the
+    // most common footer of all, so two empty keys are a match, not a mismatch
+    if (a.keyLen != b.keyLen) {
+        return false;
+    }
+    return memcmp(a.key, b.key, (size_t)a.keyLen) == 0;
+}
+
+// Group a page's per-codepoint boxes into lines. Boxes whose vertical spans
+// overlap belong to the same line; anything smaller than a hair is dropped so
+// stray marks do not become a line of their own.
+static void CollectTextLines(EngineBase* engine, int pageNo, Vec<TextLine>& out) {
+    // the engine caches this, so re-laying out a page does not re-extract it
+    int nCodepoints = 0; // GetTextForPage reports codepoints, one per coords entry
+    Rect* coords = nullptr;
+    Str text = engine->GetTextForPage(pageNo, &nCodepoints, &coords);
+    if (!coords || !text) {
+        return;
+    }
+    int byteIdx = 0;
+    for (int i = 0; i < nCodepoints; i++) {
+        int c = Utf8CodepointNext(text, byteIdx);
+        Rect r = coords[i];
+        if (r.dy <= 0 || r.dx <= 0) {
+            continue; // spaces and newlines carry an empty box
+        }
+        float top = (float)r.y;
+        float bottom = (float)(r.y + r.dy);
+        TextLine* found = nullptr;
+        for (TextLine& line : out) {
+            // any vertical overlap at all: superscripts and accents ride along
+            if (top < line.bottom && bottom > line.top) {
+                line.top = std::min(line.top, top);
+                line.bottom = std::max(line.bottom, bottom);
+                found = &line;
+                break;
+            }
+        }
+        if (!found) {
+            TextLine line{top, bottom, {}, 0};
+            out.Append(line);
+            found = &out[len(out) - 1];
+        }
+        AppendToKey(found, c);
+    }
+    // sorted top-down, so the first and last entries are the candidate bands
+    VecSort(out, [](const TextLine* a, const TextLine* b) -> int {
+        float d = a->top - b->top;
+        return d < 0 ? -1 : (d > 0 ? 1 : 0);
+    });
+}
+
+// A candidate band has to be separated from the body by a gap noticeably larger
+// than the line spacing in the body itself, or every first line of every
+// paragraph would qualify.
+static float BodyLineGap(const Vec<TextLine>& lines) {
+    if (len(lines) < 3) {
+        return 0.0f;
+    }
+    // the median gap between consecutive body lines, ignoring the two ends
+    Vec<float> gaps;
+    for (int i = 2; i < len(lines) - 1; i++) {
+        gaps.Append(lines[i].top - lines[i - 1].bottom);
+    }
+    if (len(gaps) == 0) {
+        return 0.0f;
+    }
+    VecSort(gaps, [](const float* a, const float* b) -> int {
+        float d = *a - *b;
+        return d < 0 ? -1 : (d > 0 ? 1 : 0);
+    });
+    return gaps[len(gaps) / 2];
+}
+
+void DisplayModel::DetectRunningHeaderFooter() const {
+    if (smartHfChecked) {
+        return;
+    }
+    smartHfChecked = true;
+    smartHfTopPt = 0.0f;
+    smartHfBottomPt = 0.0f;
+    int nPages = engine ? engine->PageCount() : 0;
+    if (nPages < 3) {
+        return; // nothing to compare against
+    }
+
+    // sample rather than read every page: this runs on the UI thread the first
+    // time a page is laid out, and text extraction is not cheap
+    constexpr int kMaxSamples = 6;
+    int step = std::max(1, nPages / kMaxSamples);
+    int headerVotes = 0;
+    int footerVotes = 0;
+    int sampled = 0;
+    float headerCut = 0.0f;
+    float footerCut = 0.0f;
+    TextLine headerKey{};
+    TextLine footerKey{};
+    bool headerKeySet = false;
+    bool footerKeySet = false;
+    for (int pageNo = 1; pageNo <= nPages && sampled < kMaxSamples; pageNo += step) {
+        RectF media = PageMediaBox(pageNo);
+        if (media.IsEmpty()) {
+            continue;
+        }
+        Vec<TextLine> lines;
+        CollectTextLines(engine, pageNo, lines);
+        if (len(lines) < 4) {
+            continue; // a title page or a plate: not enough body to judge
+        }
+        sampled++;
+        float bodyGap = BodyLineGap(lines);
+        // a header has to stand off by more than one blank body line
+        float minGap = std::max(bodyGap * 1.8f, 6.0f);
+
+        const TextLine& first = lines[0];
+        float firstGap = lines[1].top - first.bottom;
+        // and it has to actually be near the top edge, not a heading halfway down
+        bool nearTop = (first.top - media.y) < media.dy * 0.14f;
+        // The wording has to repeat too. A chapter title is well separated and
+        // near the top exactly like a header, but it reads differently on every
+        // page, so it never collects a second vote.
+        if (firstGap >= minGap && nearTop) {
+            if (!headerKeySet) {
+                headerKey = first;
+                headerKeySet = true;
+            }
+            if (SameKey(headerKey, first)) {
+                headerVotes++;
+                headerCut = std::max(headerCut, first.bottom - media.y);
+            }
+        }
+
+        const TextLine& last = lines[len(lines) - 1];
+        float lastGap = last.top - lines[len(lines) - 2].bottom;
+        bool nearBottom = (media.y + media.dy - last.bottom) < media.dy * 0.14f;
+        if (lastGap >= minGap && nearBottom) {
+            if (!footerKeySet) {
+                footerKey = last;
+                footerKeySet = true;
+            }
+            if (SameKey(footerKey, last)) {
+                footerVotes++;
+                footerCut = std::max(footerCut, media.y + media.dy - last.top);
+            }
+        }
+    }
+    if (sampled < 2) {
+        return;
+    }
+    // "most pages", not "some": a one-off pull quote must not crop the book
+    if (headerVotes * 2 > sampled) {
+        smartHfTopPt = headerCut;
+    }
+    if (footerVotes * 2 > sampled) {
+        smartHfBottomPt = footerCut;
+    }
+}
+
 bool DisplayModel::IsPageMarginExpanded(int pageNo) const {
     for (int p : marginExpandedPages) {
         if (p == pageNo) {
@@ -348,6 +540,57 @@ bool DisplayModel::IsPageMarginTrimmed(int pageNo) const {
     return display.dy < media.dy - 1.0f;
 }
 
+// The body of one page: the text between a running header and a running footer.
+// Detection says whether this document has them at all; this says whether THIS
+// page carries one, and where its real text starts and ends. Both halves
+// matter: trimming only to the header band would leave the whole gap between
+// the last body line and the footer, and trimming a page that has no header
+// would eat whatever sits above its first line - a plate, a title ornament.
+bool DisplayModel::PageBodyBand(int pageNo, PageBody* out) const {
+    *out = PageBody();
+    if (smartHfTopPt <= 0.0f && smartHfBottomPt <= 0.0f) {
+        return false;
+    }
+    RectF media = PageMediaBox(pageNo);
+    if (media.IsEmpty()) {
+        return false;
+    }
+    Vec<TextLine> lines;
+    CollectTextLines(engine, pageNo, lines);
+    if (len(lines) < 2) {
+        return false; // no body to speak of: leave this page alone
+    }
+    // a little slack, so a header that sits a point lower on one page than on
+    // the sampled ones is still recognised as the header
+    constexpr float kBandSlack = 2.0f;
+    float headerBottom = media.y + smartHfTopPt + kBandSlack;
+    float footerTop = media.y + media.dy - smartHfBottomPt - kBandSlack;
+    int first = -1;
+    int last = -1;
+    for (int i = 0; i < len(lines); i++) {
+        bool isHeader = smartHfTopPt > 0.0f && lines[i].bottom <= headerBottom;
+        bool isFooter = smartHfBottomPt > 0.0f && lines[i].top >= footerTop;
+        if (isHeader) {
+            out->hasHeader = true;
+            continue;
+        }
+        if (isFooter) {
+            out->hasFooter = true;
+            continue;
+        }
+        if (first < 0) {
+            first = i;
+        }
+        last = i;
+    }
+    if (first < 0) {
+        return false; // the whole page looked like header/footer: do not crop it
+    }
+    out->top = lines[first].top;
+    out->bottom = lines[last].bottom;
+    return true;
+}
+
 RectF DisplayModel::PageDisplayBox(int pageNo) const {
     RectF media = PageMediaBox(pageNo);
     if (!gGlobalPrefs->smartMargins || media.IsEmpty()) {
@@ -372,6 +615,21 @@ RectF DisplayModel::PageDisplayBox(int pageNo) const {
     // less scrolling, not a different zoom.
     float top = std::max(media.y, content.y - kSmartMarginPadPt);
     float bottom = std::min(media.y + media.dy, content.y + content.dy + kSmartMarginPadPt);
+    if (gGlobalPrefs->smartHeaderFooter) {
+        DetectRunningHeaderFooter();
+        PageBody body;
+        if (PageBodyBand(pageNo, &body)) {
+            // only crop the side this page actually has a header/footer on:
+            // a page without one may open with a plate or an ornament, and
+            // there is no text line to tell us it is there
+            if (body.hasHeader) {
+                top = std::max(top, body.top - kSmartMarginPadPt);
+            }
+            if (body.hasFooter) {
+                bottom = std::min(bottom, body.bottom + kSmartMarginPadPt);
+            }
+        }
+    }
     if (bottom <= top) {
         return media;
     }

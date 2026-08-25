@@ -1026,6 +1026,11 @@ FavoritesManualOrder = false
 ; width is unaffected (introduced in version 3.8)
 SmartMargins = false
 
+; if true, smart margins also crops a running header and footer (a page number
+; or a title repeated in the same place on most pages), trimming more of each
+; page. Has no effect unless SmartMargins is true (introduced in version 3.8)
+SmartHeaderFooter = false
+
 ; if true, a tab's label wraps onto a second line instead of being cut short
 ; with an ellipsis, so more of a long filename is readable. Makes the tab strip
 ; taller (introduced in version 3.8)

@@ -1384,6 +1384,12 @@ const globalPrefs: Field[] = [
     "if true, the blank top and bottom margins of each page are cropped out of the layout, so less scrolling is needed to reach the next page's content. Page width is unaffected",
   ).ver("3.8"),
   field(
+    "SmartHeaderFooter",
+    Bool,
+    false,
+    "if true, smart margins also crops a running header and footer (a page number or a title repeated in the same place on most pages), trimming more of each page. Has no effect unless SmartMargins is true",
+  ).ver("3.8"),
+  field(
     "TwoRowTabs",
     Bool,
     false,

@@ -1663,12 +1663,19 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
         return;
     }
     constexpr int kOverflowSmartMargins = 1;
+    constexpr int kOverflowSmartHeaderFooter = 2;
 
     HMENU popup = CreatePopupMenu();
     bool on = gGlobalPrefs->smartMargins;
     bool hasDoc = win->AsFixed() != nullptr;
-    uint flags = MF_STRING | (on ? MF_CHECKED : MF_UNCHECKED) | (hasDoc ? MF_ENABLED : (MF_DISABLED | MF_GRAYED));
+    uint enabled = hasDoc ? MF_ENABLED : (MF_DISABLED | MF_GRAYED);
+    uint flags = MF_STRING | (on ? MF_CHECKED : MF_UNCHECKED) | enabled;
     AppendMenuW(popup, flags, kOverflowSmartMargins, L"Smart margins");
+    // only does anything on top of the margin trim, so it follows it and greys
+    // out until it is on
+    bool hf = gGlobalPrefs->smartHeaderFooter;
+    uint hfFlags = MF_STRING | (hf ? MF_CHECKED : MF_UNCHECKED) | (hasDoc && on ? MF_ENABLED : (MF_DISABLED | MF_GRAYED));
+    AppendMenuW(popup, hfFlags, kOverflowSmartHeaderFooter, L"Smart header && footer");
     MarkMenuOwnerDraw(popup);
 
     Point pt = HwndClientToScreen(hwnd, Point{anchor.x, anchor.y + anchor.dy});
@@ -1676,10 +1683,13 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
     FreeMenuOwnerDrawInfoData(popup);
     DestroyMenu(popup);
 
-    if (cmd != kOverflowSmartMargins) {
+    if (cmd == kOverflowSmartMargins) {
+        gGlobalPrefs->smartMargins = !gGlobalPrefs->smartMargins;
+    } else if (cmd == kOverflowSmartHeaderFooter) {
+        gGlobalPrefs->smartHeaderFooter = !gGlobalPrefs->smartHeaderFooter;
+    } else {
         return;
     }
-    gGlobalPrefs->smartMargins = !gGlobalPrefs->smartMargins;
     SaveSettings();
     // Every page's laid-out height changes, so relayout and put the view back
     // where it was (same shape as ToggleMangaMode).
