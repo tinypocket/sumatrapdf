@@ -327,38 +327,18 @@ constexpr float kSmartMarginPadPt = 6.0f;
 // line of a paragraph.
 
 // One horizontal band of text on a page, in page (unrotated, unzoomed) space.
-// `key` is the line's letters, lower-cased, with digits and punctuation
-// dropped, so "Chapter 3 - 41" and "Chapter 3 - 42" compare equal: a running
-// header keeps its wording and only its page number moves. Fixed-size so the
-// line stays trivially copyable inside a Vec.
-constexpr int kTextLineKeyMax = 64;
-
 struct TextLine {
     float top;
     float bottom;
-    char key[kTextLineKeyMax];
-    int keyLen;
 };
 
-static void AppendToKey(TextLine* line, int c) {
-    if (c >= 'A' && c <= 'Z') {
-        c += 'a' - 'A';
-    }
-    // ASCII letters only: enough to tell "the same header again" from "a
-    // different line of prose", and it sidesteps case folding outside ASCII
-    if (c < 'a' || c > 'z' || line->keyLen >= kTextLineKeyMax) {
-        return;
-    }
-    line->key[line->keyLen++] = (char)c;
-}
-
-static bool SameKey(const TextLine& a, const TextLine& b) {
-    // an empty key means "no letters at all" - a bare page number, which is the
-    // most common footer of all, so two empty keys are a match, not a mismatch
-    if (a.keyLen != b.keyLen) {
-        return false;
-    }
-    return memcmp(a.key, b.key, (size_t)a.keyLen) == 0;
+// Two candidate bands are "the same header" when they sit at the same height.
+// Wording is deliberately NOT compared: in a book divided into sections the
+// running header carries the section's name, so it reads differently on every
+// sampled page while being the same header throughout.
+static bool SameBand(const TextLine& a, const TextLine& b) {
+    constexpr float kBandTol = 3.0f;
+    return fabsf(a.top - b.top) <= kBandTol && fabsf(a.bottom - b.bottom) <= kBandTol;
 }
 
 // Group a page's per-codepoint boxes into lines. Boxes whose vertical spans
@@ -372,31 +352,27 @@ static void CollectTextLines(EngineBase* engine, int pageNo, Vec<TextLine>& out)
     if (!coords || !text) {
         return;
     }
-    int byteIdx = 0;
     for (int i = 0; i < nCodepoints; i++) {
-        int c = Utf8CodepointNext(text, byteIdx);
         Rect r = coords[i];
         if (r.dy <= 0 || r.dx <= 0) {
             continue; // spaces and newlines carry an empty box
         }
         float top = (float)r.y;
         float bottom = (float)(r.y + r.dy);
-        TextLine* found = nullptr;
+        bool merged = false;
         for (TextLine& line : out) {
             // any vertical overlap at all: superscripts and accents ride along
             if (top < line.bottom && bottom > line.top) {
                 line.top = std::min(line.top, top);
                 line.bottom = std::max(line.bottom, bottom);
-                found = &line;
+                merged = true;
                 break;
             }
         }
-        if (!found) {
-            TextLine line{top, bottom, {}, 0};
+        if (!merged) {
+            TextLine line{top, bottom};
             out.Append(line);
-            found = &out[len(out) - 1];
         }
-        AppendToKey(found, c);
     }
     // sorted top-down, so the first and last entries are the candidate bands
     VecSort(out, [](const TextLine* a, const TextLine* b) -> int {
@@ -443,15 +419,10 @@ void DisplayModel::DetectRunningHeaderFooter() const {
     // time a page is laid out, and text extraction is not cheap
     constexpr int kMaxSamples = 6;
     int step = std::max(1, nPages / kMaxSamples);
-    int headerVotes = 0;
-    int footerVotes = 0;
+    // every page's candidate band, or an empty one where the page had none
+    Vec<TextLine> headerCands;
+    Vec<TextLine> footerCands;
     int sampled = 0;
-    float headerCut = 0.0f;
-    float footerCut = 0.0f;
-    TextLine headerKey{};
-    TextLine footerKey{};
-    bool headerKeySet = false;
-    bool footerKeySet = false;
     for (int pageNo = 1; pageNo <= nPages && sampled < kMaxSamples; pageNo += step) {
         RectF media = PageMediaBox(pageNo);
         if (media.IsEmpty()) {
@@ -469,45 +440,55 @@ void DisplayModel::DetectRunningHeaderFooter() const {
 
         const TextLine& first = lines[0];
         float firstGap = lines[1].top - first.bottom;
-        // and it has to actually be near the top edge, not a heading halfway down
+        // near the top edge, not a heading halfway down the page
         bool nearTop = (first.top - media.y) < media.dy * 0.14f;
-        // The wording has to repeat too. A chapter title is well separated and
-        // near the top exactly like a header, but it reads differently on every
-        // page, so it never collects a second vote.
-        if (firstGap >= minGap && nearTop) {
-            if (!headerKeySet) {
-                headerKey = first;
-                headerKeySet = true;
-            }
-            if (SameKey(headerKey, first)) {
-                headerVotes++;
-                headerCut = std::max(headerCut, first.bottom - media.y);
-            }
+        // and running-header sized: a section title or a slide heading is set
+        // large, a running header is one small line
+        bool thinTop = (first.bottom - first.top) <= media.dy * 0.06f;
+        if (firstGap >= minGap && nearTop && thinTop) {
+            headerCands.Append(first);
         }
 
         const TextLine& last = lines[len(lines) - 1];
         float lastGap = last.top - lines[len(lines) - 2].bottom;
         bool nearBottom = (media.y + media.dy - last.bottom) < media.dy * 0.14f;
-        if (lastGap >= minGap && nearBottom) {
-            if (!footerKeySet) {
-                footerKey = last;
-                footerKeySet = true;
-            }
-            if (SameKey(footerKey, last)) {
-                footerVotes++;
-                footerCut = std::max(footerCut, media.y + media.dy - last.top);
-            }
+        bool thinBottom = (last.bottom - last.top) <= media.dy * 0.06f;
+        if (lastGap >= minGap && nearBottom && thinBottom) {
+            footerCands.Append(last);
         }
     }
     if (sampled < 2) {
         return;
     }
-    // "most pages", not "some": a one-off pull quote must not crop the book
-    if (headerVotes * 2 > sampled) {
-        smartHfTopPt = headerCut;
+
+    // The band the most pages agree on wins, rather than whichever page
+    // happened to be sampled first - one odd page must not lock out the real
+    // header. "Most pages", not "some", so a lone pull quote or a single
+    // chapter title never crops the whole book.
+    auto modalBand = [](const Vec<TextLine>& cands, int nSampled, TextLine* out) -> bool {
+        int best = 0;
+        for (const TextLine& a : cands) {
+            int n = 0;
+            for (const TextLine& b : cands) {
+                if (SameBand(a, b)) {
+                    n++;
+                }
+            }
+            if (n > best) {
+                best = n;
+                *out = a;
+            }
+        }
+        return best * 2 > nSampled;
+    };
+
+    TextLine band;
+    if (modalBand(headerCands, sampled, &band)) {
+        smartHfTopPt = band.bottom - PageMediaBox(1).y;
     }
-    if (footerVotes * 2 > sampled) {
-        smartHfBottomPt = footerCut;
+    if (modalBand(footerCands, sampled, &band)) {
+        RectF media = PageMediaBox(1);
+        smartHfBottomPt = media.y + media.dy - band.top;
     }
 }
 
