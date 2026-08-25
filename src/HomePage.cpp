@@ -2039,6 +2039,8 @@ static void FillHomeRoundRect(HDC hdc, const Rect& r, int radius, COLORREF col, 
 // defined with the rest of the Library feedback code, below
 static void DrawLibraryFeedback(MainWindow* win, HDC hdc);
 static void DrawPinFlight(MainWindow* win, HDC hdc);
+static void NoteLibraryContentSwap(MainWindow* win, HDC hdc, Rect content, Str key);
+static void DrawLibraryContentSwap(MainWindow* win, HDC hdc);
 
 static void FillHomeRoundRectAlpha(HDC hdc, const Rect& r, int radius, COLORREF col, u8 alpha) {
     if (alpha == 0 || r.dx <= 0 || r.dy <= 0) {
@@ -4006,6 +4008,13 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     HdcDrawText(hdc, headerTitle, header, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
                 HdcGetUiFont(hdc, 18, FW_SEMIBOLD));
 
+    {
+        // "\x01recent" cannot collide with a path, so Recent and a folder named
+        // "recent" are still different destinations
+        Str swapKey = recentSelected ? StrL("\x01recent") : selectedPath;
+        Rect contentRc{leftDx, headerDy, std::max(0, rc.dx - leftDx), std::max(0, rc.dy - headerDy)};
+        NoteLibraryContentSwap(win, hdc, contentRc, swapKey);
+    }
     if (recentSelected) {
         Rect content{leftDx, headerDy, std::max(0, rc.dx - leftDx), std::max(0, rc.dy - headerDy)};
         DrawTouchRecentCards(win, hdc, content);
@@ -4180,6 +4189,7 @@ void DrawHomePage(MainWindow* win, HDC hdc) {
         // the Library is the only browsing destination; Recent is one of its
         // sidebar rows (win->libraryRecentSelected)
         DrawTouchLibraryPageV2(win, hdc);
+        DrawLibraryContentSwap(win, hdc);
         // after the content, so it sits on top of whatever the link covers
         DrawLibraryFeedback(win, hdc);
         DrawPinFlight(win, hdc);
@@ -4672,6 +4682,11 @@ static void UpdateLibraryScrollTimer(MainWindow* win) {
 // Owned here rather than on MainWindow (see the note in MainWindow.h). Only
 // one Library surface is interacted with at a time, so a single set of state
 // plus the window that owns it is enough; switching windows resets it.
+static MainWindow* gLibSwapWin = nullptr;
+static Str gLibSwapKey;
+static Rect gLibSwapRect;
+static AnimVal gLibSwapVal;
+
 static MainWindow* gFeedbackWin = nullptr;
 static Str gLibraryHotTarget;
 static Str gLibraryPressedTarget;
@@ -4693,7 +4708,7 @@ static void UpdateLibraryFeedbackTimer(MainWindow* win) {
     if (!win || !win->hwndCanvas) {
         return;
     }
-    bool moving = gLibraryHotVal.IsAnimating() || gLibraryPressVal.IsAnimating();
+    bool moving = gLibraryHotVal.IsAnimating() || gLibraryPressVal.IsAnimating() || gLibSwapVal.IsAnimating();
     if (moving) {
         SetTimer(win->hwndCanvas, kLibraryFeedbackTimerID, kAnimTickMs, nullptr);
     } else {
@@ -4746,6 +4761,47 @@ void HomePageSetPressedLink(MainWindow* win, Str target) {
         gLibraryPressVal.Set(down ? 1.0f : 0.0f);
     }
     HwndInvalidate(win->hwndCanvas, false);
+}
+
+// Switching what the content pane shows - Recent, then a folder, then another
+// folder - swaps the whole right-hand side in one frame. In elaborate mode the
+// new contents rise out of the background instead, which reads as "this
+// changed because you clicked" rather than as a flicker. Cheap because it is
+// one alpha fill over the finished content, not a second render.
+static void NoteLibraryContentSwap(MainWindow* win, HDC hdc, Rect content, Str key) {
+    gLibSwapRect = content;
+    if (!AnimElaborate()) {
+        return;
+    }
+    bool sameWin = gLibSwapWin == win;
+    if (sameWin && str::Eq(gLibSwapKey, key)) {
+        return;
+    }
+    bool first = !sameWin || !gLibSwapKey;
+    gLibSwapWin = win;
+    str::ReplaceWithCopy(&gLibSwapKey, key);
+    if (first) {
+        gLibSwapVal.Set(1.0f); // opening the Library is not a swap
+        return;
+    }
+    gLibSwapVal.Set(0.0f);
+    gLibSwapVal.SetTarget(1.0f, kAnimContentSwapMs);
+    SetTimer(win->hwndCanvas, kLibraryFeedbackTimerID, kAnimTickMs, nullptr);
+}
+
+static void DrawLibraryContentSwap(MainWindow* win, HDC hdc) {
+    if (gLibSwapWin != win || gLibSwapRect.IsEmpty()) {
+        return;
+    }
+    float v = gLibSwapVal.Value();
+    if (v >= 1.0f) {
+        return;
+    }
+    u8 alpha = (u8)(255.0f * (1.0f - v));
+    Gdiplus::Graphics gfx(hdc);
+    COLORREF bg = ThemeMainWindowBackgroundColor();
+    Gdiplus::SolidBrush br(Gdiplus::Color(alpha, GetRValue(bg), GetGValue(bg), GetBValue(bg)));
+    gfx.FillRectangle(&br, gLibSwapRect.x, gLibSwapRect.y, gLibSwapRect.dx, gLibSwapRect.dy);
 }
 
 // look the link's CURRENT rect up by target: static links are rebuilt every
