@@ -226,6 +226,10 @@ struct TopBarWnd : Wnd {
     void RefreshSavedPages();
     Rect PreviewAnchorRect(const Rect& slotRect);
     void ShowPreview(HWND anchorHwnd, Rect anchorRect);
+    // a hover from the tab bar waits out the same delay the rail uses before
+    // the preview appears; these hold what to show when it fires
+    HWND pendingPreviewAnchor = nullptr;
+    Rect pendingPreviewRect;
     void PinPreview(HWND anchorHwnd, Rect anchorRect);
     void SchedulePreviewClose();
     void CancelPreviewClose();
@@ -1783,8 +1787,9 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
     if (msg == WM_TIMER && wparam == kPreviewHoverTimerId) {
         KillTimer(hwnd, kPreviewHoverTimerId);
-        if (hotIdx == 0 && gTopBarSlots[0].item == TopBarItem::Preview) {
-            ShowPreview(hwnd, PreviewAnchorRect(slotRects[0]));
+        if (pendingPreviewAnchor) {
+            ShowPreview(pendingPreviewAnchor, pendingPreviewRect);
+            pendingPreviewAnchor = nullptr;
         }
         return 0;
     }
@@ -2162,10 +2167,21 @@ void HoverTouchDocumentPreview(MainWindow* win, HWND anchorHwnd, Rect anchorRect
     if (!win || !win->topBarWnd) {
         return;
     }
+    TopBarWnd* bar = win->topBarWnd;
+    HWND barHwnd = bar->hwnd;
+    if (!barHwnd) {
+        return;
+    }
+    KillTimer(barHwnd, kPreviewHoverTimerId);
     if (isOver) {
-        win->topBarWnd->ShowPreview(anchorHwnd, anchorRect);
+        // Wait, like the rail does. Showing on the first pixel of hover made
+        // the previews flash open while the pointer was only passing through.
+        bar->pendingPreviewAnchor = anchorHwnd;
+        bar->pendingPreviewRect = anchorRect;
+        SetTimer(barHwnd, kPreviewHoverTimerId, kPreviewHoverDelayMs, nullptr);
     } else {
-        win->topBarWnd->SchedulePreviewClose();
+        bar->pendingPreviewAnchor = nullptr;
+        bar->SchedulePreviewClose();
     }
 }
 

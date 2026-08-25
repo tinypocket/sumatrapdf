@@ -696,12 +696,32 @@ static void MainWindowTabMenu(MainWindow* win) {
     }
 }
 
+// Anchor the preview strip on the first tab that is actually drawn, not on the
+// switcher button. The button sits to the left of the tabs, so anchoring there
+// pushed the whole strip across by a control's width - the cards looked like
+// they belonged to the tab one over. The hidden Library tab has an empty rect
+// and is skipped, which is what made this visible once it stopped being a tab.
+static Rect TabsPreviewAnchorRect(MainWindow* win) {
+    TabsCtrl* tabs = win->tabsCtrl;
+    if (!tabs) {
+        return {};
+    }
+    int n = std::min(tabs->TabCount(), len(tabs->tabs));
+    for (int i = 0; i < n; i++) {
+        TabInfo* ti = tabs->tabs[i];
+        if (ti && !ti->isHidden && !ti->r.IsEmpty()) {
+            return ti->r;
+        }
+    }
+    return tabs->previewButtonRect;
+}
+
 static void MainWindowPreview(MainWindow* win) {
-    ShowTouchDocumentPreview(win, win->tabsCtrl->hwnd, win->tabsCtrl->previewButtonRect);
+    ShowTouchDocumentPreview(win, win->tabsCtrl->hwnd, TabsPreviewAnchorRect(win));
 }
 
 static void MainWindowPreviewHover(MainWindow* win, bool isOver) {
-    HoverTouchDocumentPreview(win, win->tabsCtrl->hwnd, win->tabsCtrl->previewButtonRect, isOver);
+    HoverTouchDocumentPreview(win, win->tabsCtrl->hwnd, TabsPreviewAnchorRect(win), isOver);
 }
 
 static void MainWindowTabSelectionChanging(MainWindow* win, TabsCtrl::SelectionChangingEvent* ev) {
