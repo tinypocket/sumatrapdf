@@ -3946,6 +3946,30 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                     HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
         win->staticLinks.Append(new StaticLink(open, Str(kLinkOpenFile), StrL("Open a document")));
     } else {
+        // Pin/unpin the folder being browsed, right next to how its contents
+        // are shown. Reaching this before required leaving the folder first -
+        // back to the sidebar row's "..." menu, or the card on its parent's
+        // own listing - neither of which is available while looking at the
+        // folder's own contents.
+        if (selectedPath) {
+            int pinBtnDy = viewButtonDy;
+            int pinGap = DpiScale(hdc, 8);
+            Rect pinBtn{headerAction.x - pinGap - pinBtnDy, headerAction.y, pinBtnDy, pinBtnDy};
+            bool isPinned = TouchLibraryPathIn(gGlobalPrefs->libraryPinnedFolders, selectedPath);
+            COLORREF pinBg = isPinned ? ThemeWindowLinkColor() : ThemeHotBackgroundColor();
+            FillHomeRoundRect(hdc, pinBtn, DpiScale(hdc, 11), pinBg);
+            COLORREF pinFg = isPinned ? RGB(255, 255, 255) : ThemeWindowDarkerTextColor();
+            int pinIconDy = DpiScale(hdc, 18);
+            HIMAGELIST pinIcons = GetTintedToolbarImageList(pinIconDy, pinFg, pinBg);
+            if (pinIcons) {
+                ImageList_Draw(pinIcons, (int)TbIcon::Pin, hdc, pinBtn.x + (pinBtn.dx - pinIconDy) / 2,
+                               pinBtn.y + (pinBtn.dy - pinIconDy) / 2, ILD_NORMAL);
+            }
+            TempStr pinTarget = str::JoinTemp(kLinkLibraryPinPrefix, selectedPath);
+            Str pinTip = isPinned ? _TRA("Unpin folder") : _TRA("Pin folder");
+            win->staticLinks.Append(new StaticLink(pinBtn, pinTarget, pinTip));
+        }
+
         Rect viewToggle = headerAction;
         FillHomeRoundRect(hdc, viewToggle, DpiScale(hdc, 11), ThemeHotBackgroundColor());
         Rect contentView{viewToggle.x, viewToggle.y, viewButtonDy, viewButtonDy};
