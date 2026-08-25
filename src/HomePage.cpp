@@ -3581,6 +3581,13 @@ static void DrawTouchLibraryPdfIcon(HDC hdc, const Rect& rect) {
 static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     Rect rc = HwndClientRect(win->hwndCanvas);
     int leftDx = TouchLibrarySidebarDx(win);
+    // With no document open, the Favorites panel is showing in place of a
+    // document's sidebar. Drawing the Library's own sidebar as well would put
+    // three columns on screen and squeeze the content, so the panel stands in
+    // for it: Favorites on the left, Library content on the right.
+    if (win->uiState.tocVisible && !win->IsDocLoaded()) {
+        leftDx = 0;
+    }
     int headerDy = DpiScale(hdc, 64);
     HdcFillRect(hdc, rc, ThemeWindowControlBackgroundColor());
     HdcFillRect(hdc, Rect{0, 0, leftDx, rc.dy}, ThemeHotBackgroundColor());
@@ -3599,7 +3606,15 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     bool recentSelected = win->libraryRecentSelected;
 
     EnsureHomeSearchCreated(win);
+    // no sidebar (the Favorites panel is standing in for it): its search field
+    // and Manage-folders row have nowhere to go, and drawn at zero width they
+    // leave slivers behind
+    bool hasSidebar = leftDx > 0;
+    if (!hasSidebar) {
+        HwndSetVisible(win->hwndHomeSearch, false);
+    }
     Rect search{DpiScale(hdc, 12), DpiScale(hdc, 12), leftDx - DpiScale(hdc, 24), DpiScale(hdc, 40)};
+    if (hasSidebar) {
     FillHomeRoundRect(hdc, search, search.dy / 2, ThemeTouchSurfaceColor(), ThemeEdgeColor());
     int searchIconDy = DpiScale(hdc, 16);
     HIMAGELIST searchIcons =
@@ -3611,8 +3626,9 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     MoveWindow(win->hwndHomeSearch, search.x + DpiScale(hdc, 38), search.y + DpiScale(hdc, 4),
                search.dx - DpiScale(hdc, 72), search.dy - DpiScale(hdc, 8), TRUE);
     HwndShow(win->hwndHomeSearch);
+    } // hasSidebar
     TempStr query = HwndGetTextTemp(win->hwndHomeSearch);
-    if (len(query) > 0) {
+    if (hasSidebar && len(query) > 0) {
         Rect clear{search.x + search.dx - DpiScale(hdc, 38), search.y, DpiScale(hdc, 38), search.dy};
         Rect clearCircle{clear.x + (clear.dx - DpiScale(hdc, 18)) / 2, clear.y + (clear.dy - DpiScale(hdc, 18)) / 2,
                          DpiScale(hdc, 18), DpiScale(hdc, 18)};
@@ -3842,6 +3858,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     }
 
     Rect manage{DpiScale(hdc, 12), rc.dy - DpiScale(hdc, 56), leftDx - DpiScale(hdc, 24), DpiScale(hdc, 44)};
+    if (hasSidebar) {
     SetTextColor(hdc, ThemeWindowLinkColor());
     Rect manageIcon{manage.x + DpiScale(hdc, 4), manage.y, DpiScale(hdc, 20), manage.dy};
     DrawTouchLibraryFolderIcon(hdc, manageIcon, ThemeWindowLinkColor(), ThemeHotBackgroundColor());
@@ -3857,6 +3874,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     HdcDrawText(hdc, StrL("Manage folders"), manageText, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
                 HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
     win->staticLinks.Append(new StaticLink(manage, Str(kLinkLibraryManage)));
+    } // hasSidebar
 
     Str selectedPath = selected >= 0 && selected < len(folders) ? folders[selected] : Str{};
     TempStr selectedName = selectedPath ? path::GetBaseNameTemp(selectedPath) : str::DupTemp("Library");

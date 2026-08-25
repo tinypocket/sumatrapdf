@@ -18,6 +18,8 @@
 #include "GlobalPrefs.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "TopBar.h"
+#include "Rail.h"
 #include "WindowTab.h"
 #include "resource.h"
 #include "Commands.h"
@@ -648,10 +650,18 @@ static void GoToFavoritePage(MainWindow* win, int pageNo) {
 struct GoToFavoritePageData {
     MainWindow* win;
     int pageNo;
+    // Favorites span every document, so opening one in another PDF must not
+    // close the panel you launched it from. Loading a document re-applies that
+    // document's showToc, and a file with no bookmarks has it false, which
+    // closed the shared sidebar - and the Favorites panel with it.
+    bool keepFavoritesPanel = false;
 };
 
 static void GoToFavoritePage(GoToFavoritePageData* d) {
     GoToFavoritePage(d->win, d->pageNo);
+    if (d->keepFavoritesPanel && IsMainWindowValid(d->win)) {
+        SetTouchPanelMode(d->win, TouchPanelMode::Favorites);
+    }
     delete d;
 }
 
@@ -663,6 +673,8 @@ void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav) {
     if (!fs || !fav) {
         return;
     }
+    // remember this before the load, which is what resets the panel
+    bool keepPanel = win && IsTouchChrome(win) && win->touchPanelMode == TouchPanelMode::Favorites;
 
     Str fp = fs->filePath;
     MainWindow* existingWin = FindMainWindowByFile(fp, true);
@@ -670,6 +682,7 @@ void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav) {
         auto* data = new GoToFavoritePageData;
         data->pageNo = fav->pageNo;
         data->win = existingWin;
+        data->keepFavoritesPanel = keepPanel;
         auto fn = MkFunc0<GoToFavoritePageData>(GoToFavoritePage, data);
         uitask::Post(fn, "TaskGoToFavorite");
         return;
@@ -697,6 +710,7 @@ void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav) {
         auto* data = new GoToFavoritePageData;
         data->pageNo = pageNo;
         data->win = win;
+        data->keepFavoritesPanel = keepPanel;
         auto fn = MkFunc0<GoToFavoritePageData>(GoToFavoritePage, data);
         uitask::Post(fn, "TaskGoToFavorite2");
     }

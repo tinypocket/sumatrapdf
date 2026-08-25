@@ -252,6 +252,10 @@ static bool IsRailItemEnabled(MainWindow* win, const RailItem& item) {
     if (!win) {
         return false;
     }
+    // Favorites works without a document (see SetTouchPanelMode)
+    if (item.mode == TouchPanelMode::Favorites) {
+        return true;
+    }
     return item.cmdId || item.view != TouchView::Doc || RailHasDocument(win);
 }
 
@@ -353,8 +357,15 @@ void SetTouchPanelMode(MainWindow* win, TouchPanelMode mode) {
     TouchView previous = win->touchView;
     win->touchView = TouchView::Doc;
     if (!SelectTouchDocumentTab(win)) {
+        // Favorites are stored per file and outlive the session, so the panel
+        // is useful with nothing open - it is how you get back to a page you
+        // marked. Every other panel describes the current document and has
+        // nothing to say without one.
+        if (mode != TouchPanelMode::Favorites) {
+            win->touchView = previous;
+            return;
+        }
         win->touchView = previous;
-        return;
     }
     SetTouchPanelModeAndRestoreSearch(win, mode);
     win->touchSidebarCollapsed = false;
