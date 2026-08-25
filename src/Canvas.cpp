@@ -1663,6 +1663,7 @@ static bool IsFullPageImage(DisplayModel* dm, IPageElement* el, int pageNo) {
 
 // defined with the page-painting helpers, further down
 Rect SmartMarginBadgeRect(HWND hwnd, DisplayModel* dm, int pageNo, const Rect& pageOnScreen);
+Rect SmartMarginToggleStripRect(HWND hwnd, DisplayModel* dm, int pageNo, const Rect& pageOnScreen);
 
 // Clicking the badge on a trimmed page gives that page its margins back (or
 // takes them away again). Only that page: the point is to rescue the odd page
@@ -1679,7 +1680,9 @@ static bool ToggleSmartMarginAtPoint(MainWindow* win, int x, int y) {
             continue;
         }
         Rect badge = SmartMarginBadgeRect(win->hwndCanvas, dm, pageNo, pi->pageOnScreen);
-        if (badge.IsEmpty() || !badge.Contains(pt)) {
+        Rect strip = SmartMarginToggleStripRect(win->hwndCanvas, dm, pageNo, pi->pageOnScreen);
+        bool hit = (!badge.IsEmpty() && badge.Contains(pt)) || (!strip.IsEmpty() && strip.Contains(pt));
+        if (!hit) {
             continue;
         }
         dm->TogglePageMarginExpanded(pageNo);
@@ -2278,10 +2281,26 @@ Rect SmartMarginBadgeRect(HWND hwnd, DisplayModel* dm, int pageNo, const Rect& p
     int dy = DpiScale(hwnd, 18);
     // Straddle the page's bottom edge so it sits mostly in the gutter between
     // pages: centred inside the page it would cover the last line of text,
-    // which is exactly the content the reader is trying to get back.
-    int x = pageOnScreen.x + (pageOnScreen.dx - dx) / 2;
+    // which is exactly the content the reader is trying to get back. Held to
+    // the right so it is out of the way of drop caps and initials, which sit
+    // at the left of the text block.
+    int inset = DpiScale(hwnd, 12);
+    int x = pageOnScreen.x + pageOnScreen.dx - dx - inset;
     int y = pageOnScreen.y + pageOnScreen.dy - dy / 2;
     return Rect{x, y, dx, dy};
+}
+
+// The chevron is small and off to one side, so the whole middle of the page
+// border toggles as well - the border is the gutter between pages, so there is
+// nothing there to hit by accident.
+Rect SmartMarginToggleStripRect(HWND hwnd, DisplayModel* dm, int pageNo, const Rect& pageOnScreen) {
+    Rect badge = SmartMarginBadgeRect(hwnd, dm, pageNo, pageOnScreen);
+    if (badge.IsEmpty()) {
+        return {};
+    }
+    int dx = pageOnScreen.dx / 2;
+    int x = pageOnScreen.x + (pageOnScreen.dx - dx) / 2;
+    return Rect{x, badge.y, dx, badge.dy};
 }
 
 static void DrawSmartMarginBadge(HDC hdc, const Rect& r, bool expanded) {
