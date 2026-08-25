@@ -167,6 +167,9 @@ struct DisplayModel : DocController {
     float manualTrimTop = 0.0f;
     float manualTrimBottom = 0.0f;
     void SetManualTrim(float top, float bottom);
+    // What the automatic pass would trim, as fractions of page height, for the
+    // manual dialog to open on. False when it found nothing to propose.
+    bool SuggestHeaderFooterTrim(float* topOut, float* bottomOut) const;
     RectF ApplyManualTrim(RectF box, RectF media) const;
     // Running header/footer bands, in points measured down from the top of the
     // media box and up from its bottom. Detected once per document from a

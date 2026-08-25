@@ -592,6 +592,30 @@ RectF DisplayModel::ApplyManualTrim(RectF box, RectF media) const {
     return box;
 }
 
+// The automatic detector already knows how to find a running header on a
+// document it can read. Rather than open the manual dialog on nothing, open it
+// on that, and let the reader adjust or clear it. A suggestion carries none of
+// the risk of an automatic crop: it is shown on six pages before it applies.
+bool DisplayModel::SuggestHeaderFooterTrim(float* topOut, float* bottomOut) const {
+    *topOut = 0.0f;
+    *bottomOut = 0.0f;
+    DetectRunningHeaderFooter();
+    float pageDy = PageMediaBox(1).dy;
+    if (pageDy <= 0.0f) {
+        return false;
+    }
+    // a little past the band itself, so the rule that usually sits under a
+    // running header goes with it
+    float pad = kSmartMarginPadPt * 2.0f;
+    if (smartHfTopPt > 0.0f) {
+        *topOut = std::clamp((smartHfTopPt + pad) / pageDy, 0.0f, 0.45f);
+    }
+    if (smartHfBottomPt > 0.0f) {
+        *bottomOut = std::clamp((smartHfBottomPt + pad) / pageDy, 0.0f, 0.45f);
+    }
+    return *topOut > 0.0f || *bottomOut > 0.0f;
+}
+
 void DisplayModel::SetManualTrim(float top, float bottom) {
     manualTrimTop = std::clamp(top, 0.0f, 0.45f);
     manualTrimBottom = std::clamp(bottom, 0.0f, 0.45f);
