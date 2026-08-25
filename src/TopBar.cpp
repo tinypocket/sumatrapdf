@@ -3,6 +3,7 @@
 
 #include "base/Base.h"
 #include "base/Dpi.h"
+#include "base/File.h"
 #include "base/ScopedWin.h"
 #include "base/Win.h"
 
@@ -194,6 +195,12 @@ struct TopBarWnd : Wnd {
     Vec<Rect> savedCloseRects;
     Vec<int> savedPages;
     StrVec savedPageNames;
+    // With favorites in more than one document the tray shows a chip per
+    // document instead of a flat list of pages: a mixed list gives no clue
+    // which page belongs to which file. Each chip is coloured from its path so
+    // the same document keeps the same colour between sessions.
+    StrVec savedGroupPaths;
+    Vec<Rect> savedGroupRects;
     int savedContentDx = 0;
     int savedScrollX = 0;
     bool savedTrayDragging = false;
@@ -330,6 +337,20 @@ void TopBarWnd::PinPreview(HWND anchorHwnd, Rect anchorRect) {
 // The tray is a view onto the document's favorites, not its own list: these
 // two vectors are a cache rebuilt from the store, so a page saved here shows up
 // in the Favorites pane and survives a restart.
+// A document's colour in the tray: picked from its path, so it is stable
+// across sessions and the same file always reads the same.
+COLORREF TouchFavoriteGroupColor(Str filePath) {
+    static const COLORREF kPalette[] = {
+        RGB(0xC2, 0x6B, 0x4F), RGB(0x4F, 0x7A, 0xC2), RGB(0x5A, 0x9E, 0x6F),
+        RGB(0x9B, 0x6B, 0xC2), RGB(0xC2, 0x9E, 0x4F), RGB(0x4F, 0xA8, 0xA8),
+    };
+    u32 h = 2166136261u;
+    for (int i = 0; i < filePath.len; i++) {
+        h = (h ^ (u8)filePath.s[i]) * 16777619u;
+    }
+    return kPalette[h % dimof(kPalette)];
+}
+
 void TopBarWnd::RefreshSavedPages() {
     // an in-flight rename holds an index into these vectors; rebuilding under
     // it would retarget the edit at a different favorite
@@ -338,8 +359,34 @@ void TopBarWnd::RefreshSavedPages() {
     }
     savedPages.Reset();
     savedPageNames.Reset();
+    savedGroupPaths.Reset();
+    if (!gGlobalPrefs->favoritesInToolbar) {
+        return;
+    }
+
+    Vec<FileState*> files;
+    GetFilesWithFavorites(files);
     WindowTab* tab = win ? win->CurrentTab() : nullptr;
     Str path = (tab && !tab->IsAboutTab()) ? tab->filePath : Str{};
+
+    // More than one document with favorites: chips, one per document. The
+    // current document's own pages still show directly, since those are the
+    // ones being used right now.
+    int others = 0;
+    for (FileState* fs : files) {
+        if (!path || !str::Eq(fs->filePath, path)) {
+            others++;
+        }
+    }
+    if (others > 0) {
+        for (FileState* fs : files) {
+            if (path && str::Eq(fs->filePath, path)) {
+                continue; // shown as pages below
+            }
+            savedGroupPaths.Append(fs->filePath);
+        }
+    }
+
     Vec<Favorite*>* favs = GetFileFavorites(path);
     if (!favs) {
         return;
@@ -749,7 +796,8 @@ bool TopBarWnd::Layout(HDC hdc, Rect* rects) {
             break;
         }
     }
-    if (bookmarkIdx >= 0 && !rects[bookmarkIdx].IsEmpty() && len(savedPages) > 0) {
+    savedGroupRects.Reset();
+    if (bookmarkIdx >= 0 && !rects[bookmarkIdx].IsEmpty() && (len(savedPages) > 0 || len(savedGroupPaths) > 0)) {
         int x = rects[bookmarkIdx].x + rects[bookmarkIdx].dx + DpiScale(hwnd, 8);
         int trayRight = std::min(x + DpiScale(hwnd, 340), xRight);
         int pillDy = DpiScale(hwnd, 36);
@@ -768,6 +816,17 @@ bool TopBarWnd::Layout(HDC hdc, Rect* rects) {
                 contentDx += gap;
             }
         }
+        // chips for the other documents, sized to their names
+        HFONT chipFont = TopBarFontWeighted(hdc, kFontSizeMeta, kFontWeightStrong);
+        Vec<int> groupDx;
+        for (int i = 0; i < len(savedGroupPaths); i++) {
+            TempStr name = path::GetBaseNameTemp(savedGroupPaths[i]);
+            Size sz = HdcGetTextExtentPoint32Font(hdc, name, chipFont);
+            int dx = std::min(sz.dx + DpiScale(hwnd, 34), DpiScale(hwnd, 190));
+            groupDx.Append(dx);
+            contentDx += (contentDx > 0 ? gap : 0) + dx;
+        }
+
         savedContentDx = contentDx;
         int maxScroll = std::max(0, savedContentDx - savedTrayRect.dx);
         savedScrollX = std::clamp(savedScrollX, 0, maxScroll);
@@ -783,6 +842,10 @@ bool TopBarWnd::Layout(HDC hdc, Rect* rects) {
             savedCloseRects.Append(Rect{pill.x + pill.dx - DpiScale(hwnd, 30), pill.y + DpiScale(hwnd, 5),
                                         DpiScale(hwnd, 26), DpiScale(hwnd, 26)});
             pillX += dx + gap;
+        }
+        for (int i = 0; i < len(savedGroupPaths) && i < len(groupDx); i++) {
+            savedGroupRects.Append(Rect{pillX, savedTrayRect.y, groupDx[i], pillDy});
+            pillX += groupDx[i] + gap;
         }
     }
     return true;
@@ -1319,6 +1382,21 @@ void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT*) {
         IntersectClipRect(hdc, savedTrayRect.x, savedTrayRect.y, savedTrayRect.x + savedTrayRect.dx,
                           savedTrayRect.y + savedTrayRect.dy);
     }
+    for (int i = 0; i < len(savedGroupRects) && i < len(savedGroupPaths); i++) {
+        Rect chip = savedGroupRects[i];
+        if (chip.Intersect(savedTrayRect).IsEmpty()) {
+            continue;
+        }
+        Str fp = savedGroupPaths[i];
+        COLORREF chipCol = TouchFavoriteGroupColor(fp);
+        FillTrack(hdc, chip, chip.dy / 2, chipCol);
+        // white or black text, whichever the chip colour can carry
+        SetTextColor(hdc, IsLightColor(chipCol) ? RGB(0, 0, 0) : RGB(255, 255, 255));
+        TempStr name = path::GetBaseNameTemp(fp);
+        Rect tr{chip.x + DpiScale(hwnd, 12), chip.y, chip.dx - DpiScale(hwnd, 24), chip.dy};
+        HdcDrawText(hdc, name, tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX, savedFont);
+    }
+
     for (int i = 0; i < len(savedPageRects); i++) {
         int page = savedPages[i];
         Rect pill = savedPageRects[i];
@@ -1895,6 +1973,40 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             ShowBookmarkConfirm(idx);
             return 0;
         }
+        // a document chip opens that document's saved pages
+        for (int i = 0; i < len(savedGroupRects) && i < len(savedGroupPaths); i++) {
+            if (!savedTrayRect.Contains(pt) || !savedGroupRects[i].Contains(pt)) {
+                continue;
+            }
+            Str fp = savedGroupPaths[i];
+            Vec<Favorite*>* favs = GetFileFavorites(fp);
+            if (!favs || len(*favs) == 0) {
+                return 0;
+            }
+            HMENU popup = CreatePopupMenu();
+            for (int k = 0; k < len(*favs); k++) {
+                Favorite* fav = (*favs)[k];
+                if (!fav || fav->isTemporary) {
+                    continue;
+                }
+                TempStr label = FavReadableNameTemp(fav);
+                AppendMenuW(popup, MF_STRING, (UINT_PTR)(k + 1), ToWStrTemp(label).s);
+            }
+            MarkMenuOwnerDraw(popup);
+            Rect chip = savedGroupRects[i];
+            Point screen = HwndClientToScreen(hwnd, Point{chip.x, chip.y + chip.dy});
+            int cmd = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_LEFTBUTTON, screen.x, screen.y, 0, win->hwndFrame,
+                                     nullptr);
+            FreeMenuOwnerDrawInfoData(popup);
+            DestroyMenu(popup);
+            if (cmd > 0 && cmd <= len(*favs)) {
+                FileState* fs = gFileHistory.FindByPath(fp);
+                if (fs) {
+                    GoToFavorite(win, fs, (*favs)[cmd - 1]);
+                }
+            }
+            return 0;
+        }
         for (int i = 0; i < len(savedCloseRects); i++) {
             if (savedTrayRect.Contains(pt) && savedCloseRects[i].Contains(pt)) {
                 ShowBookmarkConfirm(i);
@@ -2145,6 +2257,12 @@ int GetTopBarDy(MainWindow* win) {
 void UpdateTopBarForWindow(MainWindow* win) {
     if (!win || !win->hwndTopBar) {
         return;
+    }
+    // the tray is built from the favorites store, which changes underneath us
+    // (a tab switch, an edit in the favorites pane), so re-read it here rather
+    // than only when the bookmark button adds a page
+    if (win->topBarWnd) {
+        win->topBarWnd->RefreshSavedPages();
     }
     HwndInvalidate(win->hwndTopBar, false);
 }

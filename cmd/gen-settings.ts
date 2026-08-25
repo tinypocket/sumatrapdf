@@ -1366,6 +1366,12 @@ const globalPrefs: Field[] = [
     "if true (and AnimateUI is also true), animate more of the UI: in the web browser the tabs, favorites and nav buttons cross-fade on hover and sink when pressed instead of switching instantly. Ignored when AnimateUI is false",
   ).ver("3.8"),
   field(
+    "FavoritesInToolbar",
+    Bool,
+    true,
+    "if true, the toolbar shows saved pages. With favorites in more than one document it shows a chip per document, colour-coded, which opens that document's saved pages",
+  ).ver("3.8"),
+  field(
     "FavoritesManualOrder",
     Bool,
     false,

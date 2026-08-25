@@ -2044,7 +2044,9 @@ static void CollectTouchFavRows(Vec<TouchFavRow>& rows) {
 // height of the strip holding the "add current page" button, when there is a
 // document to add a page from
 static int TouchFavAddStripDy(MainWindow* win) {
-    return win->IsDocLoaded() ? DpiScale(win->hwndTocBox, 40) : 0;
+    // the strip always carries the toolbar toggle; the add button only appears
+    // when there is a page to add
+    return DpiScale(win->hwndTocBox, 40);
 }
 
 static int TouchFavRowsTop(MainWindow* win) {
@@ -2088,6 +2090,15 @@ static Rect TouchFavDeleteRect(MainWindow* win, const Rect& row) {
 
 // Below the header band, not inside it: the panel title is a child window that
 // paints itself over that band, so anything drawn there disappears under it.
+// "Show in toolbar" toggle: a display preference, so it is offered whether or
+// not a document is open.
+static Rect TouchFavToolbarToggleRect(MainWindow* win) {
+    HWND hw = win->hwndTocBox;
+    int dy = DpiScale(hw, 26);
+    int y = DpiScale(hw, kPanelHeaderDy + 7);
+    return Rect{DpiScale(hw, 14), y, DpiScale(hw, 150), dy};
+}
+
 static Rect TouchFavAddRect(MainWindow* win) {
     HWND hw = win->hwndTocBox;
     Rect client = HwndClientRect(hw);
@@ -2287,11 +2298,34 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             int aarm = DpiScale(hw, 7);
             gfx.DrawLine(&pen, acx - aarm, acy, acx + aarm, acy);
             gfx.DrawLine(&pen, acx, acy - aarm, acx, acy + aarm);
-            HFONT fa = HdcGetUiFont(hdc, kPanelSubFontSize);
-            ScopedSelectObject sela(hdc, fa);
+        }
+        {
+            // toolbar toggle: a check box and a label
+            Rect tg = TouchFavToolbarToggleRect(win);
+            bool on = gGlobalPrefs->favoritesInToolbar;
+            Gdiplus::Graphics tgx(hdc);
+            tgx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            int box = DpiScale(hw, 15);
+            Rect br{tg.x, tg.y + (tg.dy - box) / 2, box, box};
+            Gdiplus::Pen bp(GdiRgbFromCOLORREF(ThemeWindowDarkerTextColor()),
+                            (Gdiplus::REAL)std::max(1, DpiScale(hw, 1)));
+            if (on) {
+                Gdiplus::SolidBrush fill(GdiRgbFromCOLORREF(ThemeWindowLinkColor()));
+                tgx.FillRectangle(&fill, br.x, br.y, br.dx, br.dy);
+                Gdiplus::Pen tick(GdiRgbFromCOLORREF(RGB(255, 255, 255)),
+                                  (Gdiplus::REAL)std::max(1, DpiScale(hw, 2)));
+                tick.SetStartCap(Gdiplus::LineCapRound);
+                tick.SetEndCap(Gdiplus::LineCapRound);
+                tgx.DrawLine(&tick, br.x + box / 4, br.y + box / 2, br.x + box / 2, br.y + (box * 3) / 4);
+                tgx.DrawLine(&tick, br.x + box / 2, br.y + (box * 3) / 4, br.x + (box * 3) / 4, br.y + box / 4);
+            } else {
+                tgx.DrawRectangle(&bp, br.x, br.y, br.dx, br.dy);
+            }
+            HFONT ft = HdcGetUiFont(hdc, kPanelSubFontSize);
+            ScopedSelectObject selt(hdc, ft);
             SetTextColor(hdc, ThemeWindowDarkerTextColor());
-            Rect al{DpiScale(hw, 16), add.y, add.x - DpiScale(hw, 24), add.dy};
-            HdcDrawText(hdc, StrL("Add this page"), al, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            Rect tl{br.x + box + DpiScale(hw, 8), tg.y, tg.dx - box - DpiScale(hw, 8), tg.dy};
+            HdcDrawText(hdc, StrL("Show in toolbar"), tl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
         for (int i = 0; i < len(rows); i++) {
             const TouchFavRow& row = rows[i];
@@ -2680,10 +2714,18 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
         CollectTouchFavRows(rows);
         int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
         int y0 = TouchFavRowsTop(win);
+        if (TouchFavToolbarToggleRect(win).Contains(pt)) {
+            gGlobalPrefs->favoritesInToolbar = !gGlobalPrefs->favoritesInToolbar;
+            SaveSettings();
+            UpdateTopBarForWindow(win);
+            HwndInvalidate(hwnd, false);
+            return true;
+        }
         // add the current page
         if (win->IsDocLoaded() && TouchFavAddRect(win).Contains(pt)) {
             int pageNo = win->ctrl->CurrentPageNo();
             AddFavoriteQuiet(win, pageNo, FavoriteDefaultNameTemp(win, pageNo));
+            UpdateTopBarForWindow(win);
             HwndInvalidate(hwnd, false);
             return true;
         }
@@ -2695,6 +2737,7 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
                 Rect row{DpiScale(hwnd, 12), y0 + idx * rowDy, HwndClientRect(hwnd).dx - DpiScale(hwnd, 24), rowDy};
                 if (TouchFavDeleteRect(win, row).Contains(pt)) {
                     DelFavorite(rows[idx].fs->filePath, rows[idx].fav->pageNo);
+                    UpdateTopBarForWindow(win);
                     HwndInvalidate(hwnd, false);
                     return true;
                 }
@@ -2969,6 +3012,7 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                         }
                         MoveFavorite(rows[from].fs->filePath, fromIdx, toIdx);
                     }
+                    UpdateTopBarForWindow(win);
                     HwndInvalidate(hwnd, false);
                     return 0; // a drag is not a tap
                 }

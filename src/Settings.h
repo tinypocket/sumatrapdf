@@ -924,6 +924,10 @@ struct GlobalPrefs {
     // and sink when pressed instead of switching instantly. Ignored when
     // AnimateUI is false
     bool elaborateAnimations;
+    // if true, the toolbar shows saved pages. With favorites in more than
+    // one document it shows a chip per document, colour-coded, which opens
+    // that document's saved pages
+    bool favoritesInToolbar;
     // if true, favorites keep the order you dragged them into instead of
     // being sorted by page or name. Set automatically the first time you
     // re-order one
@@ -1706,6 +1710,7 @@ static const FieldInfo gGlobalPrefsFields[] = {
     {offsetof(GlobalPrefs, browserDownloads), SettingType::StringArray, 0, true},
     {offsetof(GlobalPrefs, animateUI), SettingType::Bool, true, true},
     {offsetof(GlobalPrefs, elaborateAnimations), SettingType::Bool, false, true},
+    {offsetof(GlobalPrefs, favoritesInToolbar), SettingType::Bool, true, true},
     {offsetof(GlobalPrefs, favoritesManualOrder), SettingType::Bool, false, true},
     {offsetof(GlobalPrefs, smartMargins), SettingType::Bool, false, true},
     {offsetof(GlobalPrefs, twoRowTabs), SettingType::Bool, false, true},
@@ -1716,7 +1721,7 @@ static const FieldInfo gGlobalPrefsFields[] = {
 };
 static const StructInfo gGlobalPrefsInfo = {
     sizeof(GlobalPrefs),
-    146,
+    147,
     gGlobalPrefsFields,
     "\0\0DefaultDisplayMode\0DefaultZoom\0DisableJavaScript\0AllowExternalImages\0EnableTeXEnhancements\0EscToExit\0Ful"
     "lPathInTitle\0InverseSearchCmdLine\0LazyLoading\0MainWindowBackground\0NoHomeTab\0HomePageSortByFrequentlyRead\0Ho"
@@ -1734,8 +1739,8 @@ static const StructInfo gGlobalPrefsInfo = {
     "dSearch\0\0PrinterDefaults\0\0Fullscreen\0\0SelectionHandlers\0\0Shortcuts\0\0Themes\0\0TabGroups\0\0CustomScreenD"
     "PI\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0WindowState\0WindowPos\0SearchUIWindowPos\0FileStates\0Sessio"
     "nData\0ReopenOnce\0TimeOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0UpdateFeedURL\0BrowserHomePage\0BrowserBookma"
-    "rks\0BrowserFavoriteTitles\0BrowserDownloads\0AnimateUI\0ElaborateAnimations\0FavoritesManualOrder\0SmartMargins\0"
-    "TwoRowTabs\0LargerTabs\0CheckForUpdates\0\0",
+    "rks\0BrowserFavoriteTitles\0BrowserDownloads\0AnimateUI\0ElaborateAnimations\0FavoritesInToolbar\0FavoritesManualO"
+    "rder\0SmartMargins\0TwoRowTabs\0LargerTabs\0CheckForUpdates\0\0",
     "\0\0default layout of pages. valid values: automatic, single page, facing, book view, continuous, continuous "
     "facing, continuous book view\0default zoom. valid values: fit page, fit width, fit height, fit content or percent "
     "like 100%\0if true, JavaScript in PDF documents is disabled (e.g. form-field calculations won't run)\0if true, a "
@@ -1844,13 +1849,14 @@ static const StructInfo gGlobalPrefsInfo = {
     "later\0if true, buttons animate briefly when pressed or hovered; turn off for a completely static UI\0if true "
     "(and AnimateUI is also true), animate more of the UI: in the web browser the tabs, favorites and nav buttons "
     "cross-fade on hover and sink when pressed instead of switching instantly. Ignored when AnimateUI is false\0if "
-    "true, favorites keep the order you dragged them into instead of being sorted by page or name. Set automatically "
-    "the first time you re-order one\0if true, the blank top and bottom margins of each page are cropped out of the "
-    "layout, so less scrolling is needed to reach the next page's content. Page width is unaffected\0if true, a tab's "
-    "label wraps onto a second line instead of being cut short with an ellipsis, so more of a long filename is "
-    "readable. Makes the tab strip taller\0if true, the document tabs in the title bar are taller and wider with "
-    "larger text; easier to read and to hit with a finger\0if true, check at startup whether an update is "
-    "available\0\0Settings below are not recognized by the current version",
+    "true, the toolbar shows saved pages. With favorites in more than one document it shows a chip per document, "
+    "colour-coded, which opens that document's saved pages\0if true, favorites keep the order you dragged them into "
+    "instead of being sorted by page or name. Set automatically the first time you re-order one\0if true, the blank "
+    "top and bottom margins of each page are cropped out of the layout, so less scrolling is needed to reach the next "
+    "page's content. Page width is unaffected\0if true, a tab's label wraps onto a second line instead of being cut "
+    "short with an ellipsis, so more of a long filename is readable. Makes the tab strip taller\0if true, the document "
+    "tabs in the title bar are taller and wider with larger text; easier to read and to hit with a finger\0if true, "
+    "check at startup whether an update is available\0\0Settings below are not recognized by the current version",
     false};
 static const FieldInfo gTheme_1_Fields[] = {
     {offsetof(Theme, name), SettingType::String, (intptr_t)""},

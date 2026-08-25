@@ -1979,6 +1979,9 @@ static void UpdateUiForCurrentTab(MainWindow* win) {
 
     bool onlyNumbers = !win->ctrl || !win->ctrl->HasPageLabels();
     HwndSetWindowStyle(win->hwndPageEdit, ES_NUMBER, onlyNumbers);
+
+    // the favorites tray is per-document
+    UpdateTopBarForWindow(win);
 }
 
 static bool showTocByDefault(Str path) {

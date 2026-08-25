@@ -1011,6 +1011,11 @@ AnimateUI = true
 ; (introduced in version 3.8)
 ElaborateAnimations = false
 
+; if true, the toolbar shows saved pages. With favorites in more than one
+; document it shows a chip per document, colour-coded, which opens that
+; document's saved pages (introduced in version 3.8)
+FavoritesInToolbar = true
+
 ; if true, favorites keep the order you dragged them into instead of being
 ; sorted by page or name. Set automatically the first time you re-order one
 ; (introduced in version 3.8)
