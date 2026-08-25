@@ -41,6 +41,7 @@ constexpr const char* kLinkLibraryFolderPrefix = "<Library,Folder>";
 constexpr const char* kLinkLibraryTogglePrefix = "<Library,Toggle>";
 constexpr const char* kLinkLibraryAddFolder = "<Library,AddFolder>";
 constexpr const char* kLinkLibraryMenuPrefix = "<Library,Menu>";
+constexpr const char* kLinkLibraryMenuPinnedPrefix = "<Library,MenuPinned>";
 constexpr const char* kLinkLibraryPinPrefix = "<Library,Pin>";
 constexpr const char* kLinkLibraryHidePrefix = "<Library,Hide>";
 constexpr const char* kLinkLibraryManage = "<Library,Manage>";

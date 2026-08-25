@@ -3035,8 +3035,12 @@ bool HandleTouchLibraryLink(MainWindow* win, Str url) {
         LibraryNavGo(win, -1);
     } else if (str::Eq(url, kLinkLibraryForward)) {
         LibraryNavGo(win, 1);
+    } else if (str::TrimPrefix(url, kLinkLibraryMenuPinnedPrefix)) {
+        str::ReplaceWithCopy(&win->libraryRowMenuPath, url);
+        win->libraryRowMenuFromPinned = true;
     } else if (str::TrimPrefix(url, kLinkLibraryMenuPrefix)) {
         str::ReplaceWithCopy(&win->libraryRowMenuPath, url);
+        win->libraryRowMenuFromPinned = false;
     } else if (str::TrimPrefix(url, kLinkLibraryPinPrefix)) {
         bool nowPinned = false;
         if (!TouchLibraryRemovePath(gGlobalPrefs->libraryPinnedFolders, url)) {
@@ -3748,20 +3752,29 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                 Rect{nameRect.x + nameRect.dx + DpiScale(hdc, 2), row.y + DpiScale(hdc, 11), pinDx, DpiScale(hdc, 16)},
                 RgbToCOLORREF(0xb4530a));
         }
-        if (!pinnedRow) {
+        // The "..." menu (Pin/Unpin, Hide) is available here too, not just on
+        // the folder's row further down the tree - unpinning otherwise meant
+        // scrolling to find (and maybe expanding parents to reach) the same
+        // folder in its ordinary place, just to reach the one control that
+        // could undo what this section put it here for. A pinned folder is
+        // drawn twice (here and at its ordinary place), sharing one path, so
+        // the link target says which instance this is.
+        {
             SetTextColor(hdc, ThemeWindowDarkerTextColor());
             HdcDrawText(hdc, StrL("⋯"), menuRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
                         HdcGetUiFont(hdc, 15, FW_SEMIBOLD));
             Rect menuLink = menuRect.Intersect(treeClip);
             if (!menuLink.IsEmpty()) {
-                win->staticLinks.Append(new StaticLink(menuLink, fmt("%s%s", Str(kLinkLibraryMenuPrefix), folder)));
+                Str prefix = pinnedRow ? Str(kLinkLibraryMenuPinnedPrefix) : Str(kLinkLibraryMenuPrefix);
+                win->staticLinks.Append(new StaticLink(menuLink, fmt("%s%s", prefix, folder)));
             }
         }
         SetTextColor(hdc, ThemeWindowDarkerTextColor());
         HdcDrawTextTabular(hdc, fmt("%d", data->directCount), countRect,
                            DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_NOPREFIX, HdcGetUiFont(hdc, 12));
         win->staticLinks.Append(new StaticLink(visibleRow, fmt("%s%s", Str(kLinkLibraryFolderPrefix), folder), folder));
-        if (win->libraryRowMenuPath && path::IsSame(win->libraryRowMenuPath, folder)) {
+        if (win->libraryRowMenuPath && path::IsSame(win->libraryRowMenuPath, folder) &&
+            win->libraryRowMenuFromPinned == pinnedRow) {
             openMenuAnchor = visibleRow;
         }
     };

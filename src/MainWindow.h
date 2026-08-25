@@ -401,6 +401,11 @@ struct MainWindow {
     StrVec libraryExpandedFolderPaths;
     Str librarySearchQuery;
     Str libraryRowMenuPath;
+    // Which of a folder's two possible rows opened the menu: pinned
+    // folders are drawn once in PINNED and again at their ordinary place in
+    // the tree, both sharing the same path, so the path alone can't say
+    // which row's "..." to anchor the popup to.
+    bool libraryRowMenuFromPinned = false;
     bool libraryManageFoldersOpen = false;
     bool libraryListView = false;
     int libraryTreeScrollY = 0;
