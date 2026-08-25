@@ -688,6 +688,20 @@ const fileSettings: Field[] = [
   compactStruct("ScrollPos", scrollPos, "how far this document has been scrolled (in x and y direction)").structName(
     "PointF",
   ),
+  field(
+    "TrimTop",
+    Float,
+    0,
+    "fraction of each page's height cropped off the top for this document, set by " +
+      "hand in Trim headers & footers. 0 means no trim. Applies to every page, so it " +
+      "works on scans and on notation that Smart header & footer cannot read",
+  ).ver("3.8"),
+  field(
+    "TrimBottom",
+    Float,
+    0,
+    "fraction of each page's height cropped off the bottom for this document; see TrimTop",
+  ).ver("3.8"),
   field("PageNo", Int, 1, "number of the last read page"),
   field("Zoom", Str, "fit page", "zoom (in %) or one of those values: fit page, fit width, fit height, fit content"),
   field("Rotation", Int, 0, "how far pages have been rotated as a multiple of 90 degrees"),

@@ -159,6 +159,15 @@ struct DisplayModel : DocController {
     void Relayout(float zoomVirtual, int rotation);
     // pages the user un-trimmed by hand (see PageDisplayBox)
     Vec<int> marginExpandedPages;
+    // Manual header/footer trim, as a fraction of each page's height. Set in
+    // the "Trim headers & footers" dialog and remembered per document. Unlike
+    // the automatic trim this needs nothing from the page - no text, no content
+    // box - so it works on scans and on dense notation where nothing can be
+    // read. 0 means no trim.
+    float manualTrimTop = 0.0f;
+    float manualTrimBottom = 0.0f;
+    void SetManualTrim(float top, float bottom);
+    RectF ApplyManualTrim(RectF box, RectF media) const;
     // Running header/footer bands, in points measured down from the top of the
     // media box and up from its bottom. Detected once per document from a
     // sample of pages; 0 means "none found". See DetectRunningHeaderFooter.

@@ -30,6 +30,7 @@ export const commands = [
     "CmdBookView", "Book View",
     "CmdToggleContinuousView", "Toggle Continuous View",
     "CmdToggleMangaMode", "Toggle Manga Mode",
+    "CmdTrimHeaderFooter", "Trim Headers & Footers...",
     "CmdRotateLeft", "Rotate Left",
     "CmdRotateRight", "Rotate Right",
     "CmdToggleBookmarks", "Toggle Bookmarks",

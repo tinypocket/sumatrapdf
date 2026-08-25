@@ -867,6 +867,16 @@ FileStates [
     ; how far this document has been scrolled (in x and y direction)
     ScrollPos = 0 0
 
+    ; fraction of each page's height cropped off the top for this document, set
+    ; by hand in Trim headers & footers. 0 means no trim. Applies to every page,
+    ; so it works on scans and on notation that Smart header & footer cannot
+    ; read (introduced in version 3.8)
+    TrimTop = 0
+
+    ; fraction of each page's height cropped off the bottom for this document;
+    ; see TrimTop (introduced in version 3.8)
+    TrimBottom = 0
+
     ; number of the last read page
     PageNo = 1
 

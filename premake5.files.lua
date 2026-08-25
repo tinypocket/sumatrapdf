@@ -738,6 +738,7 @@ function sumatrapdf_files()
     "Theme.*",
     "Toolbar.*",
     "TopBar.*",
+    "TrimDialog.*",
     "TranslationLangs.cpp",
     "Translations.*",
     "TreeModel.*",

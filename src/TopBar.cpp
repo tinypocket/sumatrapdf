@@ -28,6 +28,7 @@
 #include "MainWindow.h"
 #include "WindowTab.h"
 #include "Menu.h"
+#include "TrimDialog.h"
 #include "Commands.h"
 #include "SvgIcons.h"
 #include "Toolbar.h"
@@ -1664,6 +1665,7 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
     }
     constexpr int kOverflowSmartMargins = 1;
     constexpr int kOverflowSmartHeaderFooter = 2;
+    constexpr int kOverflowTrimDialog = 3;
 
     HMENU popup = CreatePopupMenu();
     bool on = gGlobalPrefs->smartMargins;
@@ -1676,6 +1678,9 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
     bool hf = gGlobalPrefs->smartHeaderFooter;
     uint hfFlags = MF_STRING | (hf ? MF_CHECKED : MF_UNCHECKED) | (hasDoc && on ? MF_ENABLED : (MF_DISABLED | MF_GRAYED));
     AppendMenuW(popup, hfFlags, kOverflowSmartHeaderFooter, L"Smart header && footer");
+    // the manual fallback, for documents nothing can be read from
+    AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(popup, MF_STRING | enabled, kOverflowTrimDialog, L"Trim headers && footers…");
     MarkMenuOwnerDraw(popup);
 
     Point pt = HwndClientToScreen(hwnd, Point{anchor.x, anchor.y + anchor.dy});
@@ -1683,6 +1688,11 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
     FreeMenuOwnerDrawInfoData(popup);
     DestroyMenu(popup);
 
+    if (cmd == kOverflowTrimDialog) {
+        ShowTrimHeaderFooterDialog(win);
+        HwndInvalidate(hwnd, false);
+        return;
+    }
     if (cmd == kOverflowSmartMargins) {
         gGlobalPrefs->smartMargins = !gGlobalPrefs->smartMargins;
     } else if (cmd == kOverflowSmartHeaderFooter) {

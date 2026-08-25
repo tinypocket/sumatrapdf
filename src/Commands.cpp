@@ -37,6 +37,7 @@ static SeqStrings gCommandNames =
     "CmdBookView\0"
     "CmdToggleContinuousView\0"
     "CmdToggleMangaMode\0"
+    "CmdTrimHeaderFooter\0"
     "CmdRotateLeft\0"
     "CmdRotateRight\0"
     "CmdToggleBookmarks\0"
@@ -308,6 +309,7 @@ static i32 gCommandIds[] = {
     CmdBookView,
     CmdToggleContinuousView,
     CmdToggleMangaMode,
+    CmdTrimHeaderFooter,
     CmdRotateLeft,
     CmdRotateRight,
     CmdToggleBookmarks,
@@ -579,6 +581,7 @@ SeqStrings gCommandDescriptions =
     "Book View\0"
     "Toggle Continuous View\0"
     "Toggle Manga Mode\0"
+    "Trim Headers & Footers...\0"
     "Rotate Left\0"
     "Rotate Right\0"
     "Toggle Bookmarks\0"

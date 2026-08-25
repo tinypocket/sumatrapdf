@@ -93,6 +93,7 @@
 #include "TabGroupsManage.h"
 #include "TableOfContents.h"
 #include "Tabs.h"
+#include "TrimDialog.h"
 #include "Toolbar.h"
 #include "TouchMetrics.h"
 #include "Rail.h"
@@ -2124,6 +2125,10 @@ static void ReplaceDocumentInCurrentTab(LoadArgs* args, DocController* ctrl, Fil
             // WindowMargin / PageSpacing follow the window's dpi, not the
             // (physical-size) CustomScreenDPI used for zoom
             dm->SetUiDpi(win->frameDpi > 0 ? win->frameDpi : DpiGetForHwnd(win->hwndFrame));
+            // before the first layout, so pages are laid out already trimmed
+            if (fs) {
+                dm->SetManualTrim(fs->trimTop, fs->trimBottom);
+            }
             dm->SetInitialViewSettings(displayMode, ss.page, win->GetViewPortSize(), dpi);
             // TODO: also expose Manga Mode for image folders?
             if (tab->GetEngineType() == kindEngineComicBooks || tab->GetEngineType() == kindEngineImageDir) {
@@ -9670,6 +9675,10 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
 
         case CmdToggleMangaMode:
             ToggleMangaMode(win);
+            break;
+
+        case CmdTrimHeaderFooter:
+            ShowTrimHeaderFooterDialog(win);
             break;
 
         case CmdToggleToolbar:

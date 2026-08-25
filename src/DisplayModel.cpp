@@ -310,6 +310,8 @@ void DisplayModel::GetDisplayState(FileState* fs) {
     }
     fs->rotation = rotation;
     fs->displayR2L = displayR2L;
+    fs->trimTop = manualTrimTop;
+    fs->trimBottom = manualTrimBottom;
 
     str::Free(fs->decryptionKey);
     fs->decryptionKey = engine->decryptionKey.s ? str::Dup(engine->decryptionKey.s) : nullptr;
@@ -572,24 +574,50 @@ bool DisplayModel::PageBodyBand(int pageNo, PageBody* out) const {
     return true;
 }
 
+// The manual trim is deliberately independent of "smart margins": a scanned
+// book gets nothing from the automatic pass, and asking the reader to turn on a
+// setting that does nothing for their document before they can use the one that
+// does would be perverse.
+RectF DisplayModel::ApplyManualTrim(RectF box, RectF media) const {
+    if (manualTrimTop <= 0.0f && manualTrimBottom <= 0.0f) {
+        return box;
+    }
+    float top = std::max(box.y, media.y + media.dy * manualTrimTop);
+    float bottom = std::min(box.y + box.dy, media.y + media.dy * (1.0f - manualTrimBottom));
+    if (bottom - top < media.dy * 0.05f) {
+        return box; // a trim that would leave a sliver is a mis-set trim
+    }
+    box.y = top;
+    box.dy = bottom - top;
+    return box;
+}
+
+void DisplayModel::SetManualTrim(float top, float bottom) {
+    manualTrimTop = std::clamp(top, 0.0f, 0.45f);
+    manualTrimBottom = std::clamp(bottom, 0.0f, 0.45f);
+}
+
 RectF DisplayModel::PageDisplayBox(int pageNo) const {
     RectF media = PageMediaBox(pageNo);
-    if (!gGlobalPrefs->smartMargins || media.IsEmpty()) {
+    if (media.IsEmpty()) {
         return media;
     }
     if (IsPageMarginExpanded(pageNo)) {
         return media; // user asked for this page's margins back
     }
+    if (!gGlobalPrefs->smartMargins) {
+        return ApplyManualTrim(media, media);
+    }
     PageInfo* pageInfo = GetPageInfo(pageNo);
     if (!pageInfo) {
-        return media;
+        return ApplyManualTrim(media, media);
     }
     if (pageInfo->contentBox.IsEmpty()) {
         pageInfo->contentBox = engine->PageContentBox(pageNo);
     }
     RectF content = pageInfo->contentBox;
     if (content.IsEmpty()) {
-        return media; // blank page, or the engine can't tell: leave it alone
+        return ApplyManualTrim(media, media); // blank page, or the engine can't tell
     }
     // Trim vertically only. The width is what the zoom is computed from, so
     // touching it would change how large the text renders - the user asked for
@@ -612,18 +640,19 @@ RectF DisplayModel::PageDisplayBox(int pageNo) const {
         }
     }
     if (bottom <= top) {
-        return media;
+        return ApplyManualTrim(media, media);
     }
     RectF box = media;
     box.y = top;
     box.dy = bottom - top;
-    return box;
+    return ApplyManualTrim(box, media);
 }
 
 PointF DisplayModel::PageCropOffset(int pageNo, float zoom) const {
-    if (!gGlobalPrefs->smartMargins) {
-        return PointF();
-    }
+    // Not gated on smartMargins: the manual trim crops the display box too, and
+    // without the matching offset the page is blitted at the wrong place -
+    // content shifted down by exactly the band that was cropped. Comparing the
+    // two boxes below already returns zero when nothing was cropped.
     RectF media = PageMediaBox(pageNo);
     RectF display = PageDisplayBox(pageNo);
     if (media == display) {

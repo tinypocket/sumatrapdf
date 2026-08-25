@@ -479,6 +479,14 @@ struct FileState {
     Str displayMode;
     // how far this document has been scrolled (in x and y direction)
     PointF scrollPos;
+    // fraction of each page's height cropped off the top for this
+    // document, set by hand in Trim headers & footers. 0 means no trim.
+    // Applies to every page, so it works on scans and on notation that
+    // Smart header & footer cannot read
+    float trimTop;
+    // fraction of each page's height cropped off the bottom for this
+    // document; see TrimTop
+    float trimBottom;
     // number of the last read page
     int pageNo;
     // zoom (in %) or one of those values: fit page, fit width, fit height,
@@ -1453,6 +1461,8 @@ static const FieldInfo gFileStateFields[] = {
     {offsetof(FileState, useDefaultState), SettingType::Bool, false},
     {offsetof(FileState, displayMode), SettingType::String, (intptr_t)"automatic"},
     {offsetof(FileState, scrollPos), SettingType::Compact, (intptr_t)&gPointFInfo},
+    {offsetof(FileState, trimTop), SettingType::Float, (intptr_t)"0"},
+    {offsetof(FileState, trimBottom), SettingType::Float, (intptr_t)"0"},
     {offsetof(FileState, pageNo), SettingType::Int, 1},
     {offsetof(FileState, zoom), SettingType::String, (intptr_t)"fit page"},
     {offsetof(FileState, rotation), SettingType::Int, 0},
@@ -1468,25 +1478,28 @@ static const FieldInfo gFileStateFields[] = {
 };
 static StructInfo gFileStateInfo = {
     sizeof(FileState),
-    21,
+    23,
     gFileStateFields,
-    "FilePath\0Favorites\0IsPinned\0IsMissing\0OpenCount\0DecryptionKey\0UseDefaultState\0DisplayMode\0ScrollPos\0PageN"
-    "o\0Zoom\0Rotation\0WindowState\0WindowPos\0ShowToc\0SidebarDx\0DisplayR2L\0BgCol\0TabCol\0ReparseIdx\0TocState",
+    "FilePath\0Favorites\0IsPinned\0IsMissing\0OpenCount\0DecryptionKey\0UseDefaultState\0DisplayMode\0ScrollPos\0TrimT"
+    "op\0TrimBottom\0PageNo\0Zoom\0Rotation\0WindowState\0WindowPos\0ShowToc\0SidebarDx\0DisplayR2L\0BgCol\0TabCol\0Rep"
+    "arseIdx\0TocState",
     "path of the document\0pages of this document bookmarked in the Favorites menu\0if true, the document is "
     "\"pinned\" to the Frequently Read list, so that recently opened documents don't displace it\0if true, the file is "
     "considered missing and won't be shown in any list\0number of times this document has been opened recently\0data "
     "required to open a password protected document without having to ask for the password again\0if true, this "
     "document opens with the global defaults instead of the values below\0layout of pages. valid values: automatic, "
     "single page, facing, book view, continuous, continuous facing, continuous book view\0how far this document has "
-    "been scrolled (in x and y direction)\0number of the last read page\0zoom (in %) or one of those values: fit page, "
-    "fit width, fit height, fit content\0how far pages have been rotated as a multiple of 90 degrees\0state of the "
-    "window. 1 is normal, 2 is maximized, 3 is fullscreen, 4 is minimized\0default position (can be on any "
-    "monitor)\0if true, show the table of contents (Bookmarks) sidebar when the document has one\0width of the left "
-    "sidebar (table of contents / favorites) in screen pixels, as last resized\0if true, the document is displayed "
-    "right-to-left in facing and book view modes (only used for comic book documents)\0if given, overrides the "
-    "background color for this document\0if given, overrides the tab color for this document\0data required to restore "
-    "the last read page in the ebook UI\0data required to determine which parts of the table of contents have been "
-    "expanded",
+    "been scrolled (in x and y direction)\0fraction of each page's height cropped off the top for this document, set "
+    "by hand in Trim headers & footers. 0 means no trim. Applies to every page, so it works on scans and on notation "
+    "that Smart header & footer cannot read\0fraction of each page's height cropped off the bottom for this document; "
+    "see TrimTop\0number of the last read page\0zoom (in %) or one of those values: fit page, fit width, fit height, "
+    "fit content\0how far pages have been rotated as a multiple of 90 degrees\0state of the window. 1 is normal, 2 is "
+    "maximized, 3 is fullscreen, 4 is minimized\0default position (can be on any monitor)\0if true, show the table of "
+    "contents (Bookmarks) sidebar when the document has one\0width of the left sidebar (table of contents / favorites) "
+    "in screen pixels, as last resized\0if true, the document is displayed right-to-left in facing and book view modes "
+    "(only used for comic book documents)\0if given, overrides the background color for this document\0if given, "
+    "overrides the tab color for this document\0data required to restore the last read page in the ebook UI\0data "
+    "required to determine which parts of the table of contents have been expanded",
     false};
 
 static const FieldInfo gPointF_1_Fields[] = {
@@ -1575,7 +1588,7 @@ static const StructInfo gPointInfo = {
 
 static const FieldInfo gGlobalPrefsFields[] = {
     {(size_t)-1, SettingType::Comment,
-     (intptr_t)"For documentation, see https://www.sumatrapdfreader.org/settings/settings3-7-12.html"},
+     (intptr_t)"For documentation, see https://www.sumatrapdfreader.org/settings/settings3-7-13.html"},
     {(size_t)-1, SettingType::Comment, 0},
     {offsetof(GlobalPrefs, defaultDisplayMode), SettingType::String, (intptr_t)"automatic"},
     {offsetof(GlobalPrefs, defaultZoom), SettingType::String, (intptr_t)"fit page"},
