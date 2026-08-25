@@ -762,7 +762,10 @@ bool TopBarWnd::Layout(HDC hdc, Rect* rects) {
 
     // 4a leads with the current document name. It uses only the width the
     // title needs, capped at 280px, and yields before the right-side controls.
-    if (railMode && hasDoc) {
+    // Skipped when the tab strip is showing: the active tab already carries
+    // this exact title immediately above the bar, and repeating it here read
+    // as a second, redundant line rather than useful information.
+    if (railMode && hasDoc && !SettingsUseTabs()) {
         Str title = win->CurrentTab()->GetTabTitle();
         HFONT titleFont = TopBarFontWeighted(hdc, kFontSizeBody, kFontWeightStrong);
         Size titleSz = HdcGetTextExtentPoint32Font(hdc, title, titleFont);
