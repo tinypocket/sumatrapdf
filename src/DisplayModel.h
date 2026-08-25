@@ -142,6 +142,13 @@ struct DisplayModel : DocController {
     // into a rect of another and every hit-tested thing (selection, links,
     // annotations, search highlights) shifts by the trimmed margin.
     RectF PageDisplayBox(int pageNo) const;
+    // Smart margins can only be as good as the engine's content box, and on
+    // some documents that under-reports and clips real content. So any trimmed
+    // page can be expanded back to its full height individually, and the rest
+    // stay trimmed.
+    bool IsPageMarginTrimmed(int pageNo) const;
+    bool IsPageMarginExpanded(int pageNo) const;
+    void TogglePageMarginExpanded(int pageNo);
     // device-space offset of the display box within the media box at this
     // zoom/rotation; zero unless smart margins trimmed something
     PointF PageCropOffset(int pageNo, float zoom) const;
@@ -150,6 +157,8 @@ struct DisplayModel : DocController {
     int GetRotation() const;
     float GetZoomReal(int pageNo) const;
     void Relayout(float zoomVirtual, int rotation);
+    // pages the user un-trimmed by hand (see PageDisplayBox)
+    Vec<int> marginExpandedPages;
 
     Rect GetViewPort() const;
     bool IsHScrollbarVisible() const;

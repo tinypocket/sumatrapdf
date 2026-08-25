@@ -319,10 +319,42 @@ void DisplayModel::GetDisplayState(FileState* fs) {
 // cropped page still reads as a page rather than as text butted against an edge
 constexpr float kSmartMarginPadPt = 6.0f;
 
+bool DisplayModel::IsPageMarginExpanded(int pageNo) const {
+    for (int p : marginExpandedPages) {
+        if (p == pageNo) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void DisplayModel::TogglePageMarginExpanded(int pageNo) {
+    for (int i = 0; i < len(marginExpandedPages); i++) {
+        if (marginExpandedPages[i] == pageNo) {
+            marginExpandedPages.RemoveAt(i);
+            return;
+        }
+    }
+    marginExpandedPages.Append(pageNo);
+}
+
+// true when this page is actually showing less than its full height
+bool DisplayModel::IsPageMarginTrimmed(int pageNo) const {
+    if (!gGlobalPrefs->smartMargins || IsPageMarginExpanded(pageNo)) {
+        return false;
+    }
+    RectF media = PageMediaBox(pageNo);
+    RectF display = PageDisplayBox(pageNo);
+    return display.dy < media.dy - 1.0f;
+}
+
 RectF DisplayModel::PageDisplayBox(int pageNo) const {
     RectF media = PageMediaBox(pageNo);
     if (!gGlobalPrefs->smartMargins || media.IsEmpty()) {
         return media;
+    }
+    if (IsPageMarginExpanded(pageNo)) {
+        return media; // user asked for this page's margins back
     }
     PageInfo* pageInfo = GetPageInfo(pageNo);
     if (!pageInfo) {
