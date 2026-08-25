@@ -116,7 +116,8 @@ constexpr int kTopBarSmartWidth = -104;
 constexpr int kTopBarOverflow = -105;
 
 static TopBarSlot gTopBarSlots[] = {
-    {TopBarItem::Preview, TbIcon::WindowStack, kTopBarPreview, 0, false, false},
+    // The open-documents switcher lives in the tab bar and the rail; a third
+    // copy in the document toolbar was redundant.
     {TopBarItem::Button, TbIcon::SearchPrev, CmdGoToPrevPage, 1, false, false},
     {TopBarItem::PageBox, TbIcon::None, kTopBarPageEdit, 1, false, false},
     {TopBarItem::Button, TbIcon::SearchNext, CmdGoToNextPage, 1, false, false},

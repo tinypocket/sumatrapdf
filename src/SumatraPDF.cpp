@@ -11049,10 +11049,14 @@ void RelayoutCaption(MainWindow* win) {
     }
 
     if (showingMenuBar && IsTouchChrome(win)) {
-        // 4a keeps the 36px title strip intact and reveals a separate 32px
-        // menu row beneath it. The hamburger remains in the title strip so it
-        // can hide the row again.
-        int titleDy = DpiScale(win->hwndFrame, kTitleBarDy);
+        // 4a keeps the title strip intact and reveals a separate 32px menu row
+        // beneath it. The hamburger remains in the title strip so it can hide
+        // the row again.
+        // TouchTitleBarDy(), not kTitleBarDy: the strip is taller when tabs are
+        // shown (and taller again with larger / two-row tabs), so hard-coding
+        // the no-tabs height made the tab strip visibly shrink the moment the
+        // menu bar appeared.
+        int titleDy = DpiScale(win->hwndFrame, TouchTitleBarDy());
         int menuDy = GetMenuBarRebarHeight(win);
         int btnDx = DpiScale(win->hwndFrame, kTitleBarBtnDx);
         int x = rc.x;
