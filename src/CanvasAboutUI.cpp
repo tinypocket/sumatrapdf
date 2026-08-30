@@ -150,6 +150,10 @@ static void OnMouseLeftButtonUpAbout(MainWindow* win, int x, int y, WPARAM /*key
         // handled against the real native tab collection
     } else if (str::TrimPrefix(url, kLinkLibraryFolderPrefix)) {
         SelectTouchLibraryFolder(win, url);
+    } else if (str::TrimPrefix(url, kLinkLibraryFolderCardPrefix)) {
+        // same destination as kLinkLibraryFolderPrefix - see its declaration
+        // for why content-pane elements get their own prefix
+        SelectTouchLibraryFolder(win, url);
     } else if (str::TrimPrefix(url, kLinkLibraryTogglePrefix)) {
         int expanded = win->libraryExpandedFolderPaths.FindI(url);
         if (expanded >= 0) {

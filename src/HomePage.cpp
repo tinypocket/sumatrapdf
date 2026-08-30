@@ -2737,7 +2737,7 @@ static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc
             Rect linkRect = pill.Intersect(contentRc);
             if (!linkRect.IsEmpty()) {
                 // opens that folder in the Library, same as its sidebar row
-                TempStr target = str::JoinTemp(kLinkLibraryFolderPrefix, recentFolders[i]);
+                TempStr target = str::JoinTemp(kLinkLibraryFolderCardPrefix, recentFolders[i]);
                 win->staticLinks.Append(new StaticLink(linkRect, target, recentFolders[i]));
             }
         }
@@ -3029,6 +3029,12 @@ bool HandleTouchLibraryLink(MainWindow* win, Str url) {
     if (str::Eq(url, kLinkLibraryRecent)) {
         LibraryNavPush(win, Str(kLibraryNavRecent));
         win->libraryRecentSelected = true;
+        win->librarySearchFilesSelected = false;
+        win->libraryFilesScrollY = 0;
+        str::FreePtr(&win->libraryRowMenuPath);
+    } else if (str::Eq(url, kLinkLibrarySearchFiles)) {
+        win->librarySearchFilesSelected = true;
+        win->libraryRecentSelected = false;
         win->libraryFilesScrollY = 0;
         str::FreePtr(&win->libraryRowMenuPath);
     } else if (str::Eq(url, kLinkLibraryBack)) {
@@ -3094,6 +3100,19 @@ bool HandleTouchLibraryLink(MainWindow* win, Str url) {
     } else if (str::Eq(url, kLinkLibraryListView)) {
         win->libraryListView = true;
         win->libraryFilesScrollY = 0;
+    } else if (str::Eq(url, kLinkLibrarySearchScopeOpen)) {
+        win->librarySearchScopePickerOpen = true;
+    } else if (str::Eq(url, kLinkLibrarySearchScopeDone)) {
+        win->librarySearchScopePickerOpen = false;
+    } else if (str::Eq(url, kLinkLibrarySearchScopeClear)) {
+        win->librarySearchFolderScope.Reset();
+    } else if (str::TrimPrefix(url, kLinkLibrarySearchScopeTogglePrefix)) {
+        int idx = win->librarySearchFolderScope.FindI(url);
+        if (idx >= 0) {
+            win->librarySearchFolderScope.RemoveAt(idx);
+        } else {
+            win->librarySearchFolderScope.Append(url);
+        }
     } else {
         return false;
     }
@@ -3163,6 +3182,7 @@ void SelectTouchLibraryFolder(MainWindow* win, Str folderPath) {
     LibraryNavPush(win, folderPath);
     str::ReplaceWithCopy(&win->librarySelectedFolderPath, folderPath);
     win->libraryRecentSelected = false;
+    win->librarySearchFilesSelected = false;
     win->libraryFilesScrollY = 0;
 
     Str current = folderPath;
@@ -3188,6 +3208,11 @@ bool CloseTouchLibraryTransientUi(MainWindow* win) {
         win->RedrawAll(true);
         return true;
     }
+    if (win->librarySearchScopePickerOpen) {
+        win->librarySearchScopePickerOpen = false;
+        win->RedrawAll(true);
+        return true;
+    }
     if (win->libraryRowMenuPath) {
         str::FreePtr(&win->libraryRowMenuPath);
         win->RedrawAll(true);
@@ -3203,6 +3228,23 @@ static bool TouchLibraryFolderHidden(const StrVecWithData<TouchLibraryFolderData
             return true;
         }
         hiddenAt = folders.AtData(hiddenAt)->parent;
+    }
+    return false;
+}
+
+// true if idx (or an ancestor of it) is one of the folders search is
+// restricted to - or the scope is empty, meaning unrestricted
+static bool TouchLibraryFolderInSearchScope(MainWindow* win, const StrVecWithData<TouchLibraryFolderData>& folders,
+                                            int idx) {
+    if (win->librarySearchFolderScope.IsEmpty()) {
+        return true;
+    }
+    int at = idx;
+    while (at >= 0) {
+        if (win->librarySearchFolderScope.FindI(folders[at]) >= 0) {
+            return true;
+        }
+        at = folders.AtData(at)->parent;
     }
     return false;
 }
@@ -3371,6 +3413,25 @@ static void DrawTouchLibraryPin(HDC hdc, const Rect& rect, COLORREF color) {
     graphics.FillPolygon(&brush, points, dimofi(points));
 }
 
+// Tapping the scrim outside a modal card closes it, same as tapping Done -
+// standard modal behavior this pair of dialogs was missing. Four strips
+// tiling whatever of rc isn't the card, rather than one big rect under it:
+// registered after the card's own controls, so this doesn't matter for hit
+// order, but it means a card near an edge doesn't need a strip of zero or
+// negative size handled specially - Append no-ops on an empty rect via the
+// StaticLink's own emptiness, same as every other conditional link here.
+static void CloseModalOnScrimTap(MainWindow* win, const Rect& rc, const Rect& card, Str closeLink) {
+    Rect top{rc.x, rc.y, rc.dx, card.y - rc.y};
+    Rect bottom{rc.x, card.y + card.dy, rc.dx, (rc.y + rc.dy) - (card.y + card.dy)};
+    Rect left{rc.x, card.y, card.x - rc.x, card.dy};
+    Rect right{card.x + card.dx, card.y, (rc.x + rc.dx) - (card.x + card.dx), card.dy};
+    for (Rect strip : {top, bottom, left, right}) {
+        if (!strip.IsEmpty()) {
+            win->staticLinks.Append(new StaticLink(strip, closeLink));
+        }
+    }
+}
+
 static void DrawTouchLibraryManageModal(MainWindow* win, HDC hdc, const Rect& rc) {
     DeleteVecMembers(win->staticLinks);
     Gdiplus::Graphics graphics(hdc);
@@ -3485,6 +3546,117 @@ static void DrawTouchLibraryManageModal(MainWindow* win, HDC hdc, const Rect& rc
     HdcDrawText(hdc, StrL("Done"), done, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
                 HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
     win->staticLinks.Append(new StaticLink(done, Str(kLinkLibraryManageDone)));
+    CloseModalOnScrimTap(win, rc, card, Str(kLinkLibraryManageDone));
+}
+
+// Opened from the search box's filter button. A flat, indented list rather
+// than the sidebar's own collapsible tree: picking a scope is a rare,
+// deliberate action, so trading away expand/collapse for "see every folder
+// at once, no clicking to find the one you want" is the right call here.
+static void DrawTouchLibrarySearchScopeModal(MainWindow* win, HDC hdc, const Rect& rc,
+                                             const StrVecWithData<TouchLibraryFolderData>& folders) {
+    DeleteVecMembers(win->staticLinks);
+    Gdiplus::Graphics graphics(hdc);
+    Gdiplus::SolidBrush scrim(Gdiplus::Color(90, 28, 26, 23));
+    graphics.FillRectangle(&scrim, rc.x, rc.y, rc.dx, rc.dy);
+
+    int visibleCount = 0;
+    for (int i = 0; i < len(folders); i++) {
+        if (!TouchLibraryFolderHidden(folders, i)) {
+            visibleCount++;
+        }
+    }
+    int desiredCardDy = 128 + visibleCount * 36 + 64;
+    int cardDx = std::min(DpiScale(hdc, 420), rc.dx - DpiScale(hdc, 32));
+    int cardDy = std::min(DpiScale(hdc, std::min(desiredCardDy, 520)), rc.dy - DpiScale(hdc, 32));
+    Rect card{(rc.dx - cardDx) / 2, (rc.dy - cardDy) / 2, cardDx, cardDy};
+    FillHomeRoundRect(hdc, card, DpiScale(hdc, 14), ThemeWindowControlBackgroundColor());
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, ThemeWindowTextColor());
+    Rect title{card.x + DpiScale(hdc, 24), card.y + DpiScale(hdc, 18), card.dx - DpiScale(hdc, 48), DpiScale(hdc, 28)};
+    HdcDrawText(hdc, StrL("Search in folders"), title, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+                HdcGetUiFont(hdc, 17, FW_SEMIBOLD));
+    HdcFillRect(hdc, Rect{card.x, card.y + DpiScale(hdc, 60), card.dx, 1}, ThemeEdgeColor());
+
+    auto drawCheck = [&](Rect box, bool checked) {
+        Gdiplus::Graphics g(hdc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        COLORREF col = checked ? RgbToCOLORREF(0xb4530a) : ThemeEdgeColor();
+        Gdiplus::Pen pen(GdiRgbFromCOLORREF(col), 1.6f);
+        int rad = DpiScale(hdc, 5);
+        Gdiplus::GraphicsPath path;
+        int d = rad * 2;
+        path.AddArc(box.x, box.y, d, d, 180.0f, 90.0f);
+        path.AddArc(box.x + box.dx - d, box.y, d, d, 270.0f, 90.0f);
+        path.AddArc(box.x + box.dx - d, box.y + box.dy - d, d, d, 0.0f, 90.0f);
+        path.AddArc(box.x, box.y + box.dy - d, d, d, 90.0f, 90.0f);
+        path.CloseFigure();
+        if (checked) {
+            Gdiplus::SolidBrush br(GdiRgbFromCOLORREF(col));
+            g.FillPath(&br, &path);
+            Gdiplus::Pen checkPen(Gdiplus::Color(255, 255, 255, 255), 1.8f);
+            checkPen.SetStartCap(Gdiplus::LineCapRound);
+            checkPen.SetEndCap(Gdiplus::LineCapRound);
+            checkPen.SetLineJoin(Gdiplus::LineJoinRound);
+            Gdiplus::PointF pts[] = {
+                {(float)box.x + box.dx * 0.22f, (float)box.y + box.dy * 0.52f},
+                {(float)box.x + box.dx * 0.42f, (float)box.y + box.dy * 0.74f},
+                {(float)box.x + box.dx * 0.80f, (float)box.y + box.dy * 0.28f},
+            };
+            g.DrawLines(&checkPen, pts, dimofi(pts));
+        } else {
+            g.DrawPath(&pen, &path);
+        }
+    };
+
+    int y = card.y + DpiScale(hdc, 72);
+    int listBottom = card.y + card.dy - DpiScale(hdc, 64);
+    for (int i = 0; i < len(folders); i++) {
+        if (TouchLibraryFolderHidden(folders, i)) {
+            continue;
+        }
+        if (y + DpiScale(hdc, 36) > listBottom) {
+            break;
+        }
+        Str folder = folders[i];
+        int depth = folders.AtData(i)->depth;
+        Rect row{card.x + DpiScale(hdc, 24) + depth * DpiScale(hdc, 18), y,
+                 card.dx - DpiScale(hdc, 48) - depth * DpiScale(hdc, 18), DpiScale(hdc, 34)};
+        Rect box{row.x, row.y + (row.dy - DpiScale(hdc, 18)) / 2, DpiScale(hdc, 18), DpiScale(hdc, 18)};
+        bool checked = win->librarySearchFolderScope.FindI(folder) >= 0;
+        drawCheck(box, checked);
+        Rect nameRect{box.x + box.dx + DpiScale(hdc, 10), row.y, row.dx - box.dx - DpiScale(hdc, 10), row.dy};
+        SetTextColor(hdc, ThemeWindowTextColor());
+        HdcDrawText(hdc, path::GetBaseNameTemp(folder), nameRect,
+                    DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX, HdcGetUiFont(hdc, 13, FW_MEDIUM));
+        win->staticLinks.Append(
+            new StaticLink(row, fmt("%s%s", Str(kLinkLibrarySearchScopeTogglePrefix), folder), folder));
+        y += row.dy;
+    }
+    if (len(folders) == 0) {
+        Rect empty{card.x + DpiScale(hdc, 24), y, card.dx - DpiScale(hdc, 48), DpiScale(hdc, 40)};
+        SetTextColor(hdc, ThemeWindowDarkerTextColor());
+        HdcDrawText(hdc, StrL("No folders in your Library yet."), empty, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, 13));
+    }
+
+    int footerY = card.y + card.dy - DpiScale(hdc, 64);
+    HdcFillRect(hdc, Rect{card.x, footerY, card.dx, 1}, ThemeEdgeColor());
+    bool scopeActive = !win->librarySearchFolderScope.IsEmpty();
+    Rect allBtn{card.x + DpiScale(hdc, 24), footerY + DpiScale(hdc, 14), DpiScale(hdc, 130), DpiScale(hdc, 36)};
+    SetTextColor(hdc, scopeActive ? ThemeWindowLinkColor() : ThemeWindowDarkerTextColor());
+    HdcDrawText(hdc, StrL("Search all folders"), allBtn, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+                HdcGetUiFont(hdc, 13, FW_MEDIUM));
+    if (scopeActive) {
+        win->staticLinks.Append(new StaticLink(allBtn, Str(kLinkLibrarySearchScopeClear)));
+    }
+    Rect done{card.x + card.dx - DpiScale(hdc, 112), footerY + DpiScale(hdc, 14), DpiScale(hdc, 88), DpiScale(hdc, 36)};
+    FillHomeRoundRect(hdc, done, DpiScale(hdc, 8), ThemeDisabledEdgeColor());
+    SetTextColor(hdc, ThemeWindowTextColor());
+    HdcDrawText(hdc, StrL("Done"), done, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+                HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
+    win->staticLinks.Append(new StaticLink(done, Str(kLinkLibrarySearchScopeDone)));
+    CloseModalOnScrimTap(win, rc, card, Str(kLinkLibrarySearchScopeDone));
 }
 
 static int ClampTouchLibrarySidebarDx(MainWindow* win, int dx) {
@@ -3548,16 +3720,13 @@ static void DrawTouchLibraryFolderCard(MainWindow* win, HDC hdc, Str folderPath,
     HdcDrawText(hdc, TouchLibraryFolderSummaryTemp(data), metaRect, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
                 HdcGetUiFont(hdc, 12));
 
-    Rect linkRect = card.Union(metaRect).Intersect(clip);
-    if (!linkRect.IsEmpty()) {
-        win->staticLinks.Append(
-            new StaticLink(linkRect, fmt("%s%s", Str(kLinkLibraryFolderPrefix), folderPath), folderPath));
-    }
-
     // Pin badge, same idiom as a file card's: folders could be pinned from the
     // sidebar row's "..." but not from the card you are actually looking at.
-    // Appended after the whole-card link so the first-match hit test in
-    // GetStaticLinkAtTemp lets the badge win.
+    // Appended before the whole-card link, because GetStaticLinkAtTemp's hit
+    // test is first-match-wins by append order (not by what's drawn on top) -
+    // registering the badge second, inside the card's own rect, meant every
+    // tap on it resolved to the card link first and the badge was never
+    // reachable.
     bool isPinned = TouchLibraryPathIn(gGlobalPrefs->libraryPinnedFolders, folderPath);
     int badgeDx = DpiScale(hdc, 28);
     Rect badge{card.x + card.dx - badgeDx - DpiScale(hdc, 6), card.y + DpiScale(hdc, 6), badgeDx, badgeDx};
@@ -3575,6 +3744,12 @@ static void DrawTouchLibraryFolderCard(MainWindow* win, HDC hdc, Str folderPath,
         TempStr pinTarget = str::JoinTemp(kLinkLibraryPinPrefix, folderPath);
         Str pinTip = isPinned ? _TRA("Unpin") : _TRA("Pin");
         win->staticLinks.Append(new StaticLink(badgeLink, pinTarget, pinTip));
+    }
+
+    Rect linkRect = card.Union(metaRect).Intersect(clip);
+    if (!linkRect.IsEmpty()) {
+        win->staticLinks.Append(
+            new StaticLink(linkRect, fmt("%s%s", Str(kLinkLibraryFolderCardPrefix), folderPath), folderPath));
     }
 }
 
@@ -3650,6 +3825,13 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         HwndSetVisible(win->hwndHomeSearch, false);
     }
     Rect search{DpiScale(hdc, 12), DpiScale(hdc, 12), leftDx - DpiScale(hdc, 24), DpiScale(hdc, 40)};
+    // Right edge of the box, packed inward: [[filter chevron][clear x][edit]].
+    // The chevron's slot is reserved unconditionally (it's useful with or
+    // without a query), unlike the clear x, which only ever shows up once
+    // there is a query to clear - same as before this button existed.
+    int filterBtnDx = DpiScale(hdc, 34);
+    int clearBtnDx = DpiScale(hdc, 38);
+    bool scopeActive = !win->librarySearchFolderScope.IsEmpty();
     if (hasSidebar) {
     FillHomeRoundRect(hdc, search, search.dy / 2, ThemeTouchSurfaceColor(), ThemeEdgeColor());
     int searchIconDy = DpiScale(hdc, 16);
@@ -3660,12 +3842,43 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                        search.y + (search.dy - searchIconDy) / 2, ILD_NORMAL);
     }
     MoveWindow(win->hwndHomeSearch, search.x + DpiScale(hdc, 38), search.y + DpiScale(hdc, 4),
-               search.dx - DpiScale(hdc, 72), search.dy - DpiScale(hdc, 8), TRUE);
+               search.dx - DpiScale(hdc, 38) - filterBtnDx - clearBtnDx, search.dy - DpiScale(hdc, 8), TRUE);
     HwndShow(win->hwndHomeSearch);
     } // hasSidebar
     TempStr query = HwndGetTextTemp(win->hwndHomeSearch);
+    // Cleared or edited out from under it: the "N Files" row that put us here
+    // may no longer exist, or its count is stale. Falling back to whatever
+    // the sidebar's own selection is (a folder, or Recent) beats showing a
+    // frozen result set for a query that is no longer on screen.
+    bool showingSearchFiles = win->librarySearchFilesSelected && len(query) > 0 && !recentSelected;
+    if (hasSidebar) {
+        // Always available, not just while there is a query: choosing folders
+        // ahead of typing is as reasonable as narrowing an existing search.
+        Rect filterBtn{search.x + search.dx - filterBtnDx, search.y + DpiScale(hdc, 4), filterBtnDx,
+                       search.dy - DpiScale(hdc, 8)};
+        COLORREF filterFg = scopeActive ? ThemeWindowLinkColor() : ThemeWindowDarkerTextColor();
+        int chevronDy = DpiScale(hdc, 14);
+        HIMAGELIST chevronIcons = GetTintedToolbarImageList(chevronDy, filterFg, ThemeTouchSurfaceColor());
+        if (chevronIcons) {
+            ImageList_Draw(chevronIcons, (int)TbIcon::ChevronDown, hdc, filterBtn.x + (filterBtn.dx - chevronDy) / 2,
+                           filterBtn.y + (filterBtn.dy - chevronDy) / 2, ILD_NORMAL);
+        }
+        if (scopeActive) {
+            // a small filled dot, the same idiom the tab strip uses for "this
+            // has state you should know about" - a number would need either a
+            // wider button or type too small to read
+            int dotDy = DpiScale(hdc, 7);
+            Rect dot{filterBtn.x + filterBtn.dx - dotDy - DpiScale(hdc, 2), filterBtn.y - DpiScale(hdc, 1), dotDy,
+                     dotDy};
+            FillHomeRoundRect(hdc, dot, dot.dy / 2, ThemeWindowLinkColor());
+        }
+        Str filterTip = scopeActive ? fmt("Searching %d folder%s", len(win->librarySearchFolderScope),
+                                          len(win->librarySearchFolderScope) == 1 ? StrL("") : StrL("s"))
+                                    : StrL("Search all folders");
+        win->staticLinks.Append(new StaticLink(filterBtn, Str(kLinkLibrarySearchScopeOpen), filterTip));
+    }
     if (hasSidebar && len(query) > 0) {
-        Rect clear{search.x + search.dx - DpiScale(hdc, 38), search.y, DpiScale(hdc, 38), search.dy};
+        Rect clear{search.x + search.dx - filterBtnDx - clearBtnDx, search.y, clearBtnDx, search.dy};
         Rect clearCircle{clear.x + (clear.dx - DpiScale(hdc, 18)) / 2, clear.y + (clear.dy - DpiScale(hdc, 18)) / 2,
                          DpiScale(hdc, 18), DpiScale(hdc, 18)};
         FillHomeRoundRect(hdc, clearCircle, clearCircle.dy / 2, RgbToCOLORREF(0xeae5de));
@@ -3820,14 +4033,18 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         bool anyFolder = false;
         sectionLabel(StrL("FOLDERS"));
         for (int i = 0; i < len(folders); i++) {
-            if (!TouchLibraryFolderHidden(folders, i) && str::ContainsI(path::GetBaseNameTemp(folders[i]), query)) {
+            if (!TouchLibraryFolderHidden(folders, i) && TouchLibraryFolderInSearchScope(win, folders, i) &&
+                str::ContainsI(path::GetBaseNameTemp(folders[i]), query)) {
                 drawFolderRow(i, true);
                 anyFolder = true;
             }
         }
-        bool anyFile = false;
-        y += DpiScale(hdc, 8);
-        sectionLabel(StrL("FILES"));
+        // Every match across the whole library, not just this folder - one
+        // row, not one per file, so a broad query does not turn the sidebar
+        // into a second list view crammed into a ~380px column. Tapping it
+        // shows the actual files as cards in the content pane, where there is
+        // room for them.
+        int fileMatchCount = 0;
         for (int i = 0; i < len(files); i++) {
             Str filePath = files[i];
             if (!str::ContainsI(path::GetBaseNameTemp(filePath), query)) {
@@ -3835,29 +4052,39 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
             }
             TempStr parentPath = path::GetDirTemp(filePath);
             int folderIdx = folders.FindI(parentPath);
-            if (folderIdx < 0 || TouchLibraryFolderHidden(folders, folderIdx)) {
+            if (folderIdx < 0 || TouchLibraryFolderHidden(folders, folderIdx) ||
+                !TouchLibraryFolderInSearchScope(win, folders, folderIdx)) {
                 continue;
             }
-            Rect row{DpiScale(hdc, 14), y, leftDx - DpiScale(hdc, 28), DpiScale(hdc, 48)};
+            fileMatchCount++;
+        }
+        bool anyFile = fileMatchCount > 0;
+        if (anyFile) {
+            y += DpiScale(hdc, 8);
+            sectionLabel(StrL("FILES"));
+            bool isSelected = win->librarySearchFilesSelected;
+            Rect row{DpiScale(hdc, 8), y, leftDx - DpiScale(hdc, 16), DpiScale(hdc, 38)};
             y += row.dy;
             Rect visibleRow = row.Intersect(treeClip);
-            if (visibleRow.IsEmpty()) {
-                anyFile = true;
-                continue;
+            if (!visibleRow.IsEmpty()) {
+                COLORREF rowBg = ThemeHotBackgroundColor();
+                if (isSelected) {
+                    rowBg = selBg;
+                    drawSidebarRowBg(row);
+                }
+                COLORREF fg = isSelected ? selFg : ThemeWindowTextColor();
+                Rect icon{row.x + DpiScale(hdc, 10) + DpiScale(hdc, 1), row.y + DpiScale(hdc, 1),
+                          DpiScale(hdc, 16), DpiScale(hdc, 16)};
+                DrawTouchLibraryPdfIcon(hdc, icon);
+                Rect nameRect{icon.x + icon.dx + DpiScale(hdc, 11), row.y, row.dx - DpiScale(hdc, 60), row.dy};
+                SetTextColor(hdc, fg);
+                Str filesLabel =
+                    fileMatchCount == 1 ? StrL("1 File") : fmt("%d Files", fileMatchCount);
+                HdcDrawText(hdc, filesLabel, nameRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+                            HdcGetUiFont(hdc, 13, FW_MEDIUM));
+                win->staticLinks.Append(
+                    new StaticLink(visibleRow, Str(kLinkLibrarySearchFiles), StrL("Show matching files")));
             }
-            Rect nameRect{row.x + DpiScale(hdc, 26), row.y + DpiScale(hdc, 3), row.dx - DpiScale(hdc, 26),
-                          DpiScale(hdc, 21)};
-            SetTextColor(hdc, ThemeWindowTextColor());
-            HdcDrawText(hdc, path::GetBaseNameTemp(filePath), nameRect,
-                        DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX, HdcGetUiFont(hdc, 13, FW_MEDIUM));
-            Rect parentRect{nameRect.x, nameRect.y + nameRect.dy, nameRect.dx, DpiScale(hdc, 18)};
-            SetTextColor(hdc, ThemeWindowDarkerTextColor());
-            HdcDrawText(hdc, fmt("in %s", path::GetBaseNameTemp(parentPath)), parentRect,
-                        DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX, HdcGetUiFont(hdc, 11));
-            DrawTouchLibraryFolderIcon(hdc, Rect{row.x, row.y, DpiScale(hdc, 18), row.dy}, ThemeWindowDarkerTextColor(),
-                                       ThemeHotBackgroundColor());
-            win->staticLinks.Append(new StaticLink(visibleRow, fmt("%s%s", Str(kLinkLibraryFolderPrefix), parentPath)));
-            anyFile = true;
         }
         if (!anyFolder && !anyFile) {
             Rect empty{DpiScale(hdc, 20), y + DpiScale(hdc, 16), leftDx - DpiScale(hdc, 40), DpiScale(hdc, 48)};
@@ -3950,8 +4177,9 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         // are shown. Reaching this before required leaving the folder first -
         // back to the sidebar row's "..." menu, or the card on its parent's
         // own listing - neither of which is available while looking at the
-        // folder's own contents.
-        if (selectedPath) {
+        // folder's own contents. Search results span whichever folders the
+        // matches happen to live in, so there is no single folder to pin.
+        if (selectedPath && !showingSearchFiles) {
             int pinBtnDy = viewButtonDy;
             int pinGap = DpiScale(hdc, 8);
             Rect pinBtn{headerAction.x - pinGap - pinBtnDy, headerAction.y, pinBtnDy, pinBtnDy};
@@ -4041,14 +4269,19 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     Str headerTitle = selectedName;
     if (recentSelected) {
         headerTitle = StrL("Recent files");
+    } else if (showingSearchFiles) {
+        headerTitle = fmt("Files matching “%s”", query);
     }
     HdcDrawText(hdc, headerTitle, header, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
                 HdcGetUiFont(hdc, 18, FW_SEMIBOLD));
 
     {
-        // "\x01recent" cannot collide with a path, so Recent and a folder named
-        // "recent" are still different destinations
-        Str swapKey = recentSelected ? StrL("\x01recent") : selectedPath;
+        // "\x01recent"/"\x01search:..." cannot collide with a path, so Recent
+        // and search results are always distinct destinations from a folder
+        // (or from each other, across different queries)
+        Str swapKey = recentSelected ? StrL("\x01recent")
+                      : showingSearchFiles ? fmt("\x01search:%s", query)
+                                           : selectedPath;
         Rect contentRc{leftDx, headerDy, std::max(0, rc.dx - leftDx), std::max(0, rc.dy - headerDy)};
         NoteLibraryContentSwap(win, hdc, contentRc, swapKey);
     }
@@ -4057,15 +4290,32 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         DrawTouchRecentCards(win, hdc, content);
     } else {
         Vec<int> selectedFolders;
-        for (int i = 0; i < len(folders); i++) {
-            if (folders.AtData(i)->parent == selected && !TouchLibraryFolderHidden(folders, i)) {
-                selectedFolders.Append(i);
-            }
-        }
         Vec<int> selectedFiles;
-        for (int i = 0; i < len(files); i++) {
-            if (selectedPath && str::EqI(path::GetDirTemp(files[i]), selectedPath)) {
+        if (showingSearchFiles) {
+            // no folder cards here - the point of this view is the files
+            // themselves, across whichever folders they happen to live in
+            for (int i = 0; i < len(files); i++) {
+                if (!str::ContainsI(path::GetBaseNameTemp(files[i]), query)) {
+                    continue;
+                }
+                TempStr parentPath = path::GetDirTemp(files[i]);
+                int folderIdx = folders.FindI(parentPath);
+                if (folderIdx < 0 || TouchLibraryFolderHidden(folders, folderIdx) ||
+                    !TouchLibraryFolderInSearchScope(win, folders, folderIdx)) {
+                    continue;
+                }
                 selectedFiles.Append(i);
+            }
+        } else {
+            for (int i = 0; i < len(folders); i++) {
+                if (folders.AtData(i)->parent == selected && !TouchLibraryFolderHidden(folders, i)) {
+                    selectedFolders.Append(i);
+                }
+            }
+            for (int i = 0; i < len(files); i++) {
+                if (selectedPath && str::EqI(path::GetDirTemp(files[i]), selectedPath)) {
+                    selectedFiles.Append(i);
+                }
             }
         }
         int pad = DpiScale(hdc, 24);
@@ -4108,7 +4358,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                     itemPath = folders[idx];
                     name = path::GetBaseNameTemp(itemPath);
                     meta = TouchLibraryFolderSummaryTemp(folders.AtData(idx));
-                    target = fmt("%s%s", Str(kLinkLibraryFolderPrefix), itemPath);
+                    target = fmt("%s%s", Str(kLinkLibraryFolderCardPrefix), itemPath);
                     DrawTouchLibrarySolidFolderIcon(hdc, icon, RgbToCOLORREF(0xc56a1a));
                 } else {
                     itemPath = files[idx];
@@ -4173,8 +4423,14 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
             Rect empty{leftDx + DpiScale(hdc, 40), headerDy + DpiScale(hdc, 40), rc.dx - leftDx - DpiScale(hdc, 80),
                        DpiScale(hdc, 40)};
             SetTextColor(hdc, ThemeWindowDarkerTextColor());
-            Str message =
-                len(folders) == 0 ? StrL("Add a folder to build your Library.") : StrL("This folder is empty.");
+            Str message;
+            if (showingSearchFiles) {
+                message = fmt("No files match “%s”.", query);
+            } else if (len(folders) == 0) {
+                message = StrL("Add a folder to build your Library.");
+            } else {
+                message = StrL("This folder is empty.");
+            }
             HdcDrawText(hdc, message, empty, DT_SINGLELINE | DT_NOPREFIX, HdcGetUiFont(hdc, 14));
         }
         RestoreDC(hdc, filesDc);
@@ -4210,6 +4466,8 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
 
     if (win->libraryManageFoldersOpen) {
         DrawTouchLibraryManageModal(win, hdc, rc);
+    } else if (win->librarySearchScopePickerOpen) {
+        DrawTouchLibrarySearchScopeModal(win, hdc, rc, folders);
     }
 }
 
@@ -5019,8 +5277,15 @@ void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool now
     // responsive; a second pin tap during the loop starts its own flight
     // (same globals), and this loop notices and steps aside for it.
     while (gPinFlyVal.IsAnimating() && gPinFlyWin == win && IsMainWindowValid(win) && IsWindow(hwnd)) {
+        u64 tickStart = GetTickCount64();
         PaintPinFlightFrame(win, hwnd);
         MSG msg;
+        // Cap the drain, or a burst of queued input (a flood of mouse-move
+        // messages is the common case) can keep this pumping well past the
+        // next frame's due time - the loop would still call Sleep(kAnimTickMs)
+        // afterwards, so that one frame runs long and every frame after it is
+        // late by the same amount, which reads as a stutter partway through
+        // the flight rather than a uniformly slower one.
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
@@ -5029,11 +5294,21 @@ void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool now
             if (!IsMainWindowValid(win) || !IsWindow(hwnd)) {
                 break;
             }
+            if (GetTickCount64() - tickStart >= kAnimTickMs) {
+                break;
+            }
         }
         if (!IsMainWindowValid(win) || !IsWindow(hwnd)) {
             break;
         }
-        Sleep(kAnimTickMs);
+        // Sleep only what is left of this tick - the paint and pump above
+        // already spent some of it - so frames land at a steady kAnimTickMs
+        // apart instead of that interval stacking on top of however long
+        // this iteration's work took.
+        u64 elapsed = GetTickCount64() - tickStart;
+        if (elapsed < kAnimTickMs) {
+            Sleep((DWORD)(kAnimTickMs - elapsed));
+        }
     }
     // Only clean up if this call still owns the shared state: a second pin
     // tap during the loop above starts its own flight (same globals) and

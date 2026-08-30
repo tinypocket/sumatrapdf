@@ -398,8 +398,19 @@ struct MainWindow {
     // the recently opened / pinned / currently open files instead of a folder.
     // It's the default so opening the Library lands on something useful.
     bool libraryRecentSelected = true;
+    // the sidebar's search-results "N Files" row is selected: the content
+    // pane shows every file the current query matches instead of a folder.
+    // Cleared whenever a folder or Recent is chosen, or the query changes.
+    bool librarySearchFilesSelected = false;
     StrVec libraryExpandedFolderPaths;
     Str librarySearchQuery;
+    // Folders search is restricted to, chosen from the picker opened off the
+    // search box's filter button. Empty means unrestricted (search
+    // everywhere), which is the default and how most searches are meant to
+    // work - this exists for the rare case of a broad query inside a library
+    // with folders the reader knows are irrelevant to it.
+    StrVec librarySearchFolderScope;
+    bool librarySearchScopePickerOpen = false;
     Str libraryRowMenuPath;
     // Which of a folder's two possible rows opened the menu: pinned
     // folders are drawn once in PINNED and again at their ordinary place in

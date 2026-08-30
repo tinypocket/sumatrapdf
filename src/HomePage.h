@@ -38,6 +38,11 @@ constexpr const char* kLinkLibraryForward = "<Library,Forward>";
 // contains angle brackets, so it cannot collide
 constexpr const char* kLibraryNavRecent = "<Recent>";
 constexpr const char* kLinkLibraryFolderPrefix = "<Library,Folder>";
+// Same navigation as kLinkLibraryFolderPrefix, given to content-pane
+// elements (cards, list rows, recent-folder pills) so their hover glow
+// never resolves to the sidebar tree row for the same folder - the two
+// are drawn separately and can be visible at once.
+constexpr const char* kLinkLibraryFolderCardPrefix = "<Library,FolderCard>";
 constexpr const char* kLinkLibraryTogglePrefix = "<Library,Toggle>";
 constexpr const char* kLinkLibraryAddFolder = "<Library,AddFolder>";
 constexpr const char* kLinkLibraryMenuPrefix = "<Library,Menu>";
@@ -51,6 +56,14 @@ constexpr const char* kLinkLibraryUnhidePrefix = "<Library,Unhide>";
 constexpr const char* kLinkLibraryClearSearch = "<Library,ClearSearch>";
 constexpr const char* kLinkLibraryContentView = "<Library,ContentView>";
 constexpr const char* kLinkLibraryListView = "<Library,ListView>";
+// the sidebar's search-results "N Files" row: the content pane then shows
+// every file the current query matches, across all folders
+constexpr const char* kLinkLibrarySearchFiles = "<Library,SearchFiles>";
+// the filter button next to the search box, and the folder-picker it opens
+constexpr const char* kLinkLibrarySearchScopeOpen = "<Library,SearchScopeOpen>";
+constexpr const char* kLinkLibrarySearchScopeDone = "<Library,SearchScopeDone>";
+constexpr const char* kLinkLibrarySearchScopeClear = "<Library,SearchScopeClear>";
+constexpr const char* kLinkLibrarySearchScopeTogglePrefix = "<Library,SearchScopeToggle>";
 
 void SetPromoString(Str s);
 void FreeHomePageTips();
