@@ -321,6 +321,19 @@ static Rect GetTileRectDevice(DisplayModel* dm, int pageNo, int rotation, float 
 }
 
 static RectF GetTileRectUser(DisplayModel* dm, int pageNo, int rotation, float zoom, TilePosition tile) {
+    if (tile.res <= 0 || tile.res == INVALID_TILE_RES) {
+        // Untiled: render exactly the display box PageDisplayBox computed,
+        // in its own point space. Routing it through GetTileRectDevice's
+        // pixel Round() and back - which the tiled path below needs, so
+        // neighboring tiles meet on the same device pixel with no seam -
+        // snapped the crop boundary to the device pixel grid and back to
+        // points. That rounding is +-0.5 device pixels, but a device pixel
+        // is worth more and more page-space points as zoom shrinks, so a
+        // smart-margins page could gain or lose a few points of header or
+        // body text depending on which way the current zoom happened to
+        // round, unrelated to anything about the page itself.
+        return dm->PageDisplayBox(pageNo);
+    }
     Rect pixelbox = GetTileRectDevice(dm, pageNo, rotation, zoom, tile);
     return dm->GetEngine()->Transform(ToRectF(pixelbox), pageNo, zoom, rotation, true);
 }
