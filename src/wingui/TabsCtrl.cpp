@@ -385,6 +385,30 @@ static void FillPill(Graphics& gfx, const Rect& r, COLORREF col, int requestedRa
     gfx.SetCompositingMode(prevComp);
 }
 
+// A browser-style tab: rounded top corners, square bottom corners, meant to
+// be drawn full-height so its flat bottom edge sits flush against whatever is
+// directly below the strip - the point being that a tab reads as growing out
+// of the page below it, not as a chip floating inside the bar.
+static void FillTabShape(Graphics& gfx, const Rect& r, COLORREF col, int radius) {
+    int d = std::min(radius * 2, std::min(r.dy * 2, r.dx));
+    if (d <= 0 || r.dy <= 0) {
+        return;
+    }
+    Gdiplus::GraphicsPath path;
+    path.AddArc(r.x, r.y, d, d, 180.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y, d, d, 270.0f, 90.0f);
+    path.AddLine(r.x + r.dx, r.y + r.dy, r.x, r.y + r.dy);
+    path.CloseFigure();
+    SolidBrush br(GdipCol(col));
+    auto prevSmooth = gfx.GetSmoothingMode();
+    auto prevComp = gfx.GetCompositingMode();
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gfx.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+    gfx.FillPath(&br, &path);
+    gfx.SetSmoothingMode(prevSmooth);
+    gfx.SetCompositingMode(prevComp);
+}
+
 static void DrawRoundedOutline(Graphics& gfx, Pen& pen, int x, int y, int dx, int dy, int radius) {
     int d = std::min(radius * 2, std::min(dx, dy));
     GraphicsPath path;
@@ -501,7 +525,15 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             int gap = DpiScale(hwnd, kTabPillGap);
             rPill.x += gap / 2;
             rPill.dx -= gap;
-            FillPill(gfx, rPill, tabBgCol, inTitleBar ? DpiScale(hwnd, 7) : -1);
+            if (inTitleBar) {
+                // Full strip height with a flat bottom, not a shorter pill
+                // centered in it: the selected tab's fill then reaches the
+                // strip's own bottom edge, which is where FillTabShape's
+                // caller lines its color up with the page below.
+                FillTabShape(gfx, rPill, tabBgCol, DpiScale(hwnd, 10));
+            } else {
+                FillPill(gfx, rPill, tabBgCol, -1);
+            }
         }
 
         // debug: paint close hit area in light green
@@ -514,14 +546,17 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
         gfx.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
         r = ti->rClose;
         rTxt = ToGdipRectF(ti->r);
+        // browser tabs give the label more room to breathe than 8px; the
+        // classic (non-title-bar) strip keeps its old, tighter spacing
+        int textPad = inTitleBar ? DpiScale(hwnd, 14) : 8;
         if (IsTabsRtl(hwnd)) {
-            // RTL: [8px | close | text | 8px]
-            rTxt.X += (Gdiplus::REAL)(8 + r.dx);
+            // RTL: [pad | close | text | pad]
+            rTxt.X += (Gdiplus::REAL)(textPad + r.dx);
         } else {
-            // LTR: [8px | text | close | 8px]
-            rTxt.X += 8;
+            // LTR: [pad | text | close | pad]
+            rTxt.X += (Gdiplus::REAL)textPad;
         }
-        rTxt.Width -= (Gdiplus::REAL)(8 + r.dx + 8);
+        rTxt.Width -= (Gdiplus::REAL)(textPad + r.dx + textPad);
         br.SetColor(GdipCol(textColor));
         WCHAR* ws = CWStrTemp(ti->text);
         Font* font = isSelected ? &fSelected : &fNormal;
@@ -532,10 +567,23 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             StringFormat sf2(StringFormat::GenericDefault());
             sf2.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
             sf2.SetLineAlignment(StringAlignmentCenter);
+            // GenericDefault wraps to as many lines as the rect is tall enough
+            // to hold - nothing here says "two". The tab's row height leaves
+            // room for more than two lines of this font, so a long title was
+            // wrapping to three. Clamp the layout rect to exactly two line
+            // heights (centered in the taller tab) and cut anything that
+            // still doesn't fit, rather than trusting the rect's real height.
+            sf2.SetFormatFlags(sf2.GetFormatFlags() | Gdiplus::StringFormatFlagsLineLimit);
             if (IsTabsRtl(hwnd)) {
                 sf2.SetAlignment(Gdiplus::StringAlignmentFar);
             }
-            gfx.DrawString(ws, -1, font, rTxt, &sf2, &br);
+            Gdiplus::RectF rTxt2 = rTxt;
+            Gdiplus::REAL twoLineDy = font->GetHeight(&gfx) * 2.0f;
+            if (twoLineDy < rTxt2.Height) {
+                rTxt2.Y += (rTxt2.Height - twoLineDy) / 2.0f;
+                rTxt2.Height = twoLineDy;
+            }
+            gfx.DrawString(ws, -1, font, rTxt2, &sf2, &br);
         } else {
             gfx.DrawString(ws, -1, font, rTxt, &sf, &br);
         }
