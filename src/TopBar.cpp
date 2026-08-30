@@ -341,9 +341,13 @@ void TopBarWnd::PinPreview(HWND anchorHwnd, Rect anchorRect) {
 // A document's colour in the tray: picked from its path, so it is stable
 // across sessions and the same file always reads the same.
 COLORREF TouchFavoriteGroupColor(Str filePath) {
+    // Dark enough that white text (always used on this palette, see the two
+    // draw sites below) stays readable on every entry - the original palette
+    // had three colors on the light side of IsLightColor's midpoint, which is
+    // how a document's chip ended up with black text next to another's white.
     static const COLORREF kPalette[] = {
-        RGB(0xC2, 0x6B, 0x4F), RGB(0x4F, 0x7A, 0xC2), RGB(0x5A, 0x9E, 0x6F),
-        RGB(0x9B, 0x6B, 0xC2), RGB(0xC2, 0x9E, 0x4F), RGB(0x4F, 0xA8, 0xA8),
+        RGB(0xB8, 0x5C, 0x40), RGB(0x3F, 0x68, 0xAE), RGB(0x3C, 0x82, 0x57),
+        RGB(0x80, 0x54, 0x9E), RGB(0x8E, 0x69, 0x26), RGB(0x2C, 0x83, 0x83),
     };
     u32 h = 2166136261u;
     for (int i = 0; i < filePath.len; i++) {
@@ -1394,12 +1398,19 @@ void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT*) {
         Str fp = savedGroupPaths[i];
         COLORREF chipCol = TouchFavoriteGroupColor(fp);
         FillTrack(hdc, chip, chip.dy / 2, chipCol);
-        // white or black text, whichever the chip colour can carry
-        SetTextColor(hdc, IsLightColor(chipCol) ? RGB(0, 0, 0) : RGB(255, 255, 255));
+        // every palette entry is dark enough for this to always read
+        SetTextColor(hdc, RGB(255, 255, 255));
         TempStr name = path::GetBaseNameTemp(fp);
         Rect tr{chip.x + DpiScale(hwnd, 12), chip.y, chip.dx - DpiScale(hwnd, 24), chip.dy};
         HdcDrawText(hdc, name, tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX, savedFont);
     }
+
+    // Same palette a document reads as elsewhere in the tray (see the chip
+    // loop above), so a page pill still says which document it belongs to
+    // after you have opened that document and its chip is gone.
+    WindowTab* curTabForCol = win ? win->CurrentTab() : nullptr;
+    bool haveOwnDocCol = curTabForCol && !curTabForCol->IsAboutTab();
+    COLORREF ownDocCol = haveOwnDocCol ? TouchFavoriteGroupColor(curTabForCol->filePath) : groupCol;
 
     for (int i = 0; i < len(savedPageRects); i++) {
         int page = savedPages[i];
@@ -1408,8 +1419,8 @@ void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT*) {
             continue;
         }
         bool active = page == currentPage;
-        COLORREF pillBg = groupCol;
-        COLORREF pillFg = textCol;
+        COLORREF pillBg = ownDocCol;
+        COLORREF pillFg = haveOwnDocCol ? RGB(255, 255, 255) : textCol;
         if (active) {
             ThemeAccentSurfaceColors(&pillBg, &pillFg);
         }
