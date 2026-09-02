@@ -3,10 +3,12 @@
 
 #include "base/Base.h"
 #include "base/ScopedWin.h"
+#include "base/Dict.h"
 #include "base/Dpi.h"
 #include "base/DirScan.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
+#include "base/UITask.h"
 #include "base/Win.h"
 
 #include "wingui/UIModels.h"
@@ -153,7 +155,7 @@ static void ClearHomeLayoutCache();
 
 void FreeHomePageTips() {
     FreeTintedToolbarImageLists();
-    HomePageInvalidateLibrary();
+    FreeTouchLibraryModel();
     if (gTipsParsed) {
         for (int i = 0; i < gParsedTipCount; i++) {
             gParsedTipsStorage[i].Reset();
@@ -885,16 +887,14 @@ static LRESULT CALLBACK WndProcHomeSearch(HWND hwnd, UINT msg, WPARAM wp, LPARAM
 }
 
 // Home-list entries with a path (same set as thumbnails when search is empty).
+// same entries GetFrequencyOrder / GetRecentlyOpenedOrder return, minus the sort
 static int CountHomePageFiles() {
-    Vec<FileState*> all;
-    if (gGlobalPrefs && gGlobalPrefs->homePageSortByFrequentlyRead) {
-        gFileHistory.GetFrequencyOrder(all);
-    } else {
-        gFileHistory.GetRecentlyOpenedOrder(all);
-    }
     int n = 0;
-    for (FileState* fs : all) {
-        if (fs && len(fs->filePath) > 0) {
+    if (!gFileHistory.states) {
+        return 0;
+    }
+    for (FileState* fs : *gFileHistory.states) {
+        if (fs && len(fs->filePath) > 0 && (!fs->isMissing || fs->isPinned)) {
             n++;
         }
     }
@@ -2456,9 +2456,37 @@ static WindowTab* FindTouchOpenTabByPath(Str filePath) {
     return nullptr;
 }
 
+// file::GetSize for the Recent cards, which get redrawn on every hover tick.
+// Small and path-keyed; the Library keeps sizes on its own per-file data.
+struct HomeFileSizeEntry {
+    i64 size = kSizeNotFetched;
+    u32 fetchedAt = 0;
+};
+static StrVecWithData<HomeFileSizeEntry> gHomeFileSizes;
+constexpr int kHomeFileSizeCacheMs = 30 * 1000;
+constexpr int kHomeFileSizeCacheMax = 256;
+
+static i64 HomeFileSizeCached(Str filePath) {
+    u32 now = GetTickCount();
+    int idx = gHomeFileSizes.FindI(filePath);
+    if (idx < 0) {
+        if (len(gHomeFileSizes) >= kHomeFileSizeCacheMax) {
+            gHomeFileSizes.Reset();
+        }
+        idx = gHomeFileSizes.Append(filePath, HomeFileSizeEntry{});
+    }
+    HomeFileSizeEntry* e = gHomeFileSizes.AtData(idx);
+    if (e->size == kSizeNotFetched || now - e->fetchedAt > (u32)kHomeFileSizeCacheMs) {
+        e->size = file::GetSize(filePath);
+        e->fetchedAt = now;
+    }
+    return e->size;
+}
+
 static void DrawTouchFileCardPath(MainWindow* win, HDC hdc, Str filePath, FileState* fs,
                                   RenderedBitmap* explicitThumbnail, const Rect& card, bool showProgress,
-                                  const Rect* linkClip = nullptr, bool twoLineName = false, bool pinnable = false) {
+                                  const Rect* linkClip = nullptr, bool twoLineName = false, bool pinnable = false,
+                                  i64 knownSize = kSizeNotFetched) {
     COLORREF pageBg = ThemeWindowControlBackgroundColor();
     DrawHomeShadow(hdc, card, DpiScale(hdc, 10), pageBg);
     FillHomeRoundRect(hdc, card, DpiScale(hdc, 10), RGB(255, 255, 255), ThemeEdgeColor());
@@ -2480,10 +2508,10 @@ static void DrawTouchFileCardPath(MainWindow* win, HDC hdc, Str filePath, FileSt
         }
     }
 
+    WindowTab* openTab = showProgress && fs ? FindTouchOpenTabByPath(filePath) : nullptr;
+    int pageNo = openTab && openTab->ctrl ? openTab->ctrl->CurrentPageNo() : (fs ? std::max(1, fs->pageNo) : 1);
+    int pageCount = openTab && openTab->ctrl ? openTab->ctrl->PageCount() : 0;
     if (showProgress && fs) {
-        WindowTab* openTab = FindTouchOpenTabByPath(filePath);
-        int pageNo = openTab && openTab->ctrl ? openTab->ctrl->CurrentPageNo() : std::max(1, fs->pageNo);
-        int pageCount = openTab && openTab->ctrl ? openTab->ctrl->PageCount() : 0;
         TempStr progress =
             pageCount > 0 ? fmt("%d%%", std::clamp(pageNo * 100 / pageCount, 1, 100)) : fmt("p. %d", pageNo);
         Rect chip{card.x + DpiScale(hdc, 10), card.y + card.dy - DpiScale(hdc, 32), DpiScale(hdc, 44),
@@ -2501,12 +2529,9 @@ static void DrawTouchFileCardPath(MainWindow* win, HDC hdc, Str filePath, FileSt
     nameFlags |= twoLineName ? DT_WORDBREAK : DT_SINGLELINE;
     HdcDrawText(hdc, name, nameRc, nameFlags, HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
 
-    i64 size = file::GetSize(filePath);
+    i64 size = knownSize == kSizeNotFetched ? HomeFileSizeCached(filePath) : knownSize;
     TempStr meta = size >= 0 ? str::FormatSizeShortTemp(size, nullptr) : str::DupTemp("");
     if (showProgress && fs) {
-        WindowTab* openTab = FindTouchOpenTabByPath(filePath);
-        int pageNo = openTab && openTab->ctrl ? openTab->ctrl->CurrentPageNo() : std::max(1, fs->pageNo);
-        int pageCount = openTab && openTab->ctrl ? openTab->ctrl->PageCount() : 0;
         meta = pageCount > 0 ? fmt("%d / %d · %s", pageNo, pageCount, meta) : fmt("Page %d · %s", pageNo, meta);
     }
     Rect metaRc{nameRc.x, nameRc.y + nameRc.dy + DpiScale(hdc, 1), nameRc.dx, DpiScale(hdc, 17)};
@@ -2615,10 +2640,9 @@ static void CollectRecentFolders(const Vec<FileState*>& files, StrVec& out, int 
     }
 }
 
-// The "Recent" surface: the PINNED and RECENT file-card sections. It used to be a view of its own (TouchView::Home); now it
-// is drawn into the Library's content pane when its "Recent" sidebar row is
-// selected. contentRc is that pane (right of the sidebar, below the header) and
-// the pane's scroll position is win->libraryFilesScrollY.
+// The "Recent" surface: the PINNED and RECENT file-card sections. It used to be a view of its own (TouchView::Home);
+// now it is drawn into the Library's content pane when its "Recent" sidebar row is selected. contentRc is that pane
+// (right of the sidebar, below the header) and the pane's scroll position is win->libraryFilesScrollY.
 static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc) {
     Vec<FileState*> files;
     StrVec filterWords;
@@ -2762,14 +2786,42 @@ struct TouchLibraryFolderData {
     bool hasChildren = false;
 };
 
+// size is a cache of file::GetSize(): the card grid and list rows show it on
+// every paint, and stat-ing every visible file per hover frame is slow on
+// OneDrive/network folders.
 struct TouchLibraryFileData {
     RenderedBitmap* thumbnail = nullptr;
     bool thumbnailRequested = false;
+    int folderIdx = -1;
+    i64 size = kSizeNotFetched;
+    u32 sizeFetchedAt = 0;
 };
 
 static StrVecWithData<TouchLibraryFolderData> gTouchLibraryFolders;
 static StrVecWithData<TouchLibraryFileData> gTouchLibraryFiles;
 static bool gTouchLibraryValid = false;
+
+// The disk walk runs on a background thread so the first Library paint (and
+// every folder add/remove) doesn't freeze the window for seconds on a large
+// library. The scan is generation-stamped: an invalidate while a scan is in
+// flight bumps the generation, and the stale result is discarded when it lands.
+static int gTouchLibraryScanGen = 0;
+static bool gTouchLibraryScanning = false;
+
+struct TouchLibraryScan {
+    int gen = 0;
+    StrVec roots;
+    StrVecWithData<TouchLibraryFolderData> folders;
+    StrVecWithData<TouchLibraryFileData> files;
+};
+
+static void TouchLibraryInvalidateWindows() {
+    for (MainWindow* win : gWindows) {
+        if (win->hwndCanvas && win->touchView == TouchView::Library) {
+            HwndInvalidate(win->hwndCanvas, false);
+        }
+    }
+}
 
 struct TouchLibraryThumbnailRequest {
     Str filePath;
@@ -2783,23 +2835,69 @@ static void TouchLibraryThumbnailFinished(TouchLibraryThumbnailRequest* request,
         delete fileData->thumbnail;
         fileData->thumbnail = thumbnail;
         thumbnail = nullptr;
-        for (MainWindow* win : gWindows) {
-            if (win->hwndCanvas && win->touchView == TouchView::Library) {
-                HwndInvalidate(win->hwndCanvas, false);
-            }
-        }
+        TouchLibraryInvalidateWindows();
     }
     delete thumbnail;
     delete request;
 }
 
-void HomePageInvalidateLibrary() {
+static bool TouchLibraryPathWithin(Str path, Str root);
+
+// shutdown: a scan still in flight is dropped by its generation check
+void FreeTouchLibraryModel() {
+    gTouchLibraryScanGen++;
+    gTouchLibraryValid = false;
     gTouchLibraryFolders.Reset();
     for (int i = 0; i < len(gTouchLibraryFiles); i++) {
         delete gTouchLibraryFiles.AtData(i)->thumbnail;
     }
     gTouchLibraryFiles.Reset();
+}
+
+// Keeps the current model on screen (minus folders under removed roots, so a
+// removal is reflected immediately) and lets the next paint kick off a rescan.
+void HomePageInvalidateLibrary() {
+    gTouchLibraryScanGen++;
     gTouchLibraryValid = false;
+    Vec<Str>* roots = gGlobalPrefs ? gGlobalPrefs->libraryFolders : nullptr;
+    for (int i = len(gTouchLibraryFolders) - 1; i >= 0; i--) {
+        bool keep = false;
+        if (roots) {
+            for (Str root : *roots) {
+                TempStr normalized = path::NormalizeTemp(root);
+                if (normalized && TouchLibraryPathWithin(gTouchLibraryFolders[i], normalized)) {
+                    keep = true;
+                    break;
+                }
+            }
+        }
+        if (keep) {
+            continue;
+        }
+        for (int j = len(gTouchLibraryFiles) - 1; j >= 0; j--) {
+            if (gTouchLibraryFiles.AtData(j)->folderIdx == i) {
+                delete gTouchLibraryFiles.AtData(j)->thumbnail;
+                gTouchLibraryFiles.RemoveAt(j);
+            }
+        }
+        gTouchLibraryFolders.RemoveAt(i);
+        // indexes above i shifted down by one
+        for (int j = 0; j < len(gTouchLibraryFolders); j++) {
+            int* parent = &gTouchLibraryFolders.AtData(j)->parent;
+            if (*parent == i) {
+                *parent = -1;
+            } else if (*parent > i) {
+                (*parent)--;
+            }
+        }
+        for (int j = 0; j < len(gTouchLibraryFiles); j++) {
+            int* folderIdx = &gTouchLibraryFiles.AtData(j)->folderIdx;
+            if (*folderIdx > i) {
+                (*folderIdx)--;
+            }
+        }
+    }
+    TouchLibraryInvalidateWindows();
 }
 
 static bool TouchLibraryCanOpenFile(Str filePath) {
@@ -2807,54 +2905,75 @@ static bool TouchLibraryCanOpenFile(Str filePath) {
     return IsSupportedFileType(kind, true) || DocIsSupportedFileType(kind);
 }
 
-static void AppendTouchLibraryFolder(StrVecWithData<TouchLibraryFolderData>& folders, Str path) {
-    if (len(path) > 0 && folders.FindI(path) < 0) {
-        folders.Append(path, TouchLibraryFolderData{});
-    }
-}
-
-static void AppendTouchLibraryFile(StrVecWithData<TouchLibraryFileData>& files, Str path) {
-    if (len(path) > 0 && files.FindI(path) < 0) {
-        files.Append(path, TouchLibraryFileData{});
-    }
-}
-
-static void ScanTouchLibraryRoot(Str root, StrVecWithData<TouchLibraryFolderData>& folders,
+// Dedupe is only needed when a root overlaps one scanned before it (one root
+// nested inside another); the common case appends straight through.
+static void ScanTouchLibraryRoot(Str root, StrVec& scannedRoots, StrVecWithData<TouchLibraryFolderData>& folders,
                                  StrVecWithData<TouchLibraryFileData>& files) {
     TempStr normalized = path::NormalizeTemp(root);
     if (!normalized || !dir::Exists(normalized)) {
         return;
     }
-    AppendTouchLibraryFolder(folders, normalized);
+    bool overlaps = false;
+    for (Str prev : scannedRoots) {
+        if (TouchLibraryPathWithin(normalized, prev) || TouchLibraryPathWithin(prev, normalized)) {
+            overlaps = true;
+            break;
+        }
+    }
+    scannedRoots.Append(normalized);
+    if (!overlaps || folders.FindI(normalized) < 0) {
+        folders.Append(normalized, TouchLibraryFolderData{});
+    }
     DirIter di{normalized};
     di.includeFiles = true;
     di.includeDirs = true;
     di.recurse = true;
     for (DirIterEntry* de : di) {
+        Str path = de->filePath;
+        if (len(path) == 0) {
+            continue;
+        }
         if (IsDirectory(de)) {
-            AppendTouchLibraryFolder(folders, de->filePath);
-        } else if (IsRegularFile(de) && TouchLibraryCanOpenFile(de->filePath)) {
-            AppendTouchLibraryFile(files, de->filePath);
+            if (!overlaps || folders.FindI(path) < 0) {
+                folders.Append(path, TouchLibraryFolderData{});
+            }
+        } else if (IsRegularFile(de) && TouchLibraryCanOpenFile(path)) {
+            if (!overlaps || files.FindI(path) < 0) {
+                files.Append(path, TouchLibraryFileData{});
+            }
         }
     }
+}
+
+static int TouchLibraryFolderLookup(dict::MapStrToInt& byPath, StrVecWithData<TouchLibraryFolderData>& folders,
+                                    Str path) {
+    int idx = -1;
+    if (byPath.Get(path, &idx)) {
+        return idx;
+    }
+    // paths come from the same directory walk so a case mismatch is unusual
+    return folders.FindI(path);
 }
 
 static void FinishTouchLibraryModel(StrVecWithData<TouchLibraryFolderData>& folders,
                                     StrVecWithData<TouchLibraryFileData>& files) {
     SortNatural(&folders);
     SortNatural(&files);
+    dict::MapStrToInt byPath(std::max(len(folders) * 2, 64));
     for (int i = 0; i < len(folders); i++) {
         *folders.AtData(i) = TouchLibraryFolderData{};
+        byPath.Insert(folders[i], i);
     }
-    for (Str filePath : files) {
-        int folder = folders.FindI(path::GetDirTemp(filePath));
+    for (int i = 0; i < len(files); i++) {
+        int folder = TouchLibraryFolderLookup(byPath, folders, path::GetDirTemp(files[i]));
+        files.AtData(i)->folderIdx = folder;
         if (folder >= 0) {
             folders.AtData(folder)->directCount++;
         }
     }
     for (int i = 0; i < len(folders); i++) {
         TempStr parentPath = path::GetDirTemp(folders[i]);
-        int parent = folders.FindI(parentPath);
+        int parent = TouchLibraryFolderLookup(byPath, folders, parentPath);
         if (parent >= 0 && parent != i) {
             folders.AtData(i)->parent = parent;
             folders.AtData(parent)->hasChildren = true;
@@ -2872,16 +2991,202 @@ static void FinishTouchLibraryModel(StrVecWithData<TouchLibraryFolderData>& fold
     }
 }
 
-static void BuildTouchLibraryModel() {
-    HomePageInvalidateLibrary();
+static void SwapStrVec(StrVec* a, StrVec* b) {
+    std::swap(a->first, b->first);
+    std::swap(a->sortIndexes, b->sortIndexes);
+    std::swap(a->nextPageSize, b->nextPageSize);
+    std::swap(a->size, b->size);
+}
+
+// UI thread. Swaps the freshly scanned model in, carrying over thumbnails
+// already rendered for files that are still present.
+static void TouchLibraryScanFinished(TouchLibraryScan* scan) {
+    gTouchLibraryScanning = false;
+    if (scan->gen != gTouchLibraryScanGen) {
+        // stale: the next Library paint starts a fresh scan
+        delete scan;
+        TouchLibraryInvalidateWindows();
+        return;
+    }
+    for (int i = 0; i < len(gTouchLibraryFiles); i++) {
+        TouchLibraryFileData* old = gTouchLibraryFiles.AtData(i);
+        if (!old->thumbnail && !old->thumbnailRequested) {
+            continue;
+        }
+        int idx = scan->files.FindI(gTouchLibraryFiles[i]);
+        if (idx < 0) {
+            continue;
+        }
+        TouchLibraryFileData* fresh = scan->files.AtData(idx);
+        fresh->thumbnail = old->thumbnail;
+        fresh->thumbnailRequested = old->thumbnailRequested;
+        fresh->size = old->size;
+        fresh->sizeFetchedAt = old->sizeFetchedAt;
+        old->thumbnail = nullptr;
+    }
+    for (int i = 0; i < len(gTouchLibraryFiles); i++) {
+        delete gTouchLibraryFiles.AtData(i)->thumbnail;
+    }
+    SwapStrVec(&gTouchLibraryFolders, &scan->folders);
+    SwapStrVec(&gTouchLibraryFiles, &scan->files);
+    delete scan;
+    gTouchLibraryValid = true;
+    TouchLibraryInvalidateWindows();
+}
+
+// The last scan is kept next to the thumbnail cache so a launch shows the
+// Library immediately (walking a cloud-synced folder takes seconds) while
+// the real scan refreshes it in the background. The roots are stored with
+// it: an index made for a different set of roots is ignored.
+#define kTouchLibraryIndexHeader "SumatraPDF library index v1"
+
+static TempStr TouchLibraryIndexPathTemp() {
+    TempStr dir = GetThumbnailCacheDirTemp();
+    if (!dir) {
+        return {};
+    }
+    return path::JoinTemp(dir, StrL("library-index.txt"));
+}
+
+static void SaveTouchLibraryIndex(TouchLibraryScan* scan) {
+    TempStr path = TouchLibraryIndexPathTemp();
+    if (!path) {
+        return;
+    }
+    str::Builder out;
+    out.Append(StrL(kTouchLibraryIndexHeader));
+    out.AppendChar('\n');
+    for (Str root : scan->roots) {
+        out.Append(StrL("root:"));
+        out.Append(root);
+        out.AppendChar('\n');
+    }
+    out.Append(StrL("folders:\n"));
+    for (Str folder : scan->folders) {
+        out.Append(folder);
+        out.AppendChar('\n');
+    }
+    out.Append(StrL("files:\n"));
+    for (Str file : scan->files) {
+        out.Append(file);
+        out.AppendChar('\n');
+    }
+    int err = 0;
+    if (dir::CreateForFile(path, &err)) {
+        file::WriteFile(path, ToStrTemp(out));
+    }
+}
+
+// UI thread, before the first scan. false if there is no usable index.
+static bool LoadTouchLibraryIndex() {
+    TempStr path = TouchLibraryIndexPathTemp();
+    if (!path) {
+        return false;
+    }
+    Str data = file::ReadFile(path);
+    if (!data) {
+        return false;
+    }
+    StrVec lines;
+    Split(&lines, data, StrL("\n"));
+    str::Free(data);
     Vec<Str>* roots = gGlobalPrefs->libraryFolders;
-    if (roots && len(*roots) > 0) {
-        for (Str root : *roots) {
-            ScanTouchLibraryRoot(root, gTouchLibraryFolders, gTouchLibraryFiles);
+    int nRoots = roots ? len(*roots) : 0;
+    int nRootsInIndex = 0;
+    StrVecWithData<TouchLibraryFolderData> folders;
+    StrVecWithData<TouchLibraryFileData> files;
+    int section = 0; // 0: roots, 1: folders, 2: files
+    for (int i = 0; i < len(lines); i++) {
+        Str line = lines[i];
+        str::TrimWSInPlace(line, str::TrimOpt::Right);
+        if (len(line) == 0) {
+            continue;
+        }
+        if (i == 0) {
+            if (!str::Eq(line, StrL(kTouchLibraryIndexHeader))) {
+                return false;
+            }
+        } else if (str::Eq(line, StrL("folders:"))) {
+            section = 1;
+        } else if (str::Eq(line, StrL("files:"))) {
+            section = 2;
+        } else if (section == 0) {
+            Str root = line;
+            if (!str::TrimPrefix(root, StrL("root:")) || nRootsInIndex >= nRoots ||
+                !str::Eq(root, (*roots)[nRootsInIndex])) {
+                return false;
+            }
+            nRootsInIndex++;
+        } else if (section == 1) {
+            folders.Append(line, TouchLibraryFolderData{});
+        } else {
+            files.Append(line, TouchLibraryFileData{});
         }
     }
-    FinishTouchLibraryModel(gTouchLibraryFolders, gTouchLibraryFiles);
+    if (nRootsInIndex != nRoots || len(folders) == 0) {
+        return false;
+    }
+    FinishTouchLibraryModel(folders, files);
+    for (int i = 0; i < len(gTouchLibraryFiles); i++) {
+        delete gTouchLibraryFiles.AtData(i)->thumbnail;
+    }
+    SwapStrVec(&gTouchLibraryFolders, &folders);
+    SwapStrVec(&gTouchLibraryFiles, &files);
+    // shown as-is until the scan started right after replaces it
     gTouchLibraryValid = true;
+    return true;
+}
+
+static void TouchLibraryScanThread(TouchLibraryScan* scan) {
+    StrVec scannedRoots;
+    for (Str root : scan->roots) {
+        ScanTouchLibraryRoot(root, scannedRoots, scan->folders, scan->files);
+    }
+    FinishTouchLibraryModel(scan->folders, scan->files);
+    SaveTouchLibraryIndex(scan);
+    uitask::Post(MkFunc0<TouchLibraryScan>(TouchLibraryScanFinished, scan), "TouchLibraryScanFinished");
+}
+
+static void StartTouchLibraryScan() {
+    if (gTouchLibraryScanning || !gGlobalPrefs) {
+        return;
+    }
+    static bool triedIndex = false;
+    if (!triedIndex) {
+        triedIndex = true;
+        LoadTouchLibraryIndex();
+    }
+    gTouchLibraryScanning = true;
+    auto* scan = new TouchLibraryScan();
+    scan->gen = gTouchLibraryScanGen;
+    Vec<Str>* roots = gGlobalPrefs->libraryFolders;
+    if (roots) {
+        for (Str root : *roots) {
+            scan->roots.Append(root);
+        }
+    }
+    RunAsync(MkFunc0<TouchLibraryScan>(TouchLibraryScanThread, scan), "TouchLibraryScan");
+}
+
+// True while the model on screen is being (re)built in the background.
+static bool TouchLibraryLoading() {
+    if (!gTouchLibraryValid) {
+        StartTouchLibraryScan();
+    }
+    return !gTouchLibraryValid;
+}
+
+static i64 TouchLibraryFileSize(int fileIdx, Str filePath) {
+    if (fileIdx < 0) {
+        return file::GetSize(filePath);
+    }
+    TouchLibraryFileData* data = gTouchLibraryFiles.AtData(fileIdx);
+    u32 now = GetTickCount();
+    if (data->size == kSizeNotFetched || now - data->sizeFetchedAt > (u32)kHomeFileSizeCacheMs) {
+        data->size = file::GetSize(filePath);
+        data->sizeFetchedAt = now;
+    }
+    return data->size;
 }
 
 static TempStr PickTouchLibraryFolderTemp(MainWindow* win) {
@@ -3274,9 +3579,7 @@ static bool TouchLibraryFolderVisible(MainWindow* win, const StrVecWithData<Touc
     HdcFillRect(hdc, Rect{leftDx, headerDy - 1, rc.dx - leftDx, 1}, ThemeEdgeColor());
     SetBkMode(hdc, TRANSPARENT);
 
-    if (!gTouchLibraryValid) {
-        BuildTouchLibraryModel();
-    }
+    TouchLibraryLoading();
     auto& folders = gTouchLibraryFolders;
     auto& files = gTouchLibraryFiles;
     if (len(folders) > 0) {
@@ -3380,7 +3683,7 @@ static bool TouchLibraryFolderVisible(MainWindow* win, const StrVecWithData<Touc
             CreateThumbnailFromFileAsync(filePath, 1, onRendered);
         }
         DrawTouchFileCardPath(win, hdc, filePath, gFileHistory.FindByPath(filePath), fileData->thumbnail, card, false,
-                              nullptr, true, true);
+                              nullptr, true, true, TouchLibraryFileSize(fileIdx, filePath));
     }
     if (len(selectedFiles) == 0) {
         Rect empty{leftDx + DpiScale(hdc, 40), headerDy + DpiScale(hdc, 40), rc.dx - leftDx - DpiScale(hdc, 80),
@@ -3807,9 +4110,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     HdcFillRect(hdc, Rect{leftDx, headerDy - 1, rc.dx - leftDx, 1}, ThemeEdgeColor());
     SetBkMode(hdc, TRANSPARENT);
 
-    if (!gTouchLibraryValid) {
-        BuildTouchLibraryModel();
-    }
+    bool libraryLoading = TouchLibraryLoading();
     auto& folders = gTouchLibraryFolders;
     auto& files = gTouchLibraryFiles;
     // the sidebar's "Recent" row: the content pane then shows the recent files
@@ -3833,17 +4134,17 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     int clearBtnDx = DpiScale(hdc, 38);
     bool scopeActive = !win->librarySearchFolderScope.IsEmpty();
     if (hasSidebar) {
-    FillHomeRoundRect(hdc, search, search.dy / 2, ThemeTouchSurfaceColor(), ThemeEdgeColor());
-    int searchIconDy = DpiScale(hdc, 16);
-    HIMAGELIST searchIcons =
-        GetTintedToolbarImageList(searchIconDy, ThemeWindowDarkerTextColor(), ThemeWindowControlBackgroundColor());
-    if (searchIcons) {
-        ImageList_Draw(searchIcons, (int)TbIcon::Search, hdc, search.x + DpiScale(hdc, 14),
-                       search.y + (search.dy - searchIconDy) / 2, ILD_NORMAL);
-    }
-    MoveWindow(win->hwndHomeSearch, search.x + DpiScale(hdc, 38), search.y + DpiScale(hdc, 4),
-               search.dx - DpiScale(hdc, 38) - filterBtnDx - clearBtnDx, search.dy - DpiScale(hdc, 8), TRUE);
-    HwndShow(win->hwndHomeSearch);
+        FillHomeRoundRect(hdc, search, search.dy / 2, ThemeTouchSurfaceColor(), ThemeEdgeColor());
+        int searchIconDy = DpiScale(hdc, 16);
+        HIMAGELIST searchIcons =
+            GetTintedToolbarImageList(searchIconDy, ThemeWindowDarkerTextColor(), ThemeWindowControlBackgroundColor());
+        if (searchIcons) {
+            ImageList_Draw(searchIcons, (int)TbIcon::Search, hdc, search.x + DpiScale(hdc, 14),
+                           search.y + (search.dy - searchIconDy) / 2, ILD_NORMAL);
+        }
+        MoveWindow(win->hwndHomeSearch, search.x + DpiScale(hdc, 38), search.y + DpiScale(hdc, 4),
+                   search.dx - DpiScale(hdc, 38) - filterBtnDx - clearBtnDx, search.dy - DpiScale(hdc, 8), TRUE);
+        HwndShow(win->hwndHomeSearch);
     } // hasSidebar
     TempStr query = HwndGetTextTemp(win->hwndHomeSearch);
     // Cleared or edited out from under it: the "N Files" row that put us here
@@ -3888,7 +4189,11 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     }
 
     int selected = win->librarySelectedFolderPath ? folders.FindI(win->librarySelectedFolderPath) : -1;
-    if (selected < 0 || (selected < len(folders) && TouchLibraryFolderHidden(folders, selected))) {
+    // a just-added root isn't in the model until the rescan lands; keep its
+    // path selected rather than falling back to the first folder
+    bool selectionPending = selected < 0 && libraryLoading && win->librarySelectedFolderPath;
+    if (!selectionPending &&
+        (selected < 0 || (selected < len(folders) && TouchLibraryFolderHidden(folders, selected)))) {
         TouchLibrarySelectFallback(win);
         selected = win->librarySelectedFolderPath ? folders.FindI(win->librarySelectedFolderPath) : -1;
     }
@@ -4050,8 +4355,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
             if (!str::ContainsI(path::GetBaseNameTemp(filePath), query)) {
                 continue;
             }
-            TempStr parentPath = path::GetDirTemp(filePath);
-            int folderIdx = folders.FindI(parentPath);
+            int folderIdx = files.AtData(i)->folderIdx;
             if (folderIdx < 0 || TouchLibraryFolderHidden(folders, folderIdx) ||
                 !TouchLibraryFolderInSearchScope(win, folders, folderIdx)) {
                 continue;
@@ -4073,13 +4377,12 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                     drawSidebarRowBg(row);
                 }
                 COLORREF fg = isSelected ? selFg : ThemeWindowTextColor();
-                Rect icon{row.x + DpiScale(hdc, 10) + DpiScale(hdc, 1), row.y + DpiScale(hdc, 1),
-                          DpiScale(hdc, 16), DpiScale(hdc, 16)};
+                Rect icon{row.x + DpiScale(hdc, 10) + DpiScale(hdc, 1), row.y + DpiScale(hdc, 1), DpiScale(hdc, 16),
+                          DpiScale(hdc, 16)};
                 DrawTouchLibraryPdfIcon(hdc, icon);
                 Rect nameRect{icon.x + icon.dx + DpiScale(hdc, 11), row.y, row.dx - DpiScale(hdc, 60), row.dy};
                 SetTextColor(hdc, fg);
-                Str filesLabel =
-                    fileMatchCount == 1 ? StrL("1 File") : fmt("%d Files", fileMatchCount);
+                Str filesLabel = fileMatchCount == 1 ? StrL("1 File") : fmt("%d Files", fileMatchCount);
                 HdcDrawText(hdc, filesLabel, nameRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
                             HdcGetUiFont(hdc, 13, FW_MEDIUM));
                 win->staticLinks.Append(
@@ -4132,21 +4435,21 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
 
     Rect manage{DpiScale(hdc, 12), rc.dy - DpiScale(hdc, 56), leftDx - DpiScale(hdc, 24), DpiScale(hdc, 44)};
     if (hasSidebar) {
-    SetTextColor(hdc, ThemeWindowLinkColor());
-    Rect manageIcon{manage.x + DpiScale(hdc, 4), manage.y, DpiScale(hdc, 20), manage.dy};
-    DrawTouchLibraryFolderIcon(hdc, manageIcon, ThemeWindowLinkColor(), ThemeHotBackgroundColor());
-    Gdiplus::Graphics manageGraphics(hdc);
-    manageGraphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    Gdiplus::Pen managePen(GdiRgbFromCOLORREF(ThemeWindowLinkColor()), 1.6f);
-    float plusX = (float)manageIcon.x + manageIcon.dx * 0.77f;
-    float plusY = (float)manageIcon.y + manageIcon.dy * 0.38f;
-    float plusArm = (float)DpiScale(hdc, 3);
-    manageGraphics.DrawLine(&managePen, plusX - plusArm, plusY, plusX + plusArm, plusY);
-    manageGraphics.DrawLine(&managePen, plusX, plusY - plusArm, plusX, plusY + plusArm);
-    Rect manageText{manage.x + DpiScale(hdc, 34), manage.y, manage.dx - DpiScale(hdc, 34), manage.dy};
-    HdcDrawText(hdc, StrL("Manage folders"), manageText, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
-                HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
-    win->staticLinks.Append(new StaticLink(manage, Str(kLinkLibraryManage)));
+        SetTextColor(hdc, ThemeWindowLinkColor());
+        Rect manageIcon{manage.x + DpiScale(hdc, 4), manage.y, DpiScale(hdc, 20), manage.dy};
+        DrawTouchLibraryFolderIcon(hdc, manageIcon, ThemeWindowLinkColor(), ThemeHotBackgroundColor());
+        Gdiplus::Graphics manageGraphics(hdc);
+        manageGraphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::Pen managePen(GdiRgbFromCOLORREF(ThemeWindowLinkColor()), 1.6f);
+        float plusX = (float)manageIcon.x + manageIcon.dx * 0.77f;
+        float plusY = (float)manageIcon.y + manageIcon.dy * 0.38f;
+        float plusArm = (float)DpiScale(hdc, 3);
+        manageGraphics.DrawLine(&managePen, plusX - plusArm, plusY, plusX + plusArm, plusY);
+        manageGraphics.DrawLine(&managePen, plusX, plusY - plusArm, plusX, plusY + plusArm);
+        Rect manageText{manage.x + DpiScale(hdc, 34), manage.y, manage.dx - DpiScale(hdc, 34), manage.dy};
+        HdcDrawText(hdc, StrL("Manage folders"), manageText, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
+        win->staticLinks.Append(new StaticLink(manage, Str(kLinkLibraryManage)));
     } // hasSidebar
 
     Str selectedPath = selected >= 0 && selected < len(folders) ? folders[selected] : Str{};
@@ -4279,7 +4582,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         // "\x01recent"/"\x01search:..." cannot collide with a path, so Recent
         // and search results are always distinct destinations from a folder
         // (or from each other, across different queries)
-        Str swapKey = recentSelected ? StrL("\x01recent")
+        Str swapKey = recentSelected       ? StrL("\x01recent")
                       : showingSearchFiles ? fmt("\x01search:%s", query)
                                            : selectedPath;
         Rect contentRc{leftDx, headerDy, std::max(0, rc.dx - leftDx), std::max(0, rc.dy - headerDy)};
@@ -4298,8 +4601,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                 if (!str::ContainsI(path::GetBaseNameTemp(files[i]), query)) {
                     continue;
                 }
-                TempStr parentPath = path::GetDirTemp(files[i]);
-                int folderIdx = folders.FindI(parentPath);
+                int folderIdx = files.AtData(i)->folderIdx;
                 if (folderIdx < 0 || TouchLibraryFolderHidden(folders, folderIdx) ||
                     !TouchLibraryFolderInSearchScope(win, folders, folderIdx)) {
                     continue;
@@ -4312,9 +4614,11 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                     selectedFolders.Append(i);
                 }
             }
-            for (int i = 0; i < len(files); i++) {
-                if (selectedPath && str::EqI(path::GetDirTemp(files[i]), selectedPath)) {
-                    selectedFiles.Append(i);
+            if (selectedPath && selected >= 0) {
+                for (int i = 0; i < len(files); i++) {
+                    if (files.AtData(i)->folderIdx == selected) {
+                        selectedFiles.Append(i);
+                    }
                 }
             }
         }
@@ -4363,7 +4667,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                 } else {
                     itemPath = files[idx];
                     name = path::GetBaseNameTemp(itemPath);
-                    i64 size = file::GetSize(itemPath);
+                    i64 size = TouchLibraryFileSize(idx, itemPath);
                     meta = size >= 0 ? str::FormatSizeShortTemp(size, nullptr) : str::DupTemp("");
                     target = str::DupTemp(itemPath);
                     Rect pdfIcon{icon.x + DpiScale(hdc, 1), icon.y + DpiScale(hdc, 1), DpiScale(hdc, 16),
@@ -4416,7 +4720,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                     CreateThumbnailFromFileAsync(filePath, 1, onRendered);
                 }
                 DrawTouchFileCardPath(win, hdc, filePath, gFileHistory.FindByPath(filePath), fileData->thumbnail, card,
-                                      false, &filesClip, true, true);
+                                      false, &filesClip, true, true, TouchLibraryFileSize(fileIdx, filePath));
             }
         }
         if (itemCount == 0) {
@@ -4424,7 +4728,9 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                        DpiScale(hdc, 40)};
             SetTextColor(hdc, ThemeWindowDarkerTextColor());
             Str message;
-            if (showingSearchFiles) {
+            if (libraryLoading && (len(folders) == 0 || selectionPending)) {
+                message = StrL("Loading your Library…");
+            } else if (showingSearchFiles) {
                 message = fmt("No files match “%s”.", query);
             } else if (len(folders) == 0) {
                 message = StrL("Add a folder to build your Library.");

@@ -1412,12 +1412,16 @@ HIMAGELIST BuildStdToolbarImageList(int dx) {
     return BuildTintedToolbarImageList(dx, ThemeWindowTextColor(), ThemeControlBackgroundColor());
 }
 
-// Cached tinted icon lists. Building one rasterizes every svg icon, so callers
-// that draw an icon per paint (the home cards' badges, the sidebar's filter
-// magnifier, the accent button) must not build one each time. A handful of
-// color pairs are in use at once, hence a small multi-entry cache rather than
-// a single slot - alternating pairs would thrash one slot.
-constexpr int kTintedImlCacheCount = 4;
+// Cached tinted icon lists. Building one rasterizes every svg icon (through a
+// fresh mupdf context), so callers that draw an icon per paint (the home
+// cards' badges, the sidebar's filter magnifier, the accent button) must not
+// build one each time. The touch Library page alone draws icons in ~10
+// distinct (size, fg, bg) combinations per paint - with fewer slots than that
+// the round-robin eviction thrashed and every hover frame re-rasterized the
+// whole icon set several times over (measured at 170-570 ms per paint). Size
+// the cache so a whole page's worth of variants, in both themes, stays
+// resident; a 48px list is ~400 KB, so even a full cache is a few MB.
+constexpr int kTintedImlCacheCount = 32;
 static HIMAGELIST gTintedIml[kTintedImlCacheCount];
 static int gTintedImlDy[kTintedImlCacheCount];
 static COLORREF gTintedImlFg[kTintedImlCacheCount];

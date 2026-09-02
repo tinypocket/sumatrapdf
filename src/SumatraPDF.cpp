@@ -1124,21 +1124,62 @@ struct CreateThumbnailFromFileData {
     Str filePath;
     int pageNo = 1;
     const OnBitmapRendered* onRendered = nullptr;
+    // page-1 thumbnails go through the on-disk cache (%APPDATA%/sumatrapdfcache),
+    // the same one the file history uses, so a Library card only renders once
+    bool useDiskCache = false;
     Pixmap* bmp = nullptr;
-    ~CreateThumbnailFromFileData() { str::Free(filePath); }
+    RenderedBitmap* thumbnail = nullptr;
+    ~CreateThumbnailFromFileData() {
+        str::Free(filePath);
+        delete thumbnail;
+    }
 };
 
+// Each render loads the document on its own thread; the Library used to start
+// one per visible card per paint, which is dozens of concurrent MuPDF loads.
+// Cap the renders in flight and serve the newest requests first so the cards
+// on screen come up before ones that were scrolled past.
+constexpr int kMaxThumbnailRenders = 2;
+static Vec<CreateThumbnailFromFileData*> gThumbnailQueue;
+static int gThumbnailRendersInFlight = 0;
+// file-history requests have no callback and are deduped by path
+static StrVec gThumbnailPathsPending;
+
+static void CreateThumbnailFromFileThread(CreateThumbnailFromFileData* d);
+
+static void PumpThumbnailQueue() {
+    while (gThumbnailRendersInFlight < kMaxThumbnailRenders && len(gThumbnailQueue) > 0) {
+        CreateThumbnailFromFileData* d = gThumbnailQueue.Pop();
+        gThumbnailRendersInFlight++;
+        auto fn = MkFunc0<CreateThumbnailFromFileData>(CreateThumbnailFromFileThread, d);
+        RunAsync(fn, "CreateThumbnailFromFile");
+    }
+}
+
 static void CreateThumbnailFromFileFinish(CreateThumbnailFromFileData* d) {
-    RenderedBitmap* thumbnail = RenderedBitmapFromPixmap(d->bmp);
-    d->bmp = nullptr;
+    gThumbnailRendersInFlight--;
+    RenderedBitmap* thumbnail = d->thumbnail;
+    d->thumbnail = nullptr;
+    if (!thumbnail) {
+        thumbnail = RenderedBitmapFromPixmap(d->bmp);
+        d->bmp = nullptr;
+    }
     if (d->onRendered) {
         d->onRendered->Call(thumbnail);
         delete d->onRendered;
     } else {
+        gThumbnailPathsPending.Remove(d->filePath);
         FileState* fs = gFileHistory.FindByPath(d->filePath);
-        SetThumbnail(fs, thumbnail);
+        // the thread already wrote the png
+        if (fs && thumbnail && !thumbnail->GetSize().IsEmpty()) {
+            delete fs->thumbnail;
+            fs->thumbnail = thumbnail;
+        } else {
+            delete thumbnail;
+        }
     }
     delete d;
+    PumpThumbnailQueue();
 }
 
 static void QueueThumbnailFromFileFinish(CreateThumbnailFromFileData* d) {
@@ -1147,6 +1188,13 @@ static void QueueThumbnailFromFileFinish(CreateThumbnailFromFileData* d) {
 }
 
 static void CreateThumbnailFromFileThread(CreateThumbnailFromFileData* d) {
+    if (d->useDiskCache) {
+        d->thumbnail = LoadThumbnailForFile(d->filePath);
+        if (d->thumbnail) {
+            QueueThumbnailFromFileFinish(d);
+            return;
+        }
+    }
     HwndPasswordUI pwdUI(nullptr);
     EngineBase* engine = CreateEngineFromFile(d->filePath, &pwdUI, true);
     if (!engine) {
@@ -1173,16 +1221,33 @@ static void CreateThumbnailFromFileThread(CreateThumbnailFromFileData* d) {
     RenderPageArgs args(pageNo, zoom, 0, &pageRect);
     d->bmp = engine->RenderPage(args);
     engine->Release();
+    if (d->useDiskCache && d->bmp) {
+        // encode the png here rather than on the UI thread
+        d->thumbnail = RenderedBitmapFromPixmap(d->bmp);
+        d->bmp = nullptr;
+        if (d->thumbnail && !d->thumbnail->GetSize().IsEmpty()) {
+            SaveThumbnailForFile(d->filePath, d->thumbnail);
+        }
+    }
     QueueThumbnailFromFileFinish(d);
+}
+
+static void QueueThumbnailRender(CreateThumbnailFromFileData* d) {
+    gThumbnailQueue.Append(d);
+    PumpThumbnailQueue();
 }
 
 // create a thumbnail by loading the file with a temporary engine
 // used for lazy-loaded files that don't have a loaded controller
 void CreateThumbnailFromFileAsync(FileState* ds) {
+    if (!ds || len(ds->filePath) == 0 || gThumbnailPathsPending.Contains(ds->filePath)) {
+        return;
+    }
+    gThumbnailPathsPending.Append(ds->filePath);
     auto* d = new CreateThumbnailFromFileData();
     d->filePath = str::Dup(ds->filePath);
-    auto fn = MkFunc0<CreateThumbnailFromFileData>(CreateThumbnailFromFileThread, d);
-    RunAsync(fn, "CreateThumbnailFromFile");
+    d->useDiskCache = true;
+    QueueThumbnailRender(d);
 }
 
 // Renders an arbitrary page without adding the document to file history. The
@@ -1192,8 +1257,8 @@ void CreateThumbnailFromFileAsync(Str filePath, int pageNo, const OnBitmapRender
     d->filePath = str::Dup(filePath);
     d->pageNo = pageNo;
     d->onRendered = onRendered;
-    auto fn = MkFunc0<CreateThumbnailFromFileData>(CreateThumbnailFromFileThread, d);
-    RunAsync(fn, "CreateThumbnailFromFilePage");
+    d->useDiskCache = pageNo == 1;
+    QueueThumbnailRender(d);
 }
 
 static void CreateThumbnailForFile(MainWindow* win, FileState* ds) {

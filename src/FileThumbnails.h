@@ -19,6 +19,8 @@ RenderedBitmap* LoadThumbnail(FileState* fs);
 bool HasThumbnail(FileState* fs);
 void SetThumbnail(FileState* fs, RenderedBitmap* bmp);
 void SaveThumbnail(FileState* fs);
+RenderedBitmap* LoadThumbnailForFile(Str filePath);
+void SaveThumbnailForFile(Str filePath, RenderedBitmap* thumbnail);
 void RemoveThumbnail(FileState* fs);
 
 TempStr GetThumbnailCacheDirTemp();

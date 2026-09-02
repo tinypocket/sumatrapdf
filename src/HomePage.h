@@ -99,6 +99,7 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
 void HomePageFocusSearch(MainWindow* win);
 void HomePageDestroySearch(MainWindow* win);
 void HomePageInvalidateLibrary();
+void FreeTouchLibraryModel();
 void AddTouchLibraryFolder(MainWindow* win);
 bool HandleTouchLibraryLink(MainWindow* win, Str url);
 void SelectTouchLibraryFolder(MainWindow* win, Str folderPath);
