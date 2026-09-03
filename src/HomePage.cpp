@@ -4215,7 +4215,8 @@ static void DrawTouchLibraryFolderCard(MainWindow* win, HDC hdc, Str folderPath,
     COLORREF pageBg = ThemeWindowControlBackgroundColor();
     // Folders are square tiles, smaller than the portrait file cards, so a
     // listing reads as "some folders, then documents" at a glance and a
-    // folder-heavy level does not fill the screen with blank cards.
+    // folder-heavy level does not fill the screen with blank cards. The name
+    // still gets two lines: folder names are the longest text on the page.
     bool compact = card.dx < DpiScale(hdc, 130);
     DrawHomeShadow(hdc, card, DpiScale(hdc, 10), pageBg);
     FillHomeRoundRect(hdc, card, DpiScale(hdc, 10), RGB(255, 255, 255), ThemeEdgeColor());
@@ -4227,11 +4228,14 @@ static void DrawTouchLibraryFolderCard(MainWindow* win, HDC hdc, Str folderPath,
     }
 
     TempStr name = path::GetBaseNameTemp(folderPath);
-    Rect nameRect{card.x, card.y + card.dy + DpiScale(hdc, 9), card.dx, DpiScale(hdc, compact ? 19 : 38)};
+    Rect nameRect{card.x, card.y + card.dy + DpiScale(hdc, 9), card.dx, DpiScale(hdc, 38)};
     SetTextColor(hdc, ThemeWindowTextColor());
-    UINT nameFlags = DT_END_ELLIPSIS | DT_NOPREFIX | (compact ? DT_SINGLELINE : DT_WORDBREAK);
-    HdcDrawText(hdc, name, nameRect, nameFlags, HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
-    Rect metaRect{nameRect.x, nameRect.y + nameRect.dy + DpiScale(hdc, 1), nameRect.dx, DpiScale(hdc, 17)};
+    UINT nameFlags = DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX;
+    HFONT nameFont = HdcGetUiFont(hdc, 13, FW_SEMIBOLD);
+    HdcDrawText(hdc, name, nameRect, nameFlags, nameFont);
+    // the count sits right under the name, whether it took one line or two
+    int nameDy = std::min(nameRect.dy, HdcMeasureText(hdc, name, nameRect.dx, nameFlags, nameFont).dy);
+    Rect metaRect{nameRect.x, nameRect.y + nameDy + DpiScale(hdc, 1), nameRect.dx, DpiScale(hdc, 17)};
     SetTextColor(hdc, ThemeWindowDarkerTextColor());
     HdcDrawText(hdc, TouchLibraryFolderSummaryTemp(data), metaRect, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
                 HdcGetUiFont(hdc, 12));
@@ -4899,15 +4903,15 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         int columns = TouchCardColumns(win->hwndCanvas, rc.dx - leftDx - 2 * pad);
         // search results carry a third line under each card / a second line
         // in each row: the folder the match lives in
-        int cardStepY = cardDy + DpiScale(hdc, showingSearchFiles ? 88 : 70);
+        int cardStepY = cardDy + DpiScale(hdc, showingSearchFiles ? 102 : 70);
         int listPadY = DpiScale(hdc, 8);
         int listRowDy = DpiScale(hdc, showingSearchFiles ? 58 : 44);
         // folders: a denser grid of square tiles above the file cards (see
-        // DrawTouchLibraryFolderCard), with a one-line name and count under each
+        // DrawTouchLibraryFolderCard), with a two-line name and count under each
         int tileDx = DpiScale(hdc, 112);
         int tileGap = DpiScale(hdc, 16);
         int tileColumns = std::max(1, (rc.dx - leftDx - 2 * pad + tileGap) / (tileDx + tileGap));
-        int tileStepY = tileDx + DpiScale(hdc, 60);
+        int tileStepY = tileDx + DpiScale(hdc, 80);
         int foldersBlockDy = TouchCardRows(len(selectedFolders), tileColumns) * tileStepY;
         if (foldersBlockDy > 0 && len(selectedFiles) > 0) {
             foldersBlockDy += DpiScale(hdc, 8);

@@ -738,6 +738,9 @@ void DisplayModel::InvalidateSmartMargins() {
     smartScanRunning = false;
     smartHfChecked = false;
     pageBodies.Reset();
+    // tiles rendered for the old crop don't fit the new page slots: the page
+    // came out scaled and clipped until a zoom change re-rendered it
+    gRenderCache->FreeForDisplayModel(this);
 }
 
 // From the scan's cache; a page not scanned yet reads as "no band" and kicks
