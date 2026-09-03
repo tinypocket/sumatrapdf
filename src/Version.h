@@ -5,11 +5,15 @@
 #include "BuildConfig.h"
 
 // CURR_VERSION can be over-written externally
+// SumatraPDF+ fork: the third component is the fork's own release number, so
+// successive fork builds compare as newer (CompareProgramVersion treats a
+// missing component as 0, so 3.7.1 > 3.7). Bump it for every release, or the
+// update check sees the same version and reports "You have the latest version".
 #ifndef CURR_VERSION
-#define CURR_VERSION 3.7
+#define CURR_VERSION 3.7.18
 #endif
 #ifndef CURR_VERSION_COMMA
-#define CURR_VERSION_COMMA 3,7,0
+#define CURR_VERSION_COMMA 3, 7, 18
 #endif
 
 // this is sth. like "3.5"
@@ -31,30 +35,32 @@
 // version as displayed in UI and included in resources
 // CURR_VERSION is 3.6.16105 for pre-release builds
 #ifndef PRE_RELEASE_VER
- #ifndef VER_QUALIFIER
-  #define CURR_VERSION_STRA QM(CURR_VERSION)
- #else
-  #define CURR_VERSION_STRA QM2(CURR_VERSION, VER_QUALIFIER)
- #endif
- #define VER_RESOURCE_STR  CURR_VERSION_STRA
- #define VER_RESOURCE      CURR_VERSION_COMMA,0
- #define UPDATE_CHECK_VER  TEXT(QM(CURR_VERSION))
- #define UPDATE_CHECK_VERA QM(CURR_VERSION)
+#ifndef VER_QUALIFIER
+#define CURR_VERSION_STRA QM(CURR_VERSION)
 #else
- #ifndef VER_QUALIFIER
-   #define CURR_VERSION_STRA QM3(CURR_VERSION, ., PRE_RELEASE_VER)
-   #define VER_RESOURCE_STR  QM3(CURR_VERSION, .0., PRE_RELEASE_VER)
- #else
-   #define CURR_VERSION_STRA QM4(CURR_VERSION, ., PRE_RELEASE_VER, VER_QUALIFIER)
-   #define VER_RESOURCE_STR  QM4(CURR_VERSION, .0., PRE_RELEASE_VER, VER_QUALIFIER)
- #endif
- #define VER_RESOURCE      CURR_VERSION_COMMA,PRE_RELEASE_VER
- #define UPDATE_CHECK_VER  TEXT(QM(PRE_RELEASE_VER))
- #define UPDATE_CHECK_VERA QM(PRE_RELEASE_VER)
+#define CURR_VERSION_STRA QM2(CURR_VERSION, VER_QUALIFIER)
+#endif
+#define VER_RESOURCE_STR CURR_VERSION_STRA
+#define VER_RESOURCE CURR_VERSION_COMMA, 0
+#define UPDATE_CHECK_VER TEXT(QM(CURR_VERSION))
+#define UPDATE_CHECK_VERA QM(CURR_VERSION)
+#else
+#ifndef VER_QUALIFIER
+#define CURR_VERSION_STRA QM3(CURR_VERSION, ., PRE_RELEASE_VER)
+#define VER_RESOURCE_STR QM3(CURR_VERSION, .0., PRE_RELEASE_VER)
+#else
+#define CURR_VERSION_STRA QM4(CURR_VERSION, ., PRE_RELEASE_VER, VER_QUALIFIER)
+#define VER_RESOURCE_STR QM4(CURR_VERSION, .0., PRE_RELEASE_VER, VER_QUALIFIER)
+#endif
+#define VER_RESOURCE CURR_VERSION_COMMA, PRE_RELEASE_VER
+#define UPDATE_CHECK_VER TEXT(QM(PRE_RELEASE_VER))
+#define UPDATE_CHECK_VERA QM(PRE_RELEASE_VER)
 #endif
 #define CURR_VERSION_STR TEXT(CURR_VERSION_STRA)
 
-#define kCopyrightStr      "Copyright 2006-2026 all authors (GPLv3)"
-#define kPublisherStr      "Krzysztof Kowalczyk"
+#define kCopyrightStr "Copyright 2006-2026 all authors (GPLv3)"
+#define kPublisherStr "Krzysztof Kowalczyk"
 
-#define kAppName        "SumatraPDF"
+#define kAppName "SumatraPDF+"
+#define kAppNameW L"SumatraPDF+"
+#define kAppRegistryName "SumatraPDFPlus"

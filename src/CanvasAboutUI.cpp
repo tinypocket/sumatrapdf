@@ -19,6 +19,18 @@
 #include "Theme.h"
 #include "FileHistory.h"
 #include "AppSettings.h"
+#include "Rail.h"
+#include "TopBar.h"
+
+#ifndef WM_POINTERUPDATE
+#define WM_POINTERUPDATE 0x0245
+#define WM_POINTERDOWN 0x0246
+#define WM_POINTERUP 0x0247
+#endif
+
+#ifndef WM_POINTERCAPTURECHANGED
+#define WM_POINTERCAPTURECHANGED 0x024C
+#endif
 
 static void OnPaintAbout(MainWindow* win) {
     auto t = TimeGet();
@@ -89,6 +101,7 @@ static void OnMouseLeftButtonUpAbout(MainWindow* win, int x, int y, WPARAM /*key
     bool clickedURL = url && str::Eq(url, win->urlOnLastButtonDown);
     str::FreePtr(&win->urlOnLastButtonDown);
     if (!clickedURL) {
+        CloseTouchLibraryTransientUi(win);
         return;
     }
     if (str::Eq(url, kLinkOpenFile)) {
@@ -115,13 +128,44 @@ static void OnMouseLeftButtonUpAbout(MainWindow* win, int x, int y, WPARAM /*key
     } else if (str::TrimPrefix(url, kLinkHomeRemoveFilePrefix)) {
         ForgetFileFromFrequentlyRead(win, url);
     } else if (str::TrimPrefix(url, kLinkHomePinFilePrefix)) {
+        // Pinning works from both the Recent view and the Library grid. A file
+        // browsed in the Library may have no history entry yet, so create one so
+        // it can be pinned straight into the Recent view's Pinned section.
         FileState* fs = gFileHistory.FindByPath(url);
+        if (!fs) {
+            fs = NewFileState(url);
+            gFileHistory.Append(fs);
+        }
         if (fs) {
             fs->isPinned = !fs->isPinned;
+            // the link rects are still the ones the tap hit, so start the
+            // flight before HomePageStartPinFlight's own invalidate rebuilds
+            // them; it repaints the canvas either way, flight or not (see its
+            // comment for why a broader win->RedrawAll() would starve it)
+            HomePageStartPinFlight(win, str::JoinTemp(kLinkHomePinFilePrefix, url), false, fs->isPinned);
             SaveSettings();
             win->DeleteToolTip();
-            win->RedrawAll(true);
         }
+    } else if (HandleTouchHomeLink(win, url)) {
+        // handled against the real native tab collection
+    } else if (str::TrimPrefix(url, kLinkLibraryFolderPrefix)) {
+        SelectTouchLibraryFolder(win, url);
+    } else if (str::TrimPrefix(url, kLinkLibraryFolderCardPrefix)) {
+        // same destination as kLinkLibraryFolderPrefix - see its declaration
+        // for why content-pane elements get their own prefix
+        SelectTouchLibraryFolder(win, url);
+    } else if (str::TrimPrefix(url, kLinkLibraryTogglePrefix)) {
+        int expanded = win->libraryExpandedFolderPaths.FindI(url);
+        if (expanded >= 0) {
+            win->libraryExpandedFolderPaths.RemoveAt(expanded);
+        } else {
+            win->libraryExpandedFolderPaths.Append(url);
+        }
+        win->RedrawAll(true);
+    } else if (str::Eq(url, kLinkLibraryAddFolder)) {
+        AddTouchLibraryFolder(win);
+    } else if (HandleTouchLibraryLink(win, url)) {
+        // handled by the Library's pinned/hidden/manage-folder state machine
     } else if (str::StartsWith(url, StrL("Cmd"))) {
         int cmdId = GetCommandIdByName(url);
         if (cmdId > 0) {
@@ -136,6 +180,7 @@ static void OnMouseLeftButtonUpAbout(MainWindow* win, int x, int y, WPARAM /*key
         // assume it's a thumbnail of a document
         auto path = url;
         ReportIf(!path);
+        SetTouchView(win, TouchView::Doc);
         LoadArgs args(path, win);
         // ctrl forces always opening
         args.activateExisting = !IsCtrlPressed();
@@ -160,11 +205,15 @@ static void OnMouseRightButtonUpAbout(MainWindow* win, int x, int y, WPARAM /*ke
 }
 
 static LRESULT OnSetCursorAbout(MainWindow* win, HWND hwnd) {
+    if (HomePageSetLibraryResizeCursor(win)) {
+        return TRUE;
+    }
     Point pt = HwndGetCursorPos(hwnd);
     if (!pt.IsEmpty()) {
         StaticLink* link = nullptr;
         if (GetStaticLinkAtTemp(win->staticLinks, pt.x, pt.y, &link)) {
             SetCursorCached(IDC_HAND);
+            HomePageSetHotLink(win, link ? link->target : Str{});
             // File entries: selection/tip are driven only by real WM_MOUSEMOVE
             // (and keyboard). Do not call HomePageOnHover here — after arrow-key
             // selection the canvas invalidates and WM_SETCURSOR would snap the
@@ -177,6 +226,7 @@ static LRESULT OnSetCursorAbout(MainWindow* win, HWND hwnd) {
             // not on a link — hide tip; keyboard selection outline stays
             win->DeleteToolTip();
             SetCursorCached(IDC_ARROW);
+            HomePageSetHotLink(win, Str{});
         }
         return TRUE;
     }
@@ -193,11 +243,23 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
             if ((HWND)lp == win->hwndHomeSearch) {
                 HDC hdcEdit = (HDC)wp;
                 SetTextColor(hdcEdit, ThemeWindowTextColor());
-                SetBkColor(hdcEdit, ThemeControlBackgroundColor());
-                if (!win->brControlBgColor) {
-                    win->brControlBgColor = CreateSolidBrush(ThemeControlBackgroundColor());
+                COLORREF bg = ThemeControlBackgroundColor();
+                if (IsTouchChrome(win)) {
+                    // the Library's field sits inside a pill filled with the
+                    // touch surface color; anything else shows as a box in it
+                    bg = win->IsCurrentTabAbout() ? ThemeTouchSurfaceColor() : ThemeHotBackgroundColor();
                 }
-                return (LRESULT)win->brControlBgColor;
+                SetBkColor(hdcEdit, bg);
+                HBRUSH* brush = IsTouchChrome(win) ? &win->brHomeSearchBg : &win->brControlBgColor;
+                if (IsTouchChrome(win) && win->homeSearchBgColor != bg) {
+                    DeleteObject(*brush);
+                    *brush = nullptr;
+                    win->homeSearchBgColor = bg;
+                }
+                if (!*brush) {
+                    *brush = CreateSolidBrush(bg);
+                }
+                return (LRESULT)*brush;
             }
             break;
 
@@ -206,9 +268,18 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
                 UINT notify = HIWORD(wp);
                 if (notify == EN_CHANGE) {
                     win->homePageScrollY = 0;
+                    if (win->touchView == TouchView::Library) {
+                        win->libraryTreeScrollY = 0;
+                        // the same field filters the Recent cards
+                        win->libraryFilesScrollY = 0;
+                    }
+                    HomePageOnSearchQueryChanged(win);
                     // the filter changed the list, so select its first entry (#1136)
                     HomePageSelectFirst(win);
                     HwndInvalidate(win->hwndCanvas);
+                    // the edit repaints its own text without WM_PAINT; the
+                    // themed cue (WndProcHomeSearch) needs one when it empties
+                    HwndInvalidate(win->hwndHomeSearch, false);
                     return 0;
                 }
                 // hide/show keyboard selection outline when focus enters/leaves search
@@ -240,6 +311,7 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
                     if (!path) {
                         return 0;
                     }
+                    SetTouchView(win, TouchView::Doc);
                     LoadArgs args(path, win);
                     // ctrl forces always opening, as for a click
                     args.activateExisting = !IsCtrlPressed();
@@ -250,7 +322,18 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
             }
             break;
 
-        case WM_MOUSEMOVE:
+        case WM_MOUSEMOVE: {
+            // Hover feedback from the move's own coordinates. The
+            // WM_SETCURSOR path hit-tests the real cursor position, which
+            // is right for the cursor but leaves the highlight stale when
+            // the surface scrolls or repaints under a still pointer.
+            StaticLink* hotLink = nullptr;
+            GetStaticLinkAtTemp(win->staticLinks, x, y, &hotLink);
+            HomePageSetHotLink(win, hotLink ? hotLink->target : Str{});
+        }
+            if (HomePageOnLibraryResizeMouse(win, msg, x, y)) {
+                return 0;
+            }
             OnMouseMoveAbout(win, hwnd, x, y);
             return 0;
 
@@ -259,10 +342,32 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
             return 0;
 
         case WM_LBUTTONDOWN:
+            if (HomePageOnLibraryResizeMouse(win, msg, x, y)) {
+                return 0;
+            }
+            CloseTouchDocumentOverlays(win);
+            if (win->touchAboutPointerId == 0) {
+                win->touchAboutSuppressMouseUp = false;
+            }
+            {
+                // press feedback: the link under the finger sinks and darkens
+                StaticLink* downLink = nullptr;
+                GetStaticLinkAtTemp(win->staticLinks, x, y, &downLink);
+                HomePageSetPressedLink(win, downLink ? downLink->target : Str{});
+            }
             OnMouseLeftButtonDownAbout(win, x, y, wp);
             return 0;
 
         case WM_LBUTTONUP:
+            if (HomePageOnLibraryResizeMouse(win, msg, x, y)) {
+                return 0;
+            }
+            HomePageSetPressedLink(win, Str{});
+            if (win->touchAboutSuppressMouseUp) {
+                win->touchAboutSuppressMouseUp = false;
+                str::FreePtr(&win->urlOnLastButtonDown);
+                return 0;
+            }
             OnMouseLeftButtonUpAbout(win, x, y, wp);
             return 0;
 
@@ -303,9 +408,40 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
         case WM_MOUSEWHEEL: {
             HomePageHideCloseButton();
             int delta = GET_WHEEL_DELTA_WPARAM(wp);
-            HomePageOnMouseWheel(win, delta);
+            if (IsShiftPressed()) {
+                HomePageOnMouseHWheel(win, delta);
+            } else {
+                Point screenPt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                HomePageOnMouseWheel(win, delta, HwndScreenToClient(win->hwndCanvas, screenPt));
+            }
             return 0;
         }
+
+        case WM_MOUSEHWHEEL:
+            HomePageHideCloseButton();
+            HomePageOnMouseHWheel(win, -GET_WHEEL_DELTA_WPARAM(wp));
+            return 0;
+
+        case WM_POINTERDOWN:
+        case WM_POINTERUPDATE:
+        case WM_POINTERUP:
+        case WM_POINTERCAPTURECHANGED: {
+            Point tapPt;
+            if (HomePageOnPointerEvent(win, msg, wp, lp, &tapPt)) {
+                if (tapPt.x >= 0 && tapPt.y >= 0) {
+                    OnMouseLeftButtonDownAbout(win, tapPt.x, tapPt.y, 0);
+                    OnMouseLeftButtonUpAbout(win, tapPt.x, tapPt.y, 0);
+                }
+                return 0;
+            }
+            break;
+        }
+
+        case WM_CAPTURECHANGED:
+            if (HomePageOnLibraryResizeMouse(win, msg, x, y)) {
+                return 0;
+            }
+            break;
 
         default:
             return DefWindowProc(hwnd, msg, wp, lp);

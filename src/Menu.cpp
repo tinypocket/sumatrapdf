@@ -34,6 +34,7 @@
 #include "Favorites.h"
 #include "FileThumbnails.h"
 #include "HomePage.h"
+#include "TopBar.h"
 #include "Translations.h"
 #include "Toolbar.h"
 #include "Accelerators.h"
@@ -199,6 +200,25 @@ static MenuDef menuDefFile[] = {
 //] ACCESSKEY_GROUP File Menu
 
 //[ ACCESSKEY_GROUP View Menu
+static MenuDef menuDefTouchSidebarDensity[] = {
+    {
+        _TRN("Condensed"),
+        CmdTouchSidebarDensityCondensed,
+    },
+    {
+        _TRN("Normal"),
+        CmdTouchSidebarDensityNormal,
+    },
+    {
+        _TRN("Expanded"),
+        CmdTouchSidebarDensityExpanded,
+    },
+    {
+        nullptr,
+        0,
+    },
+};
+
 static MenuDef menuDefView[] = {
     {
         _TRN("Command Palette"),
@@ -264,6 +284,14 @@ static MenuDef menuDefView[] = {
     {
         _TRN("Show &Toolbar"),
         CmdToggleToolbar,
+    },
+    {
+        _TRN("Show Tabs"),
+        CmdToggleTabs,
+    },
+    {
+        _TRN("Sidebar Row Height"),
+        (UINT_PTR)menuDefTouchSidebarDensity,
     },
     {
         kMenuSeparator,
@@ -1110,8 +1138,19 @@ static MenuDef menuDefContextStart[] = {
         CmdOpenSelectedDocument,
     },
     {
+        // opens a second (or third...) view of a file that is already open,
+        // instead of switching to the existing tab
+        _TRN("Open Another Copy"),
+        CmdOpenSelectedDocumentNewCopy,
+    },
+    {
         _TRN("Show in folder"),
         CmdShowInFolder,
+    },
+    {
+        // the Library's own view of the file's folder, as opposed to Explorer
+        _TRN("Show in Library folder"),
+        CmdShowInLibraryFolder,
     },
     {
         _TRN("&Pin Document"),
@@ -1771,6 +1810,13 @@ static void MenuUpdateStateForWindow(MainWindow* win) {
         MenuSetChecked(win->menu, CmdToggleToolbar, toolbarOn);
     }
     MenuSetChecked(win->menu, CmdToggleMenuBar, gGlobalPrefs->showMenubar);
+    MenuSetChecked(win->menu, CmdToggleTabs, gGlobalPrefs->useTabs);
+    MenuSetChecked(win->menu, CmdTouchSidebarDensityCondensed,
+                   str::EqI(gGlobalPrefs->touchSidebarDensity, StrL("condensed")));
+    MenuSetChecked(win->menu, CmdTouchSidebarDensityNormal,
+                   str::EqI(gGlobalPrefs->touchSidebarDensity, StrL("normal")));
+    MenuSetChecked(win->menu, CmdTouchSidebarDensityExpanded,
+                   str::EqI(gGlobalPrefs->touchSidebarDensity, StrL("expanded")));
     // CmdChangeScrollbar doesn't need a check mark - it opens a dialog
     MenuUpdateDisplayMode(win);
     MenuUpdateZoom(win);
@@ -1825,7 +1871,10 @@ void OnAboutContextMenu(MainWindow* win, int x, int y) {
     }
 
     FileState* fs = gFileHistory.FindByPath(path);
-    if (!fs) {
+    // a Library card is a file that may never have been opened, so it has no
+    // history entry; it still gets the menu, minus the history-only items
+    bool inLibrary = IsTouchChrome(win) && win->IsCurrentTabAbout() && TouchLibraryContainsFile(path);
+    if (!fs && !inLibrary) {
         return;
     }
 
@@ -1833,7 +1882,16 @@ void OnAboutContextMenu(MainWindow* win, int x, int y) {
     ctx.isDocLoaded = true;
     ctx.filePath = path;
     HMENU popup = BuildMenuFromDef(menuDefContextStart, CreatePopupMenu(), &ctx);
-    MenuSetChecked(popup, CmdPinSelectedDocument, fs->isPinned);
+    if (!inLibrary) {
+        MenuRemove(popup, CmdShowInLibraryFolder);
+    }
+    if (fs) {
+        MenuSetChecked(popup, CmdPinSelectedDocument, fs->isPinned);
+    } else {
+        MenuRemove(popup, CmdPinSelectedDocument);
+        MenuRemove(popup, CmdForgetSelectedDocument);
+    }
+    RemoveBadMenuSeparators(popup);
     Point pt = HwndMapWindowPoint(win->hwndCanvas, HWND_DESKTOP, {x, y});
     MarkMenuOwnerDraw(popup);
     INT cmd = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, win->hwndFrame, nullptr);
@@ -1848,12 +1906,26 @@ void OnAboutContextMenu(MainWindow* win, int x, int y) {
         return;
     }
 
+    if (CmdOpenSelectedDocumentNewCopy == cmd) {
+        // activateExisting is what makes a second open switch to the tab that
+        // already has the file; off, the load creates another tab for it
+        LoadArgs args(path, win);
+        args.activateExisting = false;
+        LoadDocument(&args);
+        return;
+    }
+
     if (CmdShowInFolder == cmd) {
         SumatraOpenPathInDefaultFileManager(path);
         return;
     }
 
-    if (CmdPinSelectedDocument == cmd) {
+    if (CmdShowInLibraryFolder == cmd) {
+        ShowFileInTouchLibrary(win, path);
+        return;
+    }
+
+    if (CmdPinSelectedDocument == cmd && fs) {
         fs->isPinned = !fs->isPinned;
         win->DeleteToolTip();
         win->RedrawAll(true);

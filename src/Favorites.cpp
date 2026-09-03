@@ -18,6 +18,8 @@
 #include "GlobalPrefs.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "TopBar.h"
+#include "Rail.h"
 #include "WindowTab.h"
 #include "resource.h"
 #include "Commands.h"
@@ -287,6 +289,11 @@ static int SortByName(Favorite* const* a, Favorite* const* b) {
 
 static void SortFileFavorites(FileState* fs) {
     if (!fs || !fs->favorites || len(*fs->favorites) < 2) {
+        return;
+    }
+    // Once the user has arranged them by hand, the stored order IS the order;
+    // re-sorting here would undo the drag on the next add or reload.
+    if (gGlobalPrefs->favoritesManualOrder) {
         return;
     }
     if (gGlobalPrefs->sortFavoritesByName) {
@@ -648,10 +655,18 @@ static void GoToFavoritePage(MainWindow* win, int pageNo) {
 struct GoToFavoritePageData {
     MainWindow* win;
     int pageNo;
+    // Favorites span every document, so opening one in another PDF must not
+    // close the panel you launched it from. Loading a document re-applies that
+    // document's showToc, and a file with no bookmarks has it false, which
+    // closed the shared sidebar - and the Favorites panel with it.
+    bool keepFavoritesPanel = false;
 };
 
 static void GoToFavoritePage(GoToFavoritePageData* d) {
     GoToFavoritePage(d->win, d->pageNo);
+    if (d->keepFavoritesPanel && IsMainWindowValid(d->win)) {
+        SetTouchPanelMode(d->win, TouchPanelMode::Favorites);
+    }
     delete d;
 }
 
@@ -663,6 +678,8 @@ void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav) {
     if (!fs || !fav) {
         return;
     }
+    // remember this before the load, which is what resets the panel
+    bool keepPanel = win && IsTouchChrome(win) && win->touchPanelMode == TouchPanelMode::Favorites;
 
     Str fp = fs->filePath;
     MainWindow* existingWin = FindMainWindowByFile(fp, true);
@@ -670,6 +687,7 @@ void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav) {
         auto* data = new GoToFavoritePageData;
         data->pageNo = fav->pageNo;
         data->win = existingWin;
+        data->keepFavoritesPanel = keepPanel;
         auto fn = MkFunc0<GoToFavoritePageData>(GoToFavoritePage, data);
         uitask::Post(fn, "TaskGoToFavorite");
         return;
@@ -697,6 +715,7 @@ void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav) {
         auto* data = new GoToFavoritePageData;
         data->pageNo = pageNo;
         data->win = win;
+        data->keepFavoritesPanel = keepPanel;
         auto fn = MkFunc0<GoToFavoritePageData>(GoToFavoritePage, data);
         uitask::Post(fn, "TaskGoToFavorite2");
     }
@@ -1128,6 +1147,123 @@ void AddFavoriteForCurrentPage(MainWindow* win) {
     }
     int pageNo = win->currPageNo;
     AddFavoriteForPage(win, pageNo);
+}
+
+// --- "PDF favorites" for the touch chrome ------------------------------------
+// The touch bookmark tray saves the current page with a single tap and renames
+// in place afterwards, so it needs the store without the Dialog_AddFavorite
+// prompt that AddFavoriteWithLabelAndName wraps. Same Favorite records, same
+// per-file grouping, same prefs file - so the tray, the Favorites pane and the
+// Favorites menu are all views onto one list.
+
+// default title for a one-tap save: the ToC heading covering the page, so a
+// favorite reads as "Second Antiphon" rather than "p. 12"
+TempStr FavoriteDefaultNameTemp(MainWindow* win, int pageNo) {
+    if (!win || !win->ctrl || !win->ctrl->HasToc()) {
+        return {};
+    }
+    TocTree* docTree = win->ctrl->GetToc();
+    if (!docTree) {
+        return {};
+    }
+    TocItem* item = TocItemForPageNo(docTree->root, pageNo);
+    if (!item || !item->title) {
+        return {};
+    }
+    return str::DupTemp(item->title);
+}
+
+void AddFavoriteQuiet(MainWindow* win, int pageNo, Str name) {
+    if (!win || !win->IsDocLoaded()) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    if (!tab || !tab->filePath) {
+        return;
+    }
+    TempStr pageLabel = win->ctrl->GetPageLabeTemp(pageNo);
+    TempStr plainLabel = fmt("%d", pageNo);
+    // only carry a label when it differs from the page number, matching
+    // AddFavoriteWithLabelAndName
+    Str pl = str::Eq(plainLabel, pageLabel) ? Str{} : Str(pageLabel);
+    RememberFavTreeExpansionStateForAllWindows();
+    AddOrReplaceFav(tab->filePath, pageNo, name, pl);
+    UpdateFavoritesTreeForAllWindows();
+    SaveSettings();
+}
+
+void RenameFavorite(Str filePath, int pageNo, Str newName) {
+    if (!filePath) {
+        return;
+    }
+    FileState* fs = GetFavByFilePath(filePath);
+    if (!fs) {
+        return;
+    }
+    Favorite* fn = FindByPage(fs, pageNo);
+    if (!fn) {
+        return;
+    }
+    str::ReplaceWithCopy(&fn->name, newName);
+    UpdateFavoritesTreeForAllWindows();
+    SaveSettings();
+}
+
+// Every file that has at least one favorite, most-recently-used first. Backs
+// the "PDF favorites" panel, which groups by document so a favorite in a file
+// you do not currently have open is still one tap away.
+void GetFilesWithFavorites(Vec<FileState*>& out) {
+    out.Reset();
+    if (!gFileHistory.states) {
+        return;
+    }
+    int n = len(*gFileHistory.states);
+    for (int i = 0; i < n; i++) {
+        FileState* fs = (*gFileHistory.states)[i];
+        if (!fs || !fs->favorites || fs->isMissing) {
+            continue;
+        }
+        int nFav = 0;
+        for (Favorite* f : *fs->favorites) {
+            if (f && !f->isTemporary) {
+                nFav++;
+            }
+        }
+        if (nFav > 0) {
+            out.Append(fs);
+        }
+    }
+}
+
+// Move a favorite within its own document, for drag-to-reorder in the panel.
+// Switches the whole feature to manual ordering, since a hand-made order that
+// the next sort discards would be worse than not offering it.
+bool MoveFavorite(Str filePath, int fromIdx, int toIdx) {
+    FileState* fs = GetFavByFilePath(filePath);
+    if (!fs || !fs->favorites) {
+        return false;
+    }
+    Vec<Favorite*>* favs = fs->favorites;
+    int n = len(*favs);
+    if (fromIdx < 0 || fromIdx >= n || toIdx < 0 || toIdx >= n || fromIdx == toIdx) {
+        return false;
+    }
+    Favorite* moved = (*favs)[fromIdx];
+    favs->RemoveAt(fromIdx);
+    favs->InsertAt(toIdx, moved);
+    gGlobalPrefs->favoritesManualOrder = true;
+    UpdateFavoritesTreeForAllWindows();
+    SaveSettings();
+    return true;
+}
+
+// the favorites of one document, in sorted order; nullptr when it has none
+Vec<Favorite*>* GetFileFavorites(Str filePath) {
+    if (!filePath) {
+        return nullptr;
+    }
+    FileState* fs = GetFavByFilePath(filePath);
+    return fs ? fs->favorites : nullptr;
 }
 
 void DelFavorite(Str filePath, int pageNo) {

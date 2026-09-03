@@ -25,6 +25,7 @@
 #include "Accelerators.h"
 #include "SvgIcons.h"
 #include "Toolbar.h"
+#include "TableOfContents.h"
 #include "SearchAndDDE.h"
 #include "FindBar.h"
 #include "FindWindow.h"
@@ -503,10 +504,20 @@ void ShowFindBar(MainWindow* win) {
 }
 
 void HideFindBar(MainWindow* win) {
-    // drop the cached results: they belong to this search/document and must not
-    // be shown or navigated into after the find UI is reopened (e.g. on another
-    // tab, which would carry the previous document's page/glyph coordinates)
-    ClearFindMatches(win);
+    // The touch chrome's Search panel renders win->findMatches inline and is
+    // not part of the find bar, so it keeps owning the results when the find
+    // bar goes away: closing the bar (Esc / the X) must not empty a panel the
+    // user is still looking at. Leaving a document is handled by the callers
+    // that mean it -- SaveCurrentWindowTab() / CloseTab() drop the results
+    // explicitly, and so does InvalidateFindForDocumentChange().
+    bool keepResults = IsTouchSearchPanelVisible(win);
+    if (!keepResults) {
+        // drop the cached results: they belong to this search/document and must
+        // not be shown or navigated into after the find UI is reopened (e.g. on
+        // another tab, which would carry the previous document's page/glyph
+        // coordinates)
+        ClearFindMatches(win);
+    }
     if (win->ctrl) {
         // remove in-page find highlights in a chm / markdown webview
         // (no-op for other document types and the IE backend)
@@ -514,9 +525,11 @@ void HideFindBar(MainWindow* win) {
     }
     // drop the active TextSearch hit so closing find clears the highlight;
     // F3 still works (FindNext re-searches) and paints the new hit (#5802)
-    if (DisplayModel* dm = win->AsFixed()) {
-        if (dm->textSearch) {
-            dm->textSearch->Reset();
+    if (!keepResults) {
+        if (DisplayModel* dm = win->AsFixed()) {
+            if (dm->textSearch) {
+                dm->textSearch->Reset();
+            }
         }
     }
     if (IsFindWindowVisible(win)) {
@@ -530,6 +543,24 @@ void HideFindBar(MainWindow* win) {
     ShowWindow(win->findBar->hwnd, SW_HIDE);
     HwndSetFocus(win->hwndFrame);
     ScheduleRepaint(win, 0);
+}
+
+// Hide the find UI because the document behind it is going away (tab switch,
+// tab close). Unlike plain HideFindBar() this always drops the cached matches:
+// their page/glyph coordinates belong to the document being left, so no UI --
+// including the touch chrome's Search panel, which HideFindBar() deliberately
+// leaves populated -- may keep showing or navigating into them.
+void HideFindBarForDocumentChange(MainWindow* win) {
+    HideFindBar(win);
+    ClearFindMatches(win);
+    if (DisplayModel* dm = win->AsFixed()) {
+        if (dm->textSearch) {
+            dm->textSearch->Reset();
+        }
+    }
+    if (IsTouchSearchPanelVisible(win) && win->hwndTocBox) {
+        HwndInvalidate(win->hwndTocBox, false);
+    }
 }
 
 // note: the floating window is not anchored to the search icon, so "visible"

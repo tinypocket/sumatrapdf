@@ -49,6 +49,10 @@ static bool gInstallFailed = false;
 static PreviousInstallationInfo gPrevInstall;
 static Flags gCliNew;
 
+static TempStr BrandInstallerTextTemp(Str text) {
+    return str::ReplaceTemp(text, StrL("SumatraPDF"), StrL(kAppName));
+}
+
 struct InstallerWnd {
     HWND hwnd = nullptr;
 
@@ -631,7 +635,7 @@ static bool ShowMoveAsideBlockedDialog(Str path, Str copyPath, Str fileName) {
     }
     cfg.cbSize = sizeof(cfg);
     cfg.hwndParent = gWnd ? gWnd->hwnd : nullptr;
-    cfg.pszWindowTitle = L"SumatraPDF";
+    cfg.pszWindowTitle = kAppNameW;
     cfg.pszMainInstruction = CWStrTemp(fmt(_TRA("Cannot update %s").s, fileName));
     cfg.pszContent = CWStrTemp(content);
     cfg.dwFlags = (TASKDIALOG_FLAGS)flags;
@@ -754,9 +758,13 @@ static bool PrepareInstallDirByRenaming(Str installDir, bool silent) {
 }
 
 static void DeleteInstallCopyLeftovers(Str destDir) {
-    static const Str kCopies[] = {
-        StrL("libsumatrapdf.dll.copy"), StrL("libmupdf.dll.copy"),   StrL("PdfFilter.dll.copy"),
-        StrL("PdfPreview.dll.copy"),    StrL("SumatraPDF.exe.copy"),
+    TempStr exeCopyName = str::JoinTemp(Str(kExeName), StrL(".copy"));
+    const Str kCopies[] = {
+        StrL("libsumatrapdf.dll.copy"),
+        StrL("libmupdf.dll.copy"),
+        StrL("PdfFilter.dll.copy"),
+        StrL("PdfPreview.dll.copy"),
+        exeCopyName,
     };
     for (Str name : kCopies) {
         TempStr copyPath = path::JoinTemp(destDir, name);
@@ -779,9 +787,8 @@ static void DeleteInstallCopyLeftovers(Str destDir) {
 // Also undoes a partial PrepareInstallDirByRenaming when a later rename fails.
 static void RestoreInstallCopyFiles(Str installDir) {
     logf("RestoreInstallCopyFiles('%s')\n", installDir);
-    static const Str kFiles[] = {
-        StrL("SumatraPDF.exe"), StrL("libsumatrapdf.dll"), StrL("PdfFilter.dll"),
-        StrL("PdfPreview.dll"), StrL("libmupdf.dll"),
+    const Str kFiles[] = {
+        Str(kExeName), StrL("libsumatrapdf.dll"), StrL("PdfFilter.dll"), StrL("PdfPreview.dll"), StrL("libmupdf.dll"),
     };
     for (Str name : kFiles) {
         TempStr path = path::JoinTemp(installDir, name);
@@ -849,6 +856,18 @@ static bool ExtractInstallerFiles(lzma::SimpleArchive* archive, Str destDir) {
 
     DeleteInstallCopyLeftovers(destDir);
     return true;
+}
+
+static bool ArchiveContainsInstalledApp(const lzma::SimpleArchive* archive) {
+    if (!archive) {
+        return false;
+    }
+    for (int i = 0; i < archive->filesCount; i++) {
+        if (str::Eq(archive->files[i].name, Str(kExeName))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Copy the running installer to installDir\SumatraPDF.exe. Retries and uses
@@ -926,21 +945,21 @@ static bool CopySelfToDir(Str destDir) {
     logf("  failed to copy '%s' to '%s' lastError=%u\n", exePath, dstPath, lastErr);
     if (lastErr == ERROR_ACCESS_DENIED) {
         NotifyFailed(
-            _TRA("Couldn't copy SumatraPDF.exe to the installation directory (access denied). "
-                 "Temporarily disable antivirus or Controlled Folder Access for this folder, "
-                 "run the installer as administrator, or choose a different install folder. "
-                 "See https://www.sumatrapdfreader.org/docs/Installation"));
+            BrandInstallerTextTemp(_TRA("Couldn't copy SumatraPDF.exe to the installation directory (access denied). "
+                                        "Temporarily disable antivirus or Controlled Folder Access for this folder, "
+                                        "run the installer as administrator, or choose a different install folder. "
+                                        "See https://www.sumatrapdfreader.org/docs/Installation")));
     } else if (lastErr == ERROR_SHARING_VIOLATION || lastErr == ERROR_LOCK_VIOLATION) {
         NotifyFailed(
-            _TRA("Couldn't copy SumatraPDF.exe to the installation directory (file in use). "
-                 "Close all SumatraPDF windows and Explorer PDF previews, then try again. "
-                 "See https://www.sumatrapdfreader.org/docs/Installation"));
+            BrandInstallerTextTemp(_TRA("Couldn't copy SumatraPDF.exe to the installation directory (file in use). "
+                                        "Close all SumatraPDF windows and Explorer PDF previews, then try again. "
+                                        "See https://www.sumatrapdfreader.org/docs/Installation")));
     } else if (IsDiskFullError(lastErr)) {
-        NotifyFailed(
+        NotifyFailed(BrandInstallerTextTemp(
             _TRA("Not enough free disk space to copy SumatraPDF.exe to the installation directory.\n\n"
-                 "Free up space on this drive and try again."));
+                 "Free up space on this drive and try again.")));
     } else {
-        NotifyFailed(_TRA("Couldn't copy SumatraPDF.exe to the installation directory"));
+        NotifyFailed(BrandInstallerTextTemp(_TRA("Couldn't copy SumatraPDF.exe to the installation directory")));
     }
     return false;
 }
@@ -1337,7 +1356,7 @@ static HRESULT CALLBACK InstallationFailedDialogCallback(HWND /*hwnd*/, UINT msg
         case TDN_BUTTON_CLICKED:
             if ((int)wParam == kBtnIdShowInstallLog) {
                 Str logText = gLogBuf ? ToStr(*gLogBuf) : StrL("(no log available)");
-                ShowTextInWindowDialog(_TRA("SumatraPDF installation log"), logText);
+                ShowTextInWindowDialog(BrandInstallerTextTemp(_TRA("SumatraPDF installation log")), logText);
                 return S_FALSE; // keep TaskDialog open
             }
             break;
@@ -1369,7 +1388,7 @@ static void ShowInstallationFailedUi(HWND hwndParent) {
     }
     dialogConfig.cbSize = sizeof(TASKDIALOGCONFIG);
     dialogConfig.hwndParent = hwndParent;
-    dialogConfig.pszWindowTitle = L"SumatraPDF";
+    dialogConfig.pszWindowTitle = kAppNameW;
     dialogConfig.pszMainInstruction = L"Installation failed";
     dialogConfig.pszContent = CWStrTemp(content);
     dialogConfig.nDefaultButton = IDOK;
@@ -1414,10 +1433,10 @@ static void OnInstallationFinished(Flags* cli) {
     DeleteWnd(&gWnd->progressBar);
     auto isRtl = IsUIRtl();
     if (!cli->fastInstall) {
-        gWnd->btnRunSumatra = CreateDefaultButton(gWnd->hwnd, _TRA("Start SumatraPDF"), isRtl);
+        gWnd->btnRunSumatra = CreateDefaultButton(gWnd->hwnd, BrandInstallerTextTemp(_TRA("Start SumatraPDF")), isRtl);
         gWnd->btnRunSumatra->onClick = MkFunc0Void(OnButtonStartSumatra);
     }
-    SetMsg(_TRA("Thank you! SumatraPDF has been installed."), COLOR_MSG_OK);
+    SetMsg(BrandInstallerTextTemp(_TRA("Thank you! SumatraPDF has been installed.")), COLOR_MSG_OK);
     gMsgError = gFirstError;
     HwndRepaintNow(gWnd->hwnd);
 
@@ -1588,7 +1607,7 @@ static void OnButtonBrowse(InstallerWnd* wnd) {
         installDir = path::GetDirTemp(installDir);
     }
 
-    auto caption = _TRA("Select the folder where SumatraPDF should be installed:");
+    auto caption = BrandInstallerTextTemp(_TRA("Select the folder where SumatraPDF should be installed:"));
     TempStr installPath = BrowseForFolderTemp(wnd->hwnd, installDir, caption);
     if (!installPath) {
         HwndSetFocus(wnd->btnBrowseDir->hwnd);
@@ -1641,7 +1660,7 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
     bool isRtl = IsUIRtl();
     bool showInstallButton = !cli->fastInstall;
 
-    wnd->btnInstall = CreateDefaultButton(hwnd, _TRA("Install SumatraPDF"), isRtl);
+    wnd->btnInstall = CreateDefaultButton(hwnd, BrandInstallerTextTemp(_TRA("Install SumatraPDF")), isRtl);
     auto* b = wnd->btnInstall;
     b->onClick = MkFunc0(OnButtonInstall, wnd);
     {
@@ -1760,7 +1779,7 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
 
     y -= editDy;
 
-    Str s2 = _TRA("Install SumatraPDF in &folder:");
+    Str s2 = BrandInstallerTextTemp(_TRA("Install SumatraPDF in &folder:"));
     rc = {x, y, r.dx - 2 * margin, staticDy};
 
     Static::CreateArgs args;
@@ -1870,7 +1889,8 @@ static bool CreateInstallerWnd(Flags* cli) {
         RegisterClassExW(&wcex);
     }
 
-    TempStr title = fmt(_TRA("SumatraPDF %s Installer").s, StrL(CURR_VERSION_STRA));
+    TempStr titleFmt = BrandInstallerTextTemp(_TRA("SumatraPDF %s Installer"));
+    TempStr title = fmt(titleFmt.s, StrL(CURR_VERSION_STRA));
     DWORD exStyle = 0;
     if (trans::IsCurrLangRtl()) {
         exStyle = WS_EX_LAYOUTRTL;
@@ -1895,7 +1915,7 @@ static bool CreateInstallerWnd(Flags* cli) {
 }
 
 static bool CreateInstallerWindow(Flags* cli) {
-    gDefaultMsg = _TRA("Thank you for choosing SumatraPDF!");
+    gDefaultMsg = str::Dup(GetPermArena(), BrandInstallerTextTemp(_TRA("Thank you for choosing SumatraPDF!")));
     if (!CreateInstallerWnd(cli)) {
         return false;
     }
@@ -2085,11 +2105,11 @@ static bool EnsureEnoughDiskSpaceForInstall(Str installDir, const lzma::SimpleAr
     }
     int freeMb = (int)(freeBytes / (1024ull * 1024ull));
     int needMb = (int)((need + 1024 * 1024 - 1) / (1024 * 1024));
-    NotifyFailed(fmt(_TRA("Not enough free disk space to install SumatraPDF.\n\n"
-                          "Required: about %d MB free\nAvailable: %d MB\n\n"
-                          "Free up space on this drive and try again.")
-                         .s,
-                     needMb, freeMb));
+    TempStr messageFmt =
+        BrandInstallerTextTemp(_TRA("Not enough free disk space to install SumatraPDF.\n\n"
+                                    "Required: about %d MB free\nAvailable: %d MB\n\n"
+                                    "Free up space on this drive and try again."));
+    NotifyFailed(fmt(messageFmt.s, needMb, freeMb));
     return false;
 }
 
@@ -2123,11 +2143,16 @@ bool ExtractInstallerFiles(Str dir) {
         return false;
     }
 
-    ok = CopySelfToDir(dir);
-    if (!ok) {
-        // NotifyFailed already called inside CopySelfToDir with a specific reason.
-        RestoreInstallCopyFiles(dir);
-        return false;
+    if (!ArchiveContainsInstalledApp(&gArchive)) {
+        // Compatibility with older installer payloads. New SumatraPDF+ builds
+        // carry a distinct app-only executable in the archive so the installed
+        // application does not retain the installer's compressed payload.
+        ok = CopySelfToDir(dir);
+        if (!ok) {
+            // NotifyFailed already called inside CopySelfToDir with a specific reason.
+            RestoreInstallCopyFiles(dir);
+            return false;
+        }
     }
     ProgressStep();
 
@@ -2160,10 +2185,11 @@ static bool ShouldInstallMismatchedArch(HWND hwndParent) {
         flags |= TDF_RTL_LAYOUT;
     }
     dialogConfig.cbSize = sizeof(TASKDIALOGCONFIG);
-    s = _TRA("Installing 32-bit SumatraPDF on 64-bit OS");
+    s = BrandInstallerTextTemp(_TRA("Installing 32-bit SumatraPDF on 64-bit OS"));
     dialogConfig.pszWindowTitle = CWStrTemp(s);
     // dialogConfig.pszMainInstruction = mainInstr;
-    s = _TRA("You're installing 32-bit SumatraPDF on 64-bit OS.\nWould you like to download\n64-bit version?");
+    s = BrandInstallerTextTemp(
+        _TRA("You're installing 32-bit SumatraPDF on 64-bit OS.\nWould you like to download\n64-bit version?"));
     dialogConfig.pszContent = CWStrTemp(s);
     dialogConfig.nDefaultButton = kBtnIdContinue;
     dialogConfig.dwFlags = (TASKDIALOG_FLAGS)flags;

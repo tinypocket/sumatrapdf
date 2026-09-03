@@ -58,6 +58,7 @@
 #include "TextToSpeech.h"
 #include "HomePage.h"
 #include "Toolbar.h"
+#include "TopBar.h"
 #include "Translations.h"
 
 #include "RefHover.h"
@@ -1660,9 +1661,46 @@ static bool IsFullPageImage(DisplayModel* dm, IPageElement* el, int pageNo) {
     return imgArea >= 0.8f * pageArea;
 }
 
+// defined with the page-painting helpers, further down
+Rect SmartMarginBadgeRect(HWND hwnd, DisplayModel* dm, int pageNo, const Rect& pageOnScreen);
+Rect SmartMarginToggleStripRect(HWND hwnd, DisplayModel* dm, int pageNo, const Rect& pageOnScreen);
+
+// Clicking the badge on a trimmed page gives that page its margins back (or
+// takes them away again). Only that page: the point is to rescue the odd page
+// the content box got wrong without giving up the setting everywhere.
+static bool ToggleSmartMarginAtPoint(MainWindow* win, int x, int y) {
+    DisplayModel* dm = win->AsFixed();
+    if (!dm || !gGlobalPrefs->smartMargins) {
+        return false;
+    }
+    Point pt{x, y};
+    for (int pageNo = 1; pageNo <= dm->PageCount(); pageNo++) {
+        PageInfo* pi = dm->GetPageInfo(pageNo);
+        if (!pi || pi->visibleRatio <= 0.0f || !pi->isShown) {
+            continue;
+        }
+        Rect badge = SmartMarginBadgeRect(win->hwndCanvas, dm, pageNo, pi->pageOnScreen);
+        Rect strip = SmartMarginToggleStripRect(win->hwndCanvas, dm, pageNo, pi->pageOnScreen);
+        bool hit = (!badge.IsEmpty() && badge.Contains(pt)) || (!strip.IsEmpty() && strip.Contains(pt));
+        if (!hit) {
+            continue;
+        }
+        dm->TogglePageMarginExpanded(pageNo);
+        ScrollState state = dm->GetScrollState();
+        dm->Relayout(dm->GetZoomVirtual(), dm->GetRotation());
+        dm->SetScrollState(state);
+        win->RedrawAll(true);
+        return true;
+    }
+    return false;
+}
+
 static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
     // lf("Left button clicked on %d %d", x, y);
     if (IsRightDragging(win)) {
+        return;
+    }
+    if (ToggleSmartMarginAtPoint(win, x, y)) {
         return;
     }
 
@@ -2205,7 +2243,23 @@ static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& pageRect, bool 
     Rectangle(hdc, frame.x, frame.y, frame.x + frame.dx, frame.y + frame.dy);
 }
 #else
-static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& /*pageRect*/, bool /*presentation*/, COLORREF bgCol) {
+static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& /*pageRect*/, bool presentation, COLORREF bgCol) {
+    // The redesign lifts the page off the canvas with a soft shadow. Stacked
+    // rects rather than a blur: this runs on every canvas repaint, and a few
+    // FillRects are far cheaper than compositing a blurred surface.
+    if (gGlobalPrefs->touchChrome && !presentation) {
+        COLORREF canvasCol = ThemeMainWindowBackgroundColor();
+        constexpr int kLayers = 4;
+        for (int i = kLayers; i >= 1; i--) {
+            int spread = DpiScale(hdc, i);
+            Rect sr = bounds;
+            sr.Inflate(spread, spread);
+            sr.y += DpiScale(hdc, 1); // cast downward
+            COLORREF col = AccentColor(canvasCol, 4 * (kLayers - i + 1));
+            AutoDeleteBrush shadowBr = CreateSolidBrush(col);
+            HdcFillRect(hdc, sr, shadowBr);
+        }
+    }
     AutoDeletePen pen(CreatePen(PS_NULL, 0, 0));
     AutoDeleteBrush brush(CreateSolidBrush(bgCol));
     ScopedSelectPen restorePen(hdc, pen);
@@ -2213,6 +2267,75 @@ static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& /*pageRect*/, b
     Rectangle(hdc, bounds.x, bounds.y, bounds.x + bounds.dx + 1, bounds.y + bounds.dy + 1);
 }
 #endif
+
+// A small tab on the bottom edge of a page whose margins were trimmed (or that
+// the user expanded back). Empty rect when the page has nothing to say.
+Rect SmartMarginBadgeRect(HWND hwnd, DisplayModel* dm, int pageNo, const Rect& pageOnScreen) {
+    if (!dm || pageOnScreen.IsEmpty()) {
+        return {};
+    }
+    if (!dm->IsPageMarginTrimmed(pageNo) && !dm->IsPageMarginExpanded(pageNo)) {
+        return {};
+    }
+    int dx = DpiScale(hwnd, 64);
+    int dy = DpiScale(hwnd, 18);
+    // Straddle the page's bottom edge so it sits mostly in the gutter between
+    // pages: centred inside the page it would cover the last line of text,
+    // which is exactly the content the reader is trying to get back. Held to
+    // the right so it is out of the way of drop caps and initials, which sit
+    // at the left of the text block.
+    int inset = DpiScale(hwnd, 12);
+    int x = pageOnScreen.x + pageOnScreen.dx - dx - inset;
+    int y = pageOnScreen.y + pageOnScreen.dy - dy / 2;
+    return Rect{x, y, dx, dy};
+}
+
+// The chevron is small and off to one side, so the whole middle of the page
+// border toggles as well - the border is the gutter between pages, so there is
+// nothing there to hit by accident.
+Rect SmartMarginToggleStripRect(HWND hwnd, DisplayModel* dm, int pageNo, const Rect& pageOnScreen) {
+    Rect badge = SmartMarginBadgeRect(hwnd, dm, pageNo, pageOnScreen);
+    if (badge.IsEmpty()) {
+        return {};
+    }
+    int dx = pageOnScreen.dx / 2;
+    int x = pageOnScreen.x + (pageOnScreen.dx - dx) / 2;
+    return Rect{x, badge.y, dx, badge.dy};
+}
+
+static void DrawSmartMarginBadge(HDC hdc, const Rect& r, bool expanded) {
+    Gdiplus::Graphics gfx(hdc);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    COLORREF bg = ThemeControlBackgroundColor();
+    COLORREF fg = ThemeWindowDarkerTextColor();
+    Gdiplus::Color bgc(210, GetRValue(bg), GetGValue(bg), GetBValue(bg));
+    Gdiplus::SolidBrush br(bgc);
+    int d = std::min(r.dy, r.dx);
+    Gdiplus::GraphicsPath path;
+    path.AddArc(r.x, r.y, d, d, 180.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y, d, d, 270.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y + r.dy - d, d, d, 0.0f, 90.0f);
+    path.AddArc(r.x, r.y + r.dy - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+    gfx.FillPath(&br, &path);
+
+    // chevron: down = there is more page to show, up = collapse it again
+    Gdiplus::Pen pen(GdiRgbFromCOLORREF(fg), (Gdiplus::REAL)std::max(1, DpiScale(hdc, 2)));
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    int cx = r.x + r.dx / 2;
+    int cy = r.y + r.dy / 2;
+    int arm = DpiScale(hdc, 5);
+    int h = DpiScale(hdc, 3);
+    if (expanded) {
+        gfx.DrawLine(&pen, cx - arm, cy + h, cx, cy - h);
+        gfx.DrawLine(&pen, cx, cy - h, cx + arm, cy + h);
+    } else {
+        gfx.DrawLine(&pen, cx - arm, cy - h, cx, cy + h);
+        gfx.DrawLine(&pen, cx, cy + h, cx + arm, cy - h);
+    }
+}
+
 
 // CmdToggleImages. Like showLinks this is a debug aid (both live in the debug
 // menu, so both are debug / pre-release only), and like it the outlines are
@@ -2517,6 +2640,7 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
 
     bool isRtl = IsUIRtl();
     for (int pageNo = 1; pageNo <= dm->PageCount(); ++pageNo) {
+        // (smart-margins badge is drawn after the page content, below)
         PageInfo* pi = dm->GetPageInfo(pageNo);
         if (!pi || 0.0F == pi->visibleRatio) {
             continue;
@@ -2549,6 +2673,15 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
 
         bool renderOutOfDateCue = false;
         int renderDelay = gRenderCache->Paint(hdc, bounds, dm, pageNo, pi, &renderOutOfDateCue);
+        // Tell the reader when a page is showing less than its whole self, and
+        // give them a way to get it back: the engine's content box is not
+        // always right, and a silently clipped page is worse than a taller one.
+        if (gGlobalPrefs->smartMargins) {
+            Rect badge = SmartMarginBadgeRect(win->hwndCanvas, dm, pageNo, pi->pageOnScreen);
+            if (!badge.IsEmpty()) {
+                DrawSmartMarginBadge(hdc, badge, dm->IsPageMarginExpanded(pageNo));
+            }
+        }
         if (renderDelay == 0) {
             shouldPaint = true;
             if (curTab) {
@@ -3533,6 +3666,7 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
             return 0;
 
         case WM_LBUTTONDOWN:
+            CloseTouchDocumentOverlays(win);
             OnMouseLeftButtonDown(win, x, y, wp);
             return 0;
 
@@ -3832,6 +3966,19 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
         case kSelectionToolbarShowTimerID:
             // the selection settled: pop up the floating selection toolbar
             SelectionToolbarOnShowTimer(win);
+            break;
+
+        case kLibraryScrollTimerID:
+            // Library scroll easing / fling; stops itself when it settles
+            HomePageKineticTick(win);
+            break;
+
+        case kAboutHoldTimerID:
+            HomePageOnHoldTimer(win);
+            break;
+
+        case kLibraryFeedbackTimerID:
+            HomePageFeedbackTick(win);
             break;
 
         case HIDE_FWDSRCHMARK_TIMER_ID:

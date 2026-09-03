@@ -63,12 +63,21 @@ static UINT_PTR gNoDocWhitelist[] = {
     CmdToggleFullscreen,
     CmdToggleMenuBar,
     CmdToggleToolbar,
+    // application-level chrome settings, not document actions: they were
+    // dropped from the View menu whenever no document was open
+    CmdToggleTabs,
+    CmdTouchSidebarDensityCondensed,
+    CmdTouchSidebarDensityNormal,
+    CmdTouchSidebarDensityExpanded,
     CmdToggleInverseSearch,
     CmdToggleLinks,
     CmdToggleImages,
     CmdToggleWindowsPreviewer,
     CmdToggleWindowsSearchFilter,
     CmdInvertColors,
+    // themes the app chrome, not the document: must stay available on the
+    // Library view where no document is loaded (the tab bar "..." offers it)
+    CmdToggleLightDarkTheme,
     CmdFavoriteToggle,
     CmdFavoriteShowInTab,
     CmdShowLog,
@@ -188,6 +197,7 @@ static UINT_PTR removeIfNoDiskAccessPerm[] = {
     CmdFavoriteShowInTab,
     CmdToggleFavoritesSort,
     CmdOpenSelectedDocument,
+    CmdOpenSelectedDocumentNewCopy,
     CmdPinSelectedDocument,
     CmdForgetSelectedDocument,
     CmdInvokeInverseSearch,
@@ -249,6 +259,7 @@ static i32 gBlacklistCommandsFromPalette[] = {
     CmdPrevTabSmart,
     CmdSetTheme,
     CmdOpenSelectedDocument,
+    CmdOpenSelectedDocumentNewCopy,
     CmdPinSelectedDocument,
     CmdForgetSelectedDocument,
     CmdExpandAll,

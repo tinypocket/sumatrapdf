@@ -9,8 +9,10 @@
 
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
+#include "wingui/Anim.h"
 
 #include "Theme.h"
+#include "TouchMetrics.h"
 
 // Forward declaration - defined in MainWindow.cpp
 struct MainWindow;
@@ -62,22 +64,132 @@ void TabsCtrl::ScheduleRepaint() {
 
 // Calculates tab's elements, based on its width and height.
 // Generates a GraphicsPath, which is used for painting the tab, etc.
+// --- tab hover cross-fade -------------------------------------------------
+// Owned here rather than on TabsCtrl: AnimVal/AnimTimer would need Anim.h in
+// WinGui.h, which has no include guard. Only one tab strip is hovered at a
+// time, so one set of state plus the control that owns it is enough.
+constexpr UINT_PTR kTabHoverTimerId = 31;
+static TabsCtrl* gHoverCtrl = nullptr;
+static int gAnimHotTab = -1;
+static int gAnimPrevHotTab = -1;
+static AnimVal gTabHotIn;
+static AnimVal gTabHotOut;
+
+// 0..1 hover weight for one tab, whatever the animation state
+static float TabHoverAmount(TabsCtrl* ctrl, int idx, int tabUnderMouse) {
+    if (gHoverCtrl != ctrl || !AnimEnabled()) {
+        return (idx == tabUnderMouse) ? 1.0f : 0.0f;
+    }
+    if (idx == gAnimHotTab) {
+        return gTabHotIn.Value();
+    }
+    if (idx == gAnimPrevHotTab) {
+        return gTabHotOut.Value();
+    }
+    return (idx == tabUnderMouse) ? 1.0f : 0.0f;
+}
+
+static void UpdateTabHoverTimer(TabsCtrl* ctrl) {
+    if (!ctrl || !ctrl->hwnd) {
+        return;
+    }
+    if (gTabHotIn.IsAnimating() || gTabHotOut.IsAnimating()) {
+        SetTimer(ctrl->hwnd, kTabHoverTimerId, kAnimTickMs, nullptr);
+    } else {
+        KillTimer(ctrl->hwnd, kTabHoverTimerId);
+    }
+}
+
+static void SetTabHovered(TabsCtrl* ctrl, int idx) {
+    if (gHoverCtrl != ctrl) {
+        gHoverCtrl = ctrl;
+        gAnimHotTab = -1;
+        gAnimPrevHotTab = -1;
+        gTabHotIn.Set(0.0f);
+        gTabHotOut.Set(0.0f);
+    }
+    if (idx == gAnimHotTab) {
+        return;
+    }
+    if (AnimEnabled()) {
+        // the tab being left fades out from wherever it currently is
+        gAnimPrevHotTab = gAnimHotTab;
+        gTabHotOut.Set(gTabHotIn.Value());
+        gTabHotOut.SetTarget(0.0f, kAnimHoverMs);
+        gAnimHotTab = idx;
+        gTabHotIn.Set(0.0f);
+        gTabHotIn.SetTarget(idx >= 0 ? 1.0f : 0.0f, kAnimHoverMs);
+        UpdateTabHoverTimer(ctrl);
+    } else {
+        gAnimHotTab = idx;
+        gAnimPrevHotTab = -1;
+    }
+    HwndScheduleRepaint(ctrl->hwnd);
+}
+
+// The app's "larger tabs" preference, pushed down from app code the same way
+// AnimSetAppEnabled bridges the animation pref: wingui must not read
+// GlobalPrefs itself. Scales the pill width; the strip height and font are
+// scaled by the app side (see TouchTitleBarTabsDy).
+static bool gLargerTabs = false;
+// wraps a long label onto a second line instead of cutting it with an ellipsis
+static bool gTwoRowTabs = false;
+
+void TabsSetLargerTabs(bool larger) {
+    gLargerTabs = larger;
+}
+
+bool TabsLargerTabs() {
+    return gLargerTabs;
+}
+
+void TabsSetTwoRowTabs(bool twoRow) {
+    gTwoRowTabs = twoRow;
+}
+
+bool TabsTwoRowTabs() {
+    return gTwoRowTabs;
+}
+
 void TabsCtrl::LayoutTabs() {
     Rect rect = HwndClientRect(hwnd);
     int dy = rect.dy;
-    int nTabs = TabCount();
+    // The native tab control and our TabInfo vector are updated by separate
+    // operations. Either operation can synchronously pump mouse/paint messages,
+    // so use only the entries present in both collections during that brief gap.
+    int nTabs = std::min(TabCount(), len(tabs));
     if (nTabs == 0) {
+        previewButtonRect = {};
+        addButtonRect = {};
+        menuButtonRect = {};
         // Do not ScheduleRepaint here: an empty bar with a forced repaint can
         // re-enter layout/paint forever if something keeps calling LayoutTabs
         // (issue #5861). The parent hides the control when there are no tabs.
         return;
     }
+    // hidden tabs (the touch Library/Web host) claim no strip space, so the
+    // width has to be divided among the visible ones or the real tabs come out
+    // narrower than the bar can actually fit
+    int nVisible = 0;
+    for (int i = 0; i < nTabs; i++) {
+        if (!tabs[i]->isHidden) {
+            nVisible++;
+        }
+    }
     int dx;
     if (tabWidthFrozen && frozenTabDx > 0) {
         dx = frozenTabDx;
     } else {
-        auto maxDx = (rect.dx - 5) / nTabs;
-        dx = std::min(tabDefaultDx, maxDx);
+        // preview + add + "...", each 28 wide with 4px gaps
+        int controlReserve = inTitleBar ? DpiScale(hwnd, 100) : 5;
+        auto maxDx = (rect.dx - controlReserve) / std::max(nVisible, 1);
+        if (inTitleBar) {
+            int minDx = gLargerTabs ? kTabPillLargeMinDx : kTabPillMinDx;
+            int maxPillDx = gLargerTabs ? kTabPillLargeMaxDx : kTabPillMaxDx;
+            dx = std::clamp(maxDx, DpiScale(hwnd, minDx), DpiScale(hwnd, maxPillDx));
+        } else {
+            dx = std::min(tabDefaultDx, maxDx);
+        }
     }
     Size newTabSize = {dx, dy};
     bool sizeChanged = (newTabSize.dx != tabSize.dx || newTabSize.dy != tabSize.dy);
@@ -93,16 +205,37 @@ void TabsCtrl::LayoutTabs() {
     // logfa("  closeDx: %d, closeDy: %d\n", closeDx, closeDy);
 
     bool isRtl = IsTabsRtl(hwnd);
-    int closePad = 8; // padding between close circle and tab edge
+    // padding between close circle and tab edge; the title-bar pill gives it
+    // the same room the label gets on the other side
+    int closePad = inTitleBar ? DpiScale(hwnd, 14) : 8;
 
     HFONT hfont = GetFont();
-    int x = isRtl ? rect.dx : 0;
+    int titleControlDx = inTitleBar ? DpiScale(hwnd, 28) : 0;
+    int titleControlGap = inTitleBar ? DpiScale(hwnd, 4) : 0;
+    // the preview switcher leads the strip: its cards drop down under the tabs
+    // themselves (anchored to the first one), so the button belongs beside them
+    previewButtonRect = inTitleBar ? Rect{0, (dy - titleControlDx) / 2, titleControlDx, titleControlDx} : Rect{};
+    int x = isRtl ? rect.dx - titleControlDx - titleControlGap : titleControlDx + titleControlGap;
     int xEnd;
     TooltipInfo* tools = AllocArrayTemp<TooltipInfo>(nTabs);
     for (int i = 0; i < nTabs; i++) {
         // bounded loop with a valid index: index tabs directly instead of going
         // through GetTab (which re-issues TCM_GETITEMCOUNT each call)
         TabInfo* ti = tabs[i];
+        if (ti->isHidden) {
+            // empty rect also makes TabStateFromMousePosition miss it
+            ti->r = {};
+            ti->rClose = {};
+            ti->rCloseHit = {};
+            ti->titleSize = {};
+            ti->titlePos = {};
+            if (withToolTips) {
+                tools[i].s = nullptr;
+                tools[i].id = i;
+                tools[i].r = {};
+            }
+            continue;
+        }
         if (isRtl) {
             xEnd = x - dx;
             ti->r = {xEnd, 0, dx, dy};
@@ -134,16 +267,51 @@ void TabsCtrl::LayoutTabs() {
         }
         x = xEnd;
     }
+    if (inTitleBar) {
+        int cy = (dy - titleControlDx) / 2;
+        int step = titleControlDx + titleControlGap;
+        int ax = isRtl ? x - titleControlGap - titleControlDx : x + titleControlGap;
+        addButtonRect = Rect{ax, cy, titleControlDx, titleControlDx};
+        int mx = isRtl ? ax - step : ax + step;
+        menuButtonRect = Rect{mx, cy, titleControlDx, titleControlDx};
+    } else {
+        addButtonRect = {};
+        menuButtonRect = {};
+    }
     if (withToolTips) {
         HWND ttHwnd = GetToolTipsHwnd();
         TooltipRemoveAll(ttHwnd);
         TooltipAddTools(ttHwnd, hwnd, tools, nTabs);
     }
 
+    // The native control still holds the hidden tab (it owns the tab list) and
+    // lays its items out itself. Handing it a width derived from the *visible*
+    // count makes it conclude its tabs overflow, and it grows spin buttons
+    // (msctls_updown32) over our chrome. It is only bookkeeping here - every
+    // pixel is owner-drawn from ti->r - so give it a size that always fits.
+    Size nativeSize = tabSize;
+    // slack for the control's own per-item padding, or "exactly fits" by our
+    // arithmetic is still an overflow by its own
+    int fitDx = std::max(1, (rect.dx - DpiScale(hwnd, 24)) / std::max(nTabs, 1));
+    nativeSize.dx = std::min(tabSize.dx, fitDx);
+    bool nativeChanged = (nativeSize.dx != lastNativeTabDx);
+    lastNativeTabDx = nativeSize.dx;
+
     // TabCtrl_SetItemSize always invalidates; skip when size is unchanged to
     // avoid a paint storm after last-tab close / caption relayout (#5861).
-    if (sizeChanged) {
-        HwndTabsSetItemSize(hwnd, tabSize);
+    if (sizeChanged || nativeChanged) {
+        HwndTabsSetItemSize(hwnd, nativeSize);
+    }
+
+    // Belt and braces: whatever it concludes about overflow, the native
+    // control's spin buttons must never show. They are a real child window it
+    // creates for itself, and they were landing on top of the "..." button.
+    HWND spinner = FindWindowExW(hwnd, nullptr, L"msctls_updown32", nullptr);
+    while (spinner) {
+        if (IsWindowVisible(spinner)) {
+            ShowWindow(spinner, SW_HIDE);
+        }
+        spinner = FindWindowExW(hwnd, spinner, L"msctls_updown32", nullptr);
     }
 }
 
@@ -154,9 +322,12 @@ TabsCtrl::MouseState TabsCtrl::TabStateFromMousePosition(const Point& p) {
     if (pt.x < 0 || pt.y < 0) {
         return res;
     }
-    int nTabs = TabCount();
+    int nTabs = std::min(TabCount(), len(tabs));
     for (int i = 0; i < nTabs; i++) {
         TabInfo* ti = tabs[i];
+        if (ti->isHidden) {
+            continue;
+        }
         Rect r = ti->r;
         // logfa("testing i=%d rect: %d %d %d %d pt: %d %d\n", i, ti->r.x, ti->r.y, ti->r.dx, ti->r.dy, pt.x, pt.y);
         if (!r.Contains(pt)) {
@@ -191,7 +362,95 @@ static COLORREF TabTextColorForBackground(COLORREF tabBg) {
 }
 
 bool TabsCtrl::IsValidIdx(int idx) {
-    return idx >= 0 && idx < TabCount();
+    return idx >= 0 && idx < TabCount() && idx < len(tabs);
+}
+
+// a tab is drawn as a pill: a rounded rect whose radius is half its height
+static void FillPill(Graphics& gfx, const Rect& r, COLORREF col, int requestedRadius = -1) {
+    // a narrow tab (many tabs open) is narrower than it is tall; without the
+    // clamp the corner arcs overlap and the tab is drawn as a circle
+    int radius = requestedRadius >= 0 ? std::min(requestedRadius, std::min(r.dy, r.dx) / 2) : std::min(r.dy, r.dx) / 2;
+    int d = radius * 2;
+    if (d <= 0) {
+        return;
+    }
+    Gdiplus::GraphicsPath path;
+    path.AddArc(r.x, r.y, d, d, 180.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y, d, d, 270.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y + r.dy - d, d, d, 0.0f, 90.0f);
+    path.AddArc(r.x, r.y + r.dy - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+    SolidBrush br(GdipCol(col));
+    auto prevSmooth = gfx.GetSmoothingMode();
+    auto prevComp = gfx.GetCompositingMode();
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gfx.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+    gfx.FillPath(&br, &path);
+    gfx.SetSmoothingMode(prevSmooth);
+    gfx.SetCompositingMode(prevComp);
+}
+
+// A browser-style tab: rounded top corners, square bottom corners, meant to
+// be drawn full-height so its flat bottom edge sits flush against whatever is
+// directly below the strip - the point being that a tab reads as growing out
+// of the page below it, not as a chip floating inside the bar.
+static void FillTabShape(Graphics& gfx, const Rect& r, COLORREF col, int radius) {
+    int d = std::min(radius * 2, std::min(r.dy * 2, r.dx));
+    if (d <= 0 || r.dy <= 0) {
+        return;
+    }
+    Gdiplus::GraphicsPath path;
+    path.AddArc(r.x, r.y, d, d, 180.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y, d, d, 270.0f, 90.0f);
+    path.AddLine(r.x + r.dx, r.y + r.dy, r.x, r.y + r.dy);
+    path.CloseFigure();
+    SolidBrush br(GdipCol(col));
+    auto prevSmooth = gfx.GetSmoothingMode();
+    auto prevComp = gfx.GetCompositingMode();
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gfx.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+    gfx.FillPath(&br, &path);
+    gfx.SetSmoothingMode(prevSmooth);
+    gfx.SetCompositingMode(prevComp);
+}
+
+// The top and sides of a tab shape, no bottom line: an unselected tab's
+// outline stops where the shape meets the bar. Half-pixel offsets keep a 1px
+// antialiased pen on one pixel row instead of smeared over two.
+static void StrokeTabShapeTop(Graphics& gfx, const Rect& r, COLORREF col, int radius) {
+    int d = std::min(radius * 2, std::min(r.dy * 2, r.dx));
+    if (d <= 0 || r.dy <= 0) {
+        return;
+    }
+    Gdiplus::REAL x = (Gdiplus::REAL)r.x + 0.5f;
+    Gdiplus::REAL y = (Gdiplus::REAL)r.y + 0.5f;
+    Gdiplus::REAL dx = (Gdiplus::REAL)r.dx - 1.0f;
+    Gdiplus::REAL dy = (Gdiplus::REAL)r.dy;
+    Gdiplus::REAL rd = (Gdiplus::REAL)d;
+    Gdiplus::GraphicsPath path;
+    path.AddLine(x, y + dy, x, y + rd / 2);
+    path.AddArc(x, y, rd, rd, 180.0f, 90.0f);
+    path.AddArc(x + dx - rd, y, rd, rd, 270.0f, 90.0f);
+    path.AddLine(x + dx, y + rd / 2, x + dx, y + dy);
+    Pen pen(GdipCol(col), 1.0f);
+    auto prevSmooth = gfx.GetSmoothingMode();
+    auto prevComp = gfx.GetCompositingMode();
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gfx.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+    gfx.DrawPath(&pen, &path);
+    gfx.SetSmoothingMode(prevSmooth);
+    gfx.SetCompositingMode(prevComp);
+}
+
+static void DrawRoundedOutline(Graphics& gfx, Pen& pen, int x, int y, int dx, int dy, int radius) {
+    int d = std::min(radius * 2, std::min(dx, dy));
+    GraphicsPath path;
+    path.AddArc(x, y, d, d, 180.0f, 90.0f);
+    path.AddArc(x + dx - d, y, d, d, 270.0f, 90.0f);
+    path.AddArc(x + dx - d, y + dy - d, d, d, 0.0f, 90.0f);
+    path.AddArc(x, y + dy - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+    gfx.DrawPath(&pen, &path);
 }
 
 void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
@@ -220,9 +479,17 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
     gfx.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
     gfx.SetPageUnit(UnitPixel);
 
-    SolidBrush br(GdipCol(ThemeControlBackgroundColor()));
+    COLORREF tabBarBg = inTitleBar ? ThemeHotBackgroundColor() : ThemeControlBackgroundColor();
+    SolidBrush br(GdipCol(tabBarBg));
 
-    Font f(hdc, GetFont());
+    // 12pt was small for a filename you are meant to read at a glance; the
+    // strip is 48px tall so 13 fits with room to spare. "Larger tabs" takes it
+    // to 16 along with the wider pills and taller strip.
+    int tabFontSize = gLargerTabs ? 16 : 13;
+    HFONT normalFont = inTitleBar ? HdcGetUiFont(hdc, tabFontSize) : GetFont();
+    HFONT selectedFont = inTitleBar ? HdcGetUiFont(hdc, tabFontSize, FW_SEMIBOLD) : GetFont();
+    Font fNormal(hdc, normalFont);
+    Font fSelected(hdc, selectedFont);
 
     Gdiplus::Rect gr = ToGdipRect(rc);
     gfx.FillRectangle(&br, gr);
@@ -236,25 +503,39 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
     }
 
     TabInfo* ti;
-    int n = TabCount();
+    int n = std::min(TabCount(), len(tabs));
     Rect r;
     Gdiplus::RectF rTxt;
-    COLORREF tabBgSelected = ThemeControlBackgroundColor();
-    COLORREF tabBgHighlight;
-    COLORREF tabBgBackground;
-    tabBgBackground = AccentColor(tabBgSelected, 25);
-    tabBgHighlight = AccentColor(tabBgSelected, 35);
+    // the bar itself is the control background and an unselected tab is just
+    // bar (no pill), so the selected pill has to be the darker shade
+    COLORREF tabBgSelected = inTitleBar ? ThemeControlBackgroundColor() : AccentColor(tabBarBg, 25);
+    // In the title bar an unselected tab gets a shape of its own, one step off
+    // the bar (darker on a light theme, lighter on a dark one) with an edge,
+    // so the strip reads as a row of tabs rather than one block and loose
+    // text. The classic strip keeps them flat.
+    COLORREF tabBgBackground = inTitleBar ? AccentColor(tabBarBg, 8) : tabBarBg;
+    COLORREF tabBgHighlight = AccentColor(tabBarBg, inTitleBar ? 16 : 12);
+    COLORREF tabEdge = ThemeEdgeColor();
 
     COLORREF tabBgCol;
     for (int i = 0; i < n; i++) {
+        // A hidden tab is never drawn - including when it is the selected one,
+        // which is the point: with the touch Library current, no tab in the
+        // strip is painted as selected.
+        if (tabs[i]->isHidden) {
+            continue;
+        }
         // Get the correct colors based on the state and the current theme
         tabBgCol = tabBgBackground;
         bool isSelected = selectedIdx == i;
         bool isUnderMouse = tabUnderMouse == i;
         if (isSelected) {
             tabBgCol = tabBgSelected;
-        } else if (isUnderMouse) {
-            tabBgCol = tabBgHighlight;
+        } else {
+            float hoverAmt = TabHoverAmount(this, i, tabUnderMouse);
+            if (hoverAmt > 0.0f) {
+                tabBgCol = AnimLerpColor(tabBgBackground, tabBgHighlight, hoverAmt);
+            }
         }
 
         // bounded loop with a valid index: index tabs directly (avoids the
@@ -269,14 +550,40 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             }
         }
 
-        COLORREF textColor = TabTextColorForBackground(tabBgCol);
+        COLORREF textColor = inTitleBar ? ThemeWindowTextColor() : TabTextColorForBackground(tabBgCol);
 
         gfx.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
 
-        // draw background
-        br.SetColor(GdipCol(tabBgCol));
-        gr = ToGdipRect(ti->r);
-        gfx.FillRectangle(&br, gr);
+        // the shape's rect: the selected tab fills the strip's full height and
+        // merges with the page below; an unselected one starts 4px lower, so
+        // the selected tab stands proud of the row
+        Rect rShape = ti->r;
+        if (inTitleBar && !isSelected) {
+            int drop = DpiScale(hwnd, 4);
+            rShape.y += drop;
+            rShape.dy -= drop;
+        }
+        // draw background. An unselected tab that isn't hovered has the same
+        // color as the bar, so drawing a pill for it would just be a no-op
+        // shape with antialiased edges over the bar; skip it.
+        if (tabBgCol != tabBarBg) {
+            Rect rPill = rShape;
+            int gap = DpiScale(hwnd, kTabPillGap);
+            rPill.x += gap / 2;
+            rPill.dx -= gap;
+            if (inTitleBar) {
+                // Full strip height with a flat bottom, not a shorter pill
+                // centered in it: the selected tab's fill then reaches the
+                // strip's own bottom edge, which is where FillTabShape's
+                // caller lines its color up with the page below.
+                FillTabShape(gfx, rPill, tabBgCol, DpiScale(hwnd, 10));
+                if (!isSelected) {
+                    StrokeTabShapeTop(gfx, rPill, tabEdge, DpiScale(hwnd, 10));
+                }
+            } else {
+                FillPill(gfx, rPill, tabBgCol, -1);
+            }
+        }
 
         // debug: paint close hit area in light green
         if (false && ti->canClose && (i == tabUnderMouse)) {
@@ -284,28 +591,58 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             gfx.FillRectangle(&dbgBr, ToGdipRect(ti->rCloseHit));
         }
 
-        // draw text
+        // draw text, centered in the shape rather than the strip
         gfx.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
         r = ti->rClose;
-        rTxt = ToGdipRectF(ti->r);
+        rTxt = ToGdipRectF(rShape);
+        // browser tabs give the label more room to breathe than 8px; the
+        // classic (non-title-bar) strip keeps its old, tighter spacing
+        int textPad = inTitleBar ? DpiScale(hwnd, 14) : 8;
         if (IsTabsRtl(hwnd)) {
-            // RTL: [8px | close | text | 8px]
-            rTxt.X += (Gdiplus::REAL)(8 + r.dx);
+            // RTL: [pad | close | text | pad]
+            rTxt.X += (Gdiplus::REAL)(textPad + r.dx);
         } else {
-            // LTR: [8px | text | close | 8px]
-            rTxt.X += 8;
+            // LTR: [pad | text | close | pad]
+            rTxt.X += (Gdiplus::REAL)textPad;
         }
-        rTxt.Width -= (Gdiplus::REAL)(8 + r.dx + 8);
+        rTxt.Width -= (Gdiplus::REAL)(textPad + r.dx + textPad);
         br.SetColor(GdipCol(textColor));
         WCHAR* ws = CWStrTemp(ti->text);
-        gfx.DrawString(ws, -1, &f, rTxt, &sf, &br);
+        Font* font = isSelected ? &fSelected : &fNormal;
+        if (gTwoRowTabs) {
+            // Two lines: wrap at a word if one fits, else mid-word, and clip
+            // the rest. sf is shared and configured for one no-wrap line, so
+            // this needs its own format rather than mutating it.
+            StringFormat sf2(StringFormat::GenericDefault());
+            sf2.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+            sf2.SetLineAlignment(StringAlignmentCenter);
+            // GenericDefault wraps to as many lines as the rect is tall enough
+            // to hold - nothing here says "two". The tab's row height leaves
+            // room for more than two lines of this font, so a long title was
+            // wrapping to three. Clamp the layout rect to exactly two line
+            // heights (centered in the taller tab) and cut anything that
+            // still doesn't fit, rather than trusting the rect's real height.
+            sf2.SetFormatFlags(sf2.GetFormatFlags() | Gdiplus::StringFormatFlagsLineLimit);
+            // both lines start at the same left edge; the default alignment
+            // let a wrapped second line drift
+            sf2.SetAlignment(IsTabsRtl(hwnd) ? Gdiplus::StringAlignmentFar : Gdiplus::StringAlignmentNear);
+            Gdiplus::RectF rTxt2 = rTxt;
+            Gdiplus::REAL twoLineDy = font->GetHeight(&gfx) * 2.0f;
+            if (twoLineDy < rTxt2.Height) {
+                rTxt2.Y += (rTxt2.Height - twoLineDy) / 2.0f;
+                rTxt2.Height = twoLineDy;
+            }
+            gfx.DrawString(ws, -1, font, rTxt2, &sf2, &br);
+        } else {
+            gfx.DrawString(ws, -1, font, rTxt, &sf, &br);
+        }
 
         // draw red dot after tab text for dirty (unsaved) tabs
         if (ti->isDirty) {
             gfx.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
             // measure actual rendered text width (may be truncated with ellipsis)
             Gdiplus::RectF bounds;
-            gfx.MeasureString(ws, -1, &f, rTxt, &sf, &bounds);
+            gfx.MeasureString(ws, -1, font, rTxt, &sf, &bounds);
             int dotRadius = DpiScale(hwnd, 3);
             int dotX = (int)(bounds.X + bounds.Width) + dotRadius;
             // clamp to not exceed the text area
@@ -316,14 +653,55 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             gfx.FillEllipse(&redBr, dotX, dotY, dotRadius * 2, dotRadius * 2);
             gfx.SetSmoothingMode(Gdiplus::SmoothingModeNone);
         }
-        bool closeVisible = ti->canClose && (isSelected || (isUnderMouse && ti->r.dx >= kMinTabWidthForClose));
+        bool closeVisible =
+            ti->canClose && (inTitleBar || isSelected || (isUnderMouse && ti->r.dx >= kMinTabWidthForClose));
         if (closeVisible) {
             DrawCloseButtonArgs closeArgs;
             closeArgs.hdc = hdc;
             closeArgs.r = ti->rClose;
             closeArgs.isHover = overClose && isUnderMouse;
             closeArgs.colBg = tabBgCol;
+            if (inTitleBar) {
+                // centered in the shape, muted on an unselected tab, and a
+                // hover circle in the edge color rather than the classic red
+                closeArgs.r.y += (rShape.y - ti->r.y) / 2;
+                closeArgs.colX = isSelected ? ThemeWindowTextColor() : ThemeWindowDarkerTextColor();
+                closeArgs.colXHover = ThemeWindowTextColor();
+                closeArgs.colHoverBg = tabEdge;
+            }
             DrawCloseButton(closeArgs);
+        }
+    }
+
+    if (inTitleBar && n > 0) {
+        Pen iconPen(GdipCol(ThemeWindowDarkerTextColor()), (Gdiplus::REAL)std::max(1, DpiScale(hwnd, 1)));
+        iconPen.SetStartCap(Gdiplus::LineCapRound);
+        iconPen.SetEndCap(Gdiplus::LineCapRound);
+        gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Rect p = previewButtonRect;
+        int ix = p.x + (p.dx - DpiScale(hwnd, 14)) / 2;
+        int iy = p.y + (p.dy - DpiScale(hwnd, 12)) / 2;
+        int iw = DpiScale(hwnd, 11);
+        int ih = DpiScale(hwnd, 8);
+        DrawRoundedOutline(gfx, iconPen, ix + DpiScale(hwnd, 3), iy, iw, ih, DpiScale(hwnd, 2));
+        DrawRoundedOutline(gfx, iconPen, ix, iy + DpiScale(hwnd, 3), iw, ih, DpiScale(hwnd, 2));
+
+        Rect a = addButtonRect;
+        int cx = a.x + a.dx / 2;
+        int cy = a.y + a.dy / 2;
+        int arm = DpiScale(hwnd, 5);
+        gfx.DrawLine(&iconPen, cx - arm, cy, cx + arm, cy);
+        gfx.DrawLine(&iconPen, cx, cy - arm, cx, cy + arm);
+
+        // "..." overflow: three dots on the same baseline as the + arms
+        Rect m = menuButtonRect;
+        int mcx = m.x + m.dx / 2;
+        int mcy = m.y + m.dy / 2;
+        int dotR = std::max(1, DpiScale(hwnd, 2));
+        int dotGap = DpiScale(hwnd, 5);
+        SolidBrush dotBr(GdipCol(ThemeWindowDarkerTextColor()));
+        for (int k = -1; k <= 1; k++) {
+            gfx.FillEllipse(&dotBr, mcx + (k * dotGap) - dotR, mcy - dotR, dotR * 2, dotR * 2);
         }
     }
 }
@@ -451,8 +829,8 @@ static void TriggerTabDragged(TabsCtrl* tabs, int tab1, int tab2) {
 
 static void UpdateAfterDrag(TabsCtrl* tabsCtrl, int tabIdxFrom, int tabIdxTo) {
     int nTabs = tabsCtrl->TabCount();
-    bool badState =
-        (tabIdxFrom == tabIdxTo) || (tabIdxFrom < 0) || (tabIdxTo < 0) || (tabIdxFrom >= nTabs) || (tabIdxTo > nTabs);
+    bool badState = (tabIdxFrom == tabIdxTo) || (tabIdxFrom < 0) || (tabIdxTo < 0) || (tabIdxFrom >= nTabs) ||
+                    (tabIdxTo > nTabs) || (tabIdxFrom >= len(tabsCtrl->tabs)) || (tabIdxTo > len(tabsCtrl->tabs));
     if (badState) {
         logfa("tabIdxFrom: %d, tabIdxTo: %d, nTabs: %d\n", tabIdxFrom, tabIdxTo, nTabs);
         ReportDebugIf(true);
@@ -514,6 +892,8 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         canClose = tabState.tabInfo && tabState.tabInfo->canClose;
         overClose = tabState.overClose && canClose;
         lastMousePos = mousePos;
+        // hover cross-fade follows whatever the pointer is over
+        SetTabHovered(this, (msg == WM_MOUSELEAVE) ? -1 : tabUnderMouse);
         // TempStr msgName = WinMsgNameTemp(msg);
         //  logfa("msg; %s, tabUnderMouse: %d, overClose: %d\n", msgName, tabUnderMouse, (int)overClose);
     }
@@ -528,11 +908,12 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // Check if mouse has moved beyond system drag threshold
     bool beyondDragThreshold = false;
     if (msg == WM_MOUSEMOVE && GetCapture() == hwnd && !draggingTab) {
-        if (tabHighlighted >= 0 && tabHighlighted < TabCount()) {
+        TabInfo* highlighted = GetTab(tabHighlighted);
+        if (highlighted) {
             int cxDrag = GetSystemMetrics(SM_CXDRAG);
             int cyDrag = GetSystemMetrics(SM_CYDRAG);
-            beyondDragThreshold = (abs(mousePos.x - grabLocation.x - GetTab(tabHighlighted)->r.x) > cxDrag) ||
-                                  (abs(mousePos.y - grabLocation.y - GetTab(tabHighlighted)->r.y) > cyDrag);
+            beyondDragThreshold = (abs(mousePos.x - grabLocation.x - highlighted->r.x) > cxDrag) ||
+                                  (abs(mousePos.y - grabLocation.y - highlighted->r.y) > cyDrag);
         }
     }
 
@@ -546,6 +927,10 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return HTCLIENT;
             }
             mousePos = HwndScreenToClient(hwnd, mousePos);
+            if (previewButtonRect.Contains(mousePos) || addButtonRect.Contains(mousePos) ||
+                menuButtonRect.Contains(mousePos)) {
+                return HTCLIENT;
+            }
             tabState = TabStateFromMousePosition(mousePos);
             if (tabState.tabIdx >= 0) {
                 return HTCLIENT;
@@ -557,7 +942,20 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             LayoutTabs();
             break;
 
+        case WM_TIMER:
+            if (wp == kTabHoverTimerId) {
+                HwndScheduleRepaint(hwnd);
+                UpdateTabHoverTimer(this);
+                return 0;
+            }
+            break;
+
         case WM_MOUSELEAVE:
+            SetTabHovered(this, -1);
+            if (previewHovered) {
+                previewHovered = false;
+                onPreviewHover.Call(false);
+            }
             if (tabWidthFrozen) {
                 tabWidthFrozen = false;
                 LayoutTabs();
@@ -571,6 +969,11 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_MOUSEMOVE: {
             TrackMouseLeave(hwnd);
+            bool overPreview = inTitleBar && previewButtonRect.Contains(mousePos);
+            if (overPreview != previewHovered) {
+                previewHovered = overPreview;
+                onPreviewHover.Call(overPreview);
+            }
             bool isDragging = (GetCapture() == hwnd);
             int hl = tabHighlighted;
             if (isDragging && beyondDragThreshold) {
@@ -626,6 +1029,10 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_LBUTTONDOWN: {
+            if (inTitleBar && (previewButtonRect.Contains(mousePos) || addButtonRect.Contains(mousePos) ||
+                               menuButtonRect.Contains(mousePos))) {
+                return 0;
+            }
             tabHighlighted = tabUnderMouse;
             if (overClose) {
                 HwndScheduleRepaint(hwnd);
@@ -662,6 +1069,24 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_LBUTTONUP: {
+            if (inTitleBar && previewButtonRect.Contains(mousePos)) {
+                if (onPreview.IsValid()) {
+                    onPreview.Call();
+                }
+                return 0;
+            }
+            if (inTitleBar && addButtonRect.Contains(mousePos)) {
+                if (onNewTab.IsValid()) {
+                    onNewTab.Call();
+                }
+                return 0;
+            }
+            if (inTitleBar && menuButtonRect.Contains(mousePos)) {
+                if (onTabMenu.IsValid()) {
+                    onTabMenu.Call();
+                }
+                return 0;
+            }
             bool isDragging = (GetCapture() == hwnd);
             if (isDragging) {
                 ReleaseCapture();
@@ -704,7 +1129,8 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (dstIdx == selectedTab) {
                 return 0;
             }
-            if ((dstIdx < TabCount()) && GetTab(dstIdx)->isPinned) {
+            TabInfo* dstTab = GetTab(dstIdx);
+            if (dstTab && dstTab->isPinned) {
                 return 0;
             }
             TriggerTabDragged(this, selectedTab, dstIdx);
@@ -853,11 +1279,19 @@ void TabsCtrl::SetTabDirty(int idx, bool dirty) {
 
 // returns userData because it's not owned by TabsCtrl
 UINT_PTR TabsCtrl::RemoveTab(int idx) {
-    ReportIf(idx < 0);
-    ReportIf(idx >= TabCount());
+    int nNativeTabs = TabCount();
+    bool invalidIdx = idx < 0 || idx >= nNativeTabs || idx >= len(tabs);
+    ReportIf(invalidIdx);
+    if (invalidIdx) {
+        logf("TabsCtrl::RemoveTab(): idx=%d, native tabs=%d, tab data=%d\n", idx, nNativeTabs, len(tabs));
+        return 0;
+    }
     int selectedTab = GetSelected();
     BOOL ok = TabCtrl_DeleteItem(hwnd, idx);
     ReportIf(!ok);
+    if (!ok) {
+        return 0;
+    }
     TabInfo* tab = tabs[idx];
     UINT_PTR userData = tab->userData;
     tabs.RemoveAt(idx);
@@ -876,6 +1310,11 @@ UINT_PTR TabsCtrl::RemoveTab(int idx) {
 }
 
 void TabsCtrl::SwapTabs(int idx1, int idx2) {
+    bool invalidIdx = idx1 < 0 || idx2 < 0 || idx1 >= len(tabs) || idx2 >= len(tabs);
+    ReportIf(invalidIdx);
+    if (invalidIdx) {
+        return;
+    }
     TabInfo* tmp = tabs[idx1];
     tabs[idx1] = tabs[idx2];
     tabs[idx2] = tmp;
@@ -922,10 +1361,11 @@ int TabsCtrl::GetSelected() {
 
 int TabsCtrl::SetSelected(int idx) {
     int nTabs = TabCount();
-    if (idx < 0 || idx >= nTabs) {
-        logf("TabsCtrl::SetSelected(): idx: %d, TabsCount(): %d\n", idx, nTabs);
+    if (idx < 0 || idx >= nTabs || idx >= len(tabs)) {
+        logf("TabsCtrl::SetSelected(): idx: %d, native tabs: %d, tab data: %d\n", idx, nTabs, len(tabs));
+        ReportIf(true);
+        return -1;
     }
-    ReportIf(idx < 0 || idx >= nTabs);
     // Suppress native tab invalidation (LTR item rects); we repaint the full client.
     SendMessageW(hwnd, WM_SETREDRAW, FALSE, 0);
     int prevSelectedIdx = TabCtrl_SetCurSel(hwnd, idx);

@@ -97,7 +97,11 @@ RememberOpenedFiles = true
 RememberStatePerDocument = true
 
 ; if true and SessionData isn't empty, that session will be restored at startup
-RestoreSession = true
+RestoreSession = false
+
+; whether the SumatraPDF+ no-session-restore default has been applied
+; (introduced in version 3.8)
+RestoreSessionDefaultMigrated = false
 
 ; if true, open documents in the already running SumatraPDF instead of starting
 ; a new one
@@ -137,6 +141,29 @@ SearchUIFloating = false
 
 ; if true, show the Favorites sidebar
 ShowFavorites = false
+
+; if true, show the icon rail: the strip of large icon buttons along the left
+; edge that switches what the sidebar shows. On by default for the touch
+; redesign (introduced in version 3.8)
+ShowRail = true
+
+; if true, use the touch-friendly chrome: a custom-drawn toolbar of grouped
+; buttons with finger-sized targets, and a sidebar to match. If false, the
+; classic Windows toolbar is used (introduced in version 3.8)
+TouchChrome = true
+
+; vertical spacing for touch sidebar rows: "condensed", "normal", or "expanded"
+; (introduced in version 3.8)
+TouchSidebarDensity = normal
+
+; folders imported into the Library view (introduced in version 3.8)
+LibraryFolders =
+
+; folders pinned in the Library view (introduced in version 3.8)
+LibraryPinnedFolders =
+
+; folders hidden in the Library view (introduced in version 3.8)
+LibraryHiddenFolders =
 
 ; if true, favorites within each file are sorted alphabetically by name (or page
 ; label); if false (the default), they are sorted by page number (introduced in
@@ -215,10 +242,10 @@ PreventSleepInFullscreen = true
 ; maximum width of a single tab, in pixels at 100% display scaling (at least 60)
 TabWidth = 300
 
-; valid themes: Light, Dark, Light Warm, Dark from 3.5, Charcoal, Solarized
-; Light, Solarized Dark, Dracula, Nebula, Greeny, Choco, Purpy, One Dark,
-; Monokai, Nord, GitHub Dark, Catppuccin Mocha, Tokyo Night, Gruvbox, Night Owl,
-; Ayu, Palenight, System (introduced in version 3.5)
+; valid themes: Light, Dark, Light Warm, Touch Paper, Dark from 3.5, Charcoal,
+; Solarized Light, Solarized Dark, Dracula, Nebula, Greeny, Choco, Purpy, One
+; Dark, Monokai, Nord, GitHub Dark, Catppuccin Mocha, Tokyo Night, Gruvbox,
+; Night Owl, Ayu, Palenight, System (introduced in version 3.5)
 Theme = 
 
 ; the light theme the light/dark toggle and the System theme switch to
@@ -250,7 +277,7 @@ ToolbarShowReadAloud = false
 
 ; size of the toolbar icons in pixels at 100% display scaling (8-64); the
 ; toolbar itself is a few pixels taller (introduced in version 3.4)
-ToolbarSize = 18
+ToolbarSize = 24
 
 ; font name for bookmarks and favorites tree views. automatic means Windows
 ; default
@@ -283,7 +310,7 @@ UseSysColors = false
 
 ; if true, documents are opened in tabs instead of new windows (introduced in
 ; version 3.0)
-UseTabs = true
+UseTabs = false
 
 ; if true, a small floating toolbar with selection actions (copy, read aloud,
 ; highlight etc.) pops up after selecting text. Set to false to disable it
@@ -840,6 +867,16 @@ FileStates [
     ; how far this document has been scrolled (in x and y direction)
     ScrollPos = 0 0
 
+    ; fraction of each page's height cropped off the top for this document, set
+    ; by hand in Trim headers & footers. 0 means no trim. Applies to every page,
+    ; so it works on scans and on notation that Smart header & footer cannot
+    ; read (introduced in version 3.8)
+    TrimTop = 0
+
+    ; fraction of each page's height cropped off the bottom for this document;
+    ; see TrimTop (introduced in version 3.8)
+    TrimBottom = 0
+
     ; number of the last read page
     PageNo = 1
 
@@ -951,7 +988,69 @@ OpenCountWeek = 0
 ; position of the document properties window
 PropWinPos = 0 0
 
-; if true, check once a day whether an update is available
+; private update manifest URL; when set, it replaces the public update feed and
+; update installers must use the same URL origin. SumatraPDF+ defaults it to
+; this fork's GitHub releases so update checks are self-hosted (introduced in
+; version 3.8)
+UpdateFeedURL = https://github.com/tinypocket/sumatrapdf/releases/latest/download/update-check.txt
+
+; home page for the in-product web browser (the rail's globe view) (introduced
+; in version 3.8)
+BrowserHomePage = https://www.google.com
+
+; bookmarked URLs shown in the in-product web browser (introduced in version
+; 3.8)
+BrowserBookmarks =
+
+; display names for BrowserBookmarks, one per URL and in the same order; a
+; missing or empty entry falls back to the URL's host (introduced in version
+; 3.8)
+BrowserFavoriteTitles =
+
+; files downloaded by the in-product web browser, so they can be cleaned up
+; later (introduced in version 3.8)
+BrowserDownloads =
+
+; if true, buttons animate briefly when pressed or hovered; turn off for a
+; completely static UI (introduced in version 3.8)
+AnimateUI = true
+
+; if true (and AnimateUI is also true), animate more of the UI: in the web
+; browser the tabs, favorites and nav buttons cross-fade on hover and sink when
+; pressed instead of switching instantly. Ignored when AnimateUI is false
+; (introduced in version 3.8)
+ElaborateAnimations = false
+
+; if true, the toolbar shows saved pages. With favorites in more than one
+; document it shows a chip per document, colour-coded, which opens that
+; document's saved pages (introduced in version 3.8)
+FavoritesInToolbar = true
+
+; if true, favorites keep the order you dragged them into instead of being
+; sorted by page or name. Set automatically the first time you re-order one
+; (introduced in version 3.8)
+FavoritesManualOrder = false
+
+; if true, the blank top and bottom margins of each page are cropped out of the
+; layout, so less scrolling is needed to reach the next page's content. Page
+; width is unaffected (introduced in version 3.8)
+SmartMargins = false
+
+; if true, smart margins also crops a running header and footer (a page number
+; or a title repeated in the same place on most pages), trimming more of each
+; page. Has no effect unless SmartMargins is true (introduced in version 3.8)
+SmartHeaderFooter = false
+
+; if true, a tab's label wraps onto a second line instead of being cut short
+; with an ellipsis, so more of a long filename is readable. Makes the tab strip
+; taller (introduced in version 3.8)
+TwoRowTabs = false
+
+; if true, the document tabs in the title bar are taller and wider with larger
+; text; easier to read and to hit with a finger (introduced in version 3.8)
+LargerTabs = false
+
+; if true, check at startup whether an update is available
 CheckForUpdates = true
 ```
 

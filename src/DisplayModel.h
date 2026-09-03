@@ -135,11 +135,83 @@ struct DisplayModel : DocController {
 
     PageInfo* GetPageInfo(int pageNo) const;
     RectF PageMediaBox(int pageNo) const;
+    // The part of a page actually shown. Equals the media box unless "smart
+    // margins" is on, which trims the blank band above and below the content so
+    // less scrolling is needed to reach the next page. Layout, rendering and
+    // coordinate mapping must ALL use this, or the page renders at one size
+    // into a rect of another and every hit-tested thing (selection, links,
+    // annotations, search highlights) shifts by the trimmed margin.
+    RectF PageDisplayBox(int pageNo) const;
+    // Smart margins can only be as good as the engine's content box, and on
+    // some documents that under-reports and clips real content. So any trimmed
+    // page can be expanded back to its full height individually, and the rest
+    // stay trimmed.
+    bool IsPageMarginTrimmed(int pageNo) const;
+    bool IsPageMarginExpanded(int pageNo) const;
+    void TogglePageMarginExpanded(int pageNo);
+    // device-space offset of the display box within the media box at this
+    // zoom/rotation; zero unless smart margins trimmed something
+    PointF PageCropOffset(int pageNo, float zoom) const;
 
     /* current rotation selected by user */
     int GetRotation() const;
     float GetZoomReal(int pageNo) const;
     void Relayout(float zoomVirtual, int rotation);
+    // pages the user un-trimmed by hand (see PageDisplayBox)
+    Vec<int> marginExpandedPages;
+    // the smart-margin prefs the current layout was computed with; a tab
+    // whose layout predates a toggle is relaid out when it is shown again
+    bool layoutSmartMargins = false;
+    bool layoutSmartHeaderFooter = false;
+    // Manual header/footer trim, as a fraction of each page's height. Set in
+    // the "Trim headers & footers" dialog and remembered per document. Unlike
+    // the automatic trim this needs nothing from the page - no text, no content
+    // box - so it works on scans and on dense notation where nothing can be
+    // read. 0 means no trim.
+    float manualTrimTop = 0.0f;
+    float manualTrimBottom = 0.0f;
+    void SetManualTrim(float top, float bottom);
+    // What the automatic pass would trim, as fractions of page height, for the
+    // manual dialog to open on. False when it found nothing to propose.
+    bool SuggestHeaderFooterTrim(float* topOut, float* bottomOut) const;
+    RectF ApplyManualTrim(RectF box, RectF media) const;
+    // Running header/footer bands, in points measured down from the top of the
+    // media box and up from its bottom. Detected once per document from a
+    // sample of pages; 0 means "none found". See DetectRunningHeaderFooter.
+    mutable bool smartHfChecked = false;
+    mutable float smartHfTopPt = 0.0f;
+    mutable float smartHfBottomPt = 0.0f;
+    void DetectRunningHeaderFooter() const;
+    // where one page's real text sits, and whether that page actually carries
+    // the running header/footer the document was found to have
+    struct PageBody {
+        float top = 0.0f;
+        float bottom = 0.0f;
+        bool hasHeader = false;
+        bool hasFooter = false;
+    };
+    bool PageBodyBand(int pageNo, PageBody* out) const;
+    // Per-page bands are found by extracting each page's text, which is far
+    // too slow to do for every page inside a layout. A background scan
+    // (StartSmartMarginScan) fills this in; until a page's entry is in, it is
+    // trimmed to its content box only, and the layout is redone once when the
+    // scan lands.
+    struct PageBodyCache {
+        u8 state = 0; // 0 pending, 1 no band (leave the page alone), 2 band
+        bool hasHeader = false;
+        bool hasFooter = false;
+        float top = 0.0f;
+        float bottom = 0.0f;
+        // the engine's content box, which is as slow to get as the text and
+        // so comes from the same scan (PageInfo::contentBox is set from it)
+        RectF contentBox{};
+    };
+    mutable Vec<PageBodyCache> pageBodies;
+    mutable int smartScanGen = 0;
+    mutable bool smartScanRunning = false;
+    void StartSmartMarginScan() const;
+    // prefs changed: forget the bands; the next layout starts a fresh scan
+    void InvalidateSmartMargins();
 
     Rect GetViewPort() const;
     bool IsHScrollbarVisible() const;

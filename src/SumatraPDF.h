@@ -9,6 +9,16 @@ enum class FileType : u8;
 #define CANVAS_CLASS_NAME L"SUMATRA_PDF_CANVAS"
 #define FRAME_CLASS_NAME L"SUMATRA_PDF_FRAME"
 
+struct FileState;
+struct RenderedBitmap;
+// re-render a file's thumbnail in the background, with no tab or controller
+// involved. Used to migrate thumbnails cached at an older card size.
+void CreateThumbnailFromFileAsync(FileState*);
+void CreateThumbnailFromFileAsync(Str filePath, int pageNo, const Func1<RenderedBitmap*>* onRendered);
+struct MainWindow;
+// true when the caption is the redesign's slim title strip rather than tabs
+bool UseSlimCaption(MainWindow*);
+
 constexpr int kFrameResizeHitTest = 5;
 
 extern bool gRedrawLog;

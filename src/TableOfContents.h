@@ -10,6 +10,13 @@ void ExpandTocToCurrentPage(MainWindow*);
 void UpdateTocExpansionState(Vec<int>& tocState, TreeView*, TocTree*);
 void UnsubclassToc(MainWindow*);
 void TocFilterChanged(MainWindow*);
+void UpdateTouchPanelMode(MainWindow*);
+bool IsTouchSearchPanelVisible(MainWindow*);
+// the touch Search panel's current query, or {} when that panel isn't the one
+// driving the find (then win->hwndFindEdit is the source, as it always was)
+TempStr TouchSearchPanelQueryTemp(MainWindow*);
+void SetTouchPanelModeAndRestoreSearch(MainWindow*, TouchPanelMode);
+int TouchSidebarRowDy();
 
 // When true (default), the bookmarks pane highlights every TOC entry that
 // matches the current page (same page number as the best match, plus the

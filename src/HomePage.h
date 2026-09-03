@@ -29,6 +29,48 @@ constexpr const char* kLinkHomeListView = "<HomePage,ListView>";
 constexpr const char* kLinkHomeThumbnailView = "<HomePage,ThumbnailView>";
 constexpr const char* kLinkHomeRemoveFilePrefix = "<HomePage,RemoveFile>";
 constexpr const char* kLinkHomePinFilePrefix = "<HomePage,PinFile>";
+constexpr const char* kLinkHomeOpenTabPrefix = "<HomePage,OpenTab>";
+constexpr const char* kLinkHomeCloseTabPrefix = "<HomePage,CloseTab>";
+constexpr const char* kLinkLibraryRecent = "<Library,Recent>";
+constexpr const char* kLinkLibraryBack = "<Library,Back>";
+constexpr const char* kLinkLibraryForward = "<Library,Forward>";
+// stack entry standing for the Recent surface; a real folder path never
+// contains angle brackets, so it cannot collide
+constexpr const char* kLibraryNavRecent = "<Recent>";
+// stack entry for a search's results, the query after the prefix; pushed when
+// the user leaves the results for a folder so Back returns to them
+constexpr const char* kLibraryNavSearchPrefix = "<Search>";
+constexpr const char* kLinkLibraryFolderPrefix = "<Library,Folder>";
+// Same navigation as kLinkLibraryFolderPrefix, given to content-pane
+// elements (cards, list rows, recent-folder pills) so their hover glow
+// never resolves to the sidebar tree row for the same folder - the two
+// are drawn separately and can be visible at once.
+constexpr const char* kLinkLibraryFolderCardPrefix = "<Library,FolderCard>";
+// the folder line under a search result: opens that folder in the tree
+// (the query is cleared; Back re-runs it)
+constexpr const char* kLinkLibraryFolderFromSearchPrefix = "<Library,FolderFromSearch>";
+constexpr const char* kLinkLibraryTogglePrefix = "<Library,Toggle>";
+constexpr const char* kLinkLibraryAddFolder = "<Library,AddFolder>";
+constexpr const char* kLinkLibraryMenuPrefix = "<Library,Menu>";
+constexpr const char* kLinkLibraryMenuPinnedPrefix = "<Library,MenuPinned>";
+constexpr const char* kLinkLibraryPinPrefix = "<Library,Pin>";
+constexpr const char* kLinkLibraryHidePrefix = "<Library,Hide>";
+constexpr const char* kLinkLibraryManage = "<Library,Manage>";
+constexpr const char* kLinkLibraryManageDone = "<Library,ManageDone>";
+constexpr const char* kLinkLibraryRemoveRootPrefix = "<Library,RemoveRoot>";
+constexpr const char* kLinkLibraryUnhidePrefix = "<Library,Unhide>";
+constexpr const char* kLinkLibraryClearSearch = "<Library,ClearSearch>";
+constexpr const char* kLinkLibraryContentView = "<Library,ContentView>";
+constexpr const char* kLinkLibraryListView = "<Library,ListView>";
+// the sidebar's search-results "N Files" row: the content pane then shows
+// every file the current query matches, across all folders
+constexpr const char* kLinkLibrarySearchFiles = "<Library,SearchFiles>";
+// the filter button next to the search box, and the folder-picker it opens
+constexpr const char* kLinkLibrarySearchScopeOpen = "<Library,SearchScopeOpen>";
+constexpr const char* kLinkLibrarySearchScopeDone = "<Library,SearchScopeDone>";
+constexpr const char* kLinkLibrarySearchScopeClear = "<Library,SearchScopeClear>";
+constexpr const char* kLinkLibrarySearchScopeTogglePrefix = "<Library,SearchScopeToggle>";
+constexpr const char* kLinkLibrarySearchScopeExpandPrefix = "<Library,SearchScopeExpand>";
 
 void SetPromoString(Str s);
 void FreeHomePageTips();
@@ -38,9 +80,45 @@ void HomePageInvalidateLayoutCache();
 void DrawHomePage(MainWindow* win, HDC hdc);
 void PickAnotherRandomPromotion();
 void HomePageOnVScroll(MainWindow* win, WPARAM wp);
-void HomePageOnMouseWheel(MainWindow* win, int delta);
+void HomePageOnMouseWheel(MainWindow* win, int delta, Point canvasPt);
+// one frame of Library scroll momentum; driven by kLibraryScrollTimerID
+void HomePageKineticTick(MainWindow* win);
+// tap-and-hold on a card opened the context menu
+void HomePageOnHoldTimer(MainWindow* win);
+
+// Library hover / press feedback. The canvas reports which link is under the
+// pointer and which is held down; the draw pass paints one overlay for it.
+void HomePageSetHotLink(MainWindow* win, Str target);
+void HomePageSetPressedLink(MainWindow* win, Str target);
+void HomePageFeedbackTick(MainWindow* win);
+void HomePageSetPinAnchor(MainWindow* win, bool isFolder, Rect r);
+void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool nowPinned);
+
+// Library back/forward. A destination is pushed when the user picks it; going
+// back/forward replays an entry without pushing it again.
+void LibraryNavPush(MainWindow* win, Str entry);
+bool LibraryNavCanGo(MainWindow* win, int delta);
+void LibraryNavGo(MainWindow* win, int delta);
+void HomePageOnMouseHWheel(MainWindow* win, int delta);
+bool HomePageOnLibraryResizeMouse(MainWindow* win, UINT msg, int x, int y);
+bool HomePageSetLibraryResizeCursor(MainWindow* win);
+bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Point* tapPt);
 void HomePageFocusSearch(MainWindow* win);
 void HomePageDestroySearch(MainWindow* win);
+void HomePageInvalidateLibrary();
+void FreeTouchLibraryModel();
+void AddTouchLibraryFolder(MainWindow* win);
+bool HandleTouchLibraryLink(MainWindow* win, Str url);
+void SelectTouchLibraryFolder(MainWindow* win, Str folderPath);
+// the search box's text changed (typed, cleared, or set by Back/Forward)
+void HomePageOnSearchQueryChanged(MainWindow* win);
+// the file lives in a folder the Library indexes
+bool TouchLibraryContainsFile(Str filePath);
+// opens the file's Library folder with the file's card outlined and scrolled
+// into view; from search results, Back returns to the results
+void ShowFileInTouchLibrary(MainWindow* win, Str filePath);
+bool CloseTouchLibraryTransientUi(MainWindow* win);
+bool HandleTouchHomeLink(MainWindow* win, Str url);
 
 // keyboard navigation of the file list (issue #1136). dCol/dRow are in grid
 // steps; in list view only dRow matters. Moving up past the first row puts

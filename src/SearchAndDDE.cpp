@@ -27,9 +27,11 @@
 #include "WindowTab.h"
 #include "Commands.h"
 #include "AppTools.h"
+#include "TableOfContents.h"
 #include "SearchAndDDE.h"
 #include "Selection.h"
 #include "Toolbar.h"
+#include "TopBar.h"
 #include "FindBar.h"
 #include "FindWindow.h"
 #include "Favorites.h"
@@ -98,7 +100,7 @@ static DocController* BrowserFindCtrl(MainWindow* win) {
 // the current page and sweep all pages for the match list. Results arrive
 // asynchronously via BrowserFindResultReceived() / BrowserFindAllResultReceived()
 static void BrowserFindStartSearch(MainWindow* win, DocController* md) {
-    TempStr term = HwndGetTextTemp(win->hwndFindEdit);
+    TempStr term = FindCurrentQueryTemp(win);
     if (len(term) == 0) {
         return;
     }
@@ -382,8 +384,21 @@ void FindDebounceTimerFired(MainWindow* win) {
     }
 }
 
+// The find query has two possible owners. The classic find bar / find window
+// puts it in win->hwndFindEdit; the touch chrome's Search panel never opens
+// either of those and drives the search from its own filter edit. Everything
+// that used to read hwndFindEdit as the single source of truth asks this
+// instead, so Find Next / Prev step through matches from either UI. When the
+// find bar has text it wins, so classic behavior is bit-for-bit unchanged.
+TempStr FindCurrentQueryTemp(MainWindow* win) {
+    if (win->hwndFindEdit && HwndGetTextLen(win->hwndFindEdit) > 0) {
+        return HwndGetTextTemp(win->hwndFindEdit);
+    }
+    return TouchSearchPanelQueryTemp(win);
+}
+
 static bool HasFindText(MainWindow* win) {
-    return win->hwndFindEdit && HwndGetTextLen(win->hwndFindEdit) > 0;
+    return len(FindCurrentQueryTemp(win)) > 0;
 }
 
 bool FindFlushPendingSearch(MainWindow* win) {
@@ -877,6 +892,9 @@ static void CountEndTask(CountEndTaskData* d) {
         }
         InvalidateFindMatchPaintCache();
         ShowMatchCount(win);
+        if (win->hwndTocBox && win->touchPanelMode == TouchPanelMode::Search) {
+            HwndInvalidate(win->hwndTocBox, false);
+        }
         // Enable/disable Find Next/Prev once we know whether any matches exist.
         ToolbarUpdateStateForWindow(win, false);
         ScheduleRepaint(win, 0);
@@ -1004,6 +1022,9 @@ static void CountPartialTask(CountPartialTaskData* d) {
         InvalidateFindMatchPaintCache();
         FindWindowRefreshResults(win, false /* allowNavigation */);
         ScheduleRepaint(win, 0);
+        if (win->hwndTocBox && win->touchPanelMode == TouchPanelMode::Search) {
+            HwndInvalidate(win->hwndTocBox, false);
+        }
     }
 }
 
@@ -1172,7 +1193,8 @@ static void StartFindCount(MainWindow* win, Str text, bool matchCase, bool match
     engine->AddRef(); // released in CountThread
     // always build the match list so PaintAllFindMatches can highlight every hit;
     // snippets only when the floating results list is showing
-    bool wantSnippets = gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win);
+    bool embeddedResults = IsTouchSearchPanelVisible(win);
+    bool wantSnippets = (gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win)) || embeddedResults;
     bool wantMatchList = true;
     int epoch = AtomicIntInc(&win->findCountEpoch);
     int startPage = win->ctrl ? win->ctrl->CurrentPageNo() : 1;
@@ -1189,7 +1211,8 @@ static void StartFindCount(MainWindow* win, Str text, bool matchCase, bool match
 static void UpdateMatchCount(MainWindow* win, Str text) {
     DisplayModel* dm = win->AsFixed();
     void* engine = dm ? (void*)dm->GetEngine() : nullptr;
-    bool wantSnippets = gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win);
+    bool embeddedResults = IsTouchSearchPanelVisible(win);
+    bool wantSnippets = (gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win)) || embeddedResults;
     bool wantMatchList = true;
     bool cacheHit = win->findCountValid && win->findCountText && str::Eq(win->findCountText, text) &&
                     win->findCountMatchCase == win->findMatchCase &&
@@ -1203,6 +1226,20 @@ static void UpdateMatchCount(MainWindow* win, Str text) {
     } else {
         StartFindCount(win, text, win->findMatchCase, win->findMatchWholeWord);
     }
+}
+
+void SearchDocumentFromTouchPanel(MainWindow* win, Str text) {
+    if (!win || !text) {
+        return;
+    }
+    // Only start the interactive find. FindEndTask() kicks the full-document
+    // count -- which is what builds the results list the panel draws -- after
+    // this find thread has exited. Counting from here as well would run the
+    // counting scan *concurrently* with the find thread (mupdf's text
+    // extraction is not safe for that, which is exactly why the count is kicked
+    // from FindEndTask), and would scan the whole document twice per keystroke:
+    // the second scan starts by clearing the list the first one just installed.
+    FindTextOnThread(win, TextSearch::Direction::Forward, text, true, false);
 }
 
 static void CancelPendingFind(MainWindow* win);
@@ -1242,6 +1279,9 @@ void GoToFindMatch(MainWindow* win, int startPage, int startGlyph, int endPage, 
     ts->StartAt(startPage, startGlyph);
     ts->SelectUpTo(endPage, endGlyph);
     if (ts->result.len == 0) {
+        // The saved glyph range can become stale while a long find-all is
+        // running. A result activation must still navigate to its page.
+        win->ctrl->GoToPage(startPage, true);
         return;
     }
     // navigate to the match while ts->result is still populated. SetLastResult()
@@ -1460,10 +1500,12 @@ __unused static TempStr ReverseTextTemp(Str s) {
 }
 
 void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, bool showProgress) {
-    TempStr s = HwndGetTextTemp(win->hwndFindEdit);
+    // not necessarily the find bar: the touch Search panel owns the query when
+    // it is the one showing (see FindCurrentQueryTemp)
+    TempStr s = FindCurrentQueryTemp(win);
     // if document is rtl, need to reverse the text
     // s = ReverseTextTemp(s);
-    bool wasModified = Edit_GetModify(win->hwndFindEdit);
+    bool wasModified = win->hwndFindEdit && Edit_GetModify(win->hwndFindEdit);
     if (!wasModified) {
         // check if the find text differs from the current tab's cached search text
         // this happens when switching tabs: the find edit box shows the current text
@@ -1484,7 +1526,9 @@ void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, bool sho
             }
         }
     }
-    Edit_SetModify(win->hwndFindEdit, FALSE);
+    if (win->hwndFindEdit) {
+        Edit_SetModify(win->hwndFindEdit, FALSE);
+    }
     FindTextOnThread(win, direction, s, wasModified, showProgress);
 }
 

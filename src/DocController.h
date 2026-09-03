@@ -34,6 +34,8 @@ struct DocControllerCallback {
     // start (or continue) chained predictive rendering anchored to originPageNo
     virtual void RequestPredictiveRendering(DisplayModel* dm, int originPageNo, const int* pages, int nPages) = 0;
     virtual void CleanUp(DisplayModel* dm) = 0;
+    // the background smart-margin scan: done == total when it has landed
+    virtual void SmartMarginScanProgress(DisplayModel*, int, int) {}
     virtual void RenderThumbnail(DisplayModel* dm, Size size, const OnBitmapRendered*) = 0;
     // ChmModel //
     // tell the UI to move focus back to the main window

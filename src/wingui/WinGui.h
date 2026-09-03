@@ -604,6 +604,9 @@ struct Splitter : Wnd {
         SplitterType type = SplitterType::Horiz;
         bool isLive = true;
         COLORREF backgroundColor = kColorUnset;
+        int paintThickness = 0; // 0 paints the full hit target
+        bool transparentBackground = false;
+        int dragThreshold = 0;
     };
 
     // called when user drags the splitter ('finishedDragging' is false) and when drag is finished ('finishedDragging'
@@ -614,12 +617,16 @@ struct Splitter : Wnd {
         bool finishedDragging = false;
         // user can set to false to forbid resizing here
         bool resizeAllowed = true;
+        int splitterPos = 0;
     };
 
     using MoveHandler = Func1<MoveEvent*>;
 
     SplitterType type = SplitterType::Horiz;
     bool isLive = true;
+    int paintThickness = 0;
+    bool transparentBackground = false;
+    int dragThreshold = 0;
     MoveHandler onMove;
 
     HBITMAP bmp = nullptr;
@@ -629,6 +636,10 @@ struct Splitter : Wnd {
     HWND resizeOverlayHwnd = nullptr;
     bool isMouseOver = false;
     bool mouseTracking = false;
+    bool isDragging = false;
+    Point dragStartPos{};
+    int dragStartSplitterPos = 0;
+    UINT32 activePointerId = 0;
 
     Splitter();
     ~Splitter() override;
@@ -648,6 +659,15 @@ struct TreeView : Wnd {
         DWORD exStyle = 0; // additional flags, will be OR with the rest
         bool fullRowSelect = false;
         bool isRtl = false;
+        // if > 0: height of a row in unscaled px. Rows are otherwise as tall as
+        // the font needs, which is too small to hit with a finger.
+        int itemDy = 0;
+        // if > 0: unscaled px each tree level is indented. The default is
+        // cramped for touch; the redesign wants a wider step.
+        int indentDx = 0;
+        // suppress the system +/- disclosure glyph so the owner can draw its
+        // own chevron (see TVS_HASBUTTONS)
+        bool noSystemButtons = false;
     };
 
     struct GetTooltipEvent {
@@ -777,6 +797,11 @@ struct TabInfo {
     bool isPinned = false;
     bool canClose = true; // TODO: same as !isPinned?
     bool isDirty = false;
+    // Kept in the tab list (it owns a WindowTab and its canvas model) but never
+    // laid out, painted or hit-tested. The touch chrome's Library/Web view is
+    // hosted by an About tab, and the user does not think of the Library as a
+    // document tab; while it is current the tab strip shows nothing selected.
+    bool isHidden = false;
     UINT_PTR userData = 0;
     COLORREF tabColor = (COLORREF)(0xfeffffff); // kColorUnset; use default tab color
 
@@ -790,6 +815,13 @@ struct TabInfo {
     Size titleSize;
     Point titlePos;
 };
+
+// bridge for the app's "larger tabs" pref (wingui does not read GlobalPrefs)
+void TabsSetLargerTabs(bool larger);
+bool TabsLargerTabs();
+// bridge for the app's "two row tabs" pref (wrap the label onto a second line)
+void TabsSetTwoRowTabs(bool twoRow);
+bool TabsTwoRowTabs();
 
 struct TabsCtrl : Wnd {
     struct CreateArgs {
@@ -851,6 +883,19 @@ struct TabsCtrl : Wnd {
     bool draggingTab = false;
     // dx of tab if there's more space available
     int tabDefaultDx = 300;
+    Rect previewButtonRect;
+    Rect addButtonRect;
+    // last item size handed to the native control (see LayoutTabs)
+    int lastNativeTabDx = -1;
+    // Hover cross-fade state lives in TabsCtrl.cpp: AnimVal/AnimTimer would
+    // need wingui/Anim.h here, and this header has no include guard.
+    // "..." overflow next to the + : reopen last closed tab, tab size, theme
+    Rect menuButtonRect;
+    Func0 onPreview;
+    Func0 onNewTab;
+    Func0 onTabMenu;
+    Func1<bool> onPreviewHover;
+    bool previewHovered = false;
 
     Vec<TabInfo*> tabs;
 
@@ -978,4 +1023,7 @@ struct DrawCloseButtonArgs {
 };
 
 void DrawCloseButton(const DrawCloseButtonArgs& args);
+// cue text in the caller's color over an empty, unfocused edit; call after the
+// edit's own WM_PAINT handling, with the native cue banner left unset
+void EditPaintThemedCue(HWND hwnd, Str cue, COLORREF col);
 void DrawCloseButton2(const DrawCloseButtonArgs&);

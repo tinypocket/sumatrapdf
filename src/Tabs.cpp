@@ -18,6 +18,8 @@
 #include "EngineAll.h"
 #include "DisplayModel.h"
 #include "GlobalPrefs.h"
+#include "TouchMetrics.h"
+#include "TopBar.h"
 #include "SumatraPDF.h"
 #include "SumatraProperties.h"
 #include "MainWindow.h"
@@ -70,7 +72,9 @@ static void UpdateTabTitle(WindowTab* tab) {
 }
 
 int GetTabbarHeight(HWND hwnd, float factor) {
-    int tabDy = DpiScale(hwnd, kTabBarDy);
+    // kTabPillDy, not kTabBarDy: a tab has to be tall enough that its close
+    // button is a finger-sized target.
+    int tabDy = DpiScale(hwnd, kTabPillDy);
     HFONT hfont = GetAppFont(hwnd);
     int fontDyWithPadding = FontDyPx(hwnd, hfont) + DpiScale(hwnd, 2);
     tabDy = std::max(fontDyWithPadding, tabDy);
@@ -81,7 +85,7 @@ int GetTabbarHeight(HWND hwnd, float factor) {
     // tab bar too tall on any monitor scaled lower than the primary
     // (discussion #4831).
     if (IsRunningOnWine()) {
-        int minDy = DpiScale(HWND_DESKTOP, kTabBarDy);
+        int minDy = DpiScale(HWND_DESKTOP, kTabPillDy);
         int minFontDy = FontDyPx(hwnd, hfont) + DpiScale(HWND_DESKTOP, 2);
         minDy = std::max(minFontDy, minDy);
         tabDy = std::max(tabDy, minDy);
@@ -89,7 +93,8 @@ int GetTabbarHeight(HWND hwnd, float factor) {
         logf(
             "GetTabbarHeight: hwnd=%p factor=%g dpi=%d desktopDpi=%d tabDyScaled=%d fontDy=%d "
             "minDy=%d result=%d\n",
-            hwnd, factor, DpiGet(hwnd), DpiGet(HWND_DESKTOP), DpiScale(hwnd, kTabBarDy), fontDyWithPadding, minDy, res);
+            hwnd, factor, DpiGet(hwnd), DpiGet(HWND_DESKTOP), DpiScale(hwnd, kTabPillDy), fontDyWithPadding, minDy,
+            res);
         return res;
     }
     return (int)((float)tabDy * factor);
@@ -154,9 +159,14 @@ void RemoveTab(WindowTab* tab) {
     MainWindow* win = tab->win;
     win->tabSelectionHistory->Remove(tab);
     int idx = win->GetTabIdx(tab);
+    // Capture this before removing the native item. Once the item is gone the
+    // tab control has already selected a neighbor, so asking CurrentTab() then
+    // incorrectly says the closed tab was inactive and leaves the old model on
+    // the canvas. That is especially visible when closing and recreating Home
+    // through the Recent rail button.
+    bool closedCurrentTab = (tab == win->CurrentTab());
     WindowTab* tab2 = win->tabsCtrl->RemoveTab<WindowTab*>(idx);
     ReportIf(tab != tab2);
-    bool closedCurrentTab = (tab == win->CurrentTab());
     if (closedCurrentTab) {
         win->ctrl = nullptr;
         win->currentTabTemp = nullptr;
@@ -296,8 +306,11 @@ static void MaybeMigrateTab(WindowTab* tab, MainWindow* newWin, Point releasePt)
 // Selects the given tab (0-based index)
 // tabIndex can come from settings file so must be sanitized
 void TabsSelect(MainWindow* win, int tabIndex) {
-    auto tabs = win->Tabs();
-    int nTabs = len(tabs);
+    if (!win || !win->tabsCtrl) {
+        return;
+    }
+    TabsCtrl* tabsCtrl = win->tabsCtrl;
+    int nTabs = tabsCtrl->TabCount();
     logf("TabsSelect: tabIndex: %d, nTabs: %d\n", tabIndex, nTabs);
     if (nTabs == 0) {
         logf("TabsSelect: skipping because nTabs = %d\n", nTabs);
@@ -307,7 +320,11 @@ void TabsSelect(MainWindow* win, int tabIndex) {
         tabIndex = 0;
         logf("TabsSelect: fixing tabIndex to 0\n");
     }
-    TabsCtrl* tabsCtrl = win->tabsCtrl;
+    WindowTab* tab = win->GetTab(tabIndex);
+    if (!tab) {
+        logf("TabsSelect: no tab at index %d\n", tabIndex);
+        return;
+    }
     int currIdx = tabsCtrl->GetSelected();
     if (tabIndex == currIdx) {
         return;
@@ -315,11 +332,21 @@ void TabsSelect(MainWindow* win, int tabIndex) {
 
     // same work as in onSelectionChanging and onSelectionChanged
     SaveCurrentWindowTab(win);
-    int prevIdx = tabsCtrl->SetSelected(tabIndex);
-    if (prevIdx < 0) {
+    // Saving and selecting can synchronously pump window messages. Reacquire the
+    // tab after each operation instead of retaining a Vec snapshot across that
+    // re-entrancy: closing Home while selecting Recent used to leave a stale
+    // native selection index and then index past the shortened tab list.
+    if (!IsMainWindowValid(win) || win->tabsCtrl != tabsCtrl || !win->GetTab(tabIndex)) {
         return;
     }
-    WindowTab* tab = tabs[tabIndex];
+    tabsCtrl->SetSelected(tabIndex);
+    if (!IsMainWindowValid(win) || win->tabsCtrl != tabsCtrl || tabsCtrl->GetSelected() != tabIndex) {
+        return;
+    }
+    tab = win->GetTab(tabIndex);
+    if (!tab) {
+        return;
+    }
     // page-info tip is restored via MainWindow::pageInfoWanted in LoadModelIntoTab
     LoadModelIntoTab(tab);
 }
@@ -415,7 +442,10 @@ void CollectTabsToClose(MainWindow* win, WindowTab* currTab, Vec<WindowTab*>& to
     int nTabs = win->TabCount();
     bool seenCurrent = false;
     for (int i = 0; i < nTabs; i++) {
-        WindowTab* tab = win->Tabs()[i];
+        WindowTab* tab = win->GetTab(i);
+        if (!tab) {
+            continue;
+        }
         if (tab->IsAboutTab()) {
             continue;
         }
@@ -458,7 +488,10 @@ static void TabsContextMenu(ContextMenuEvent* ev) {
         return;
     }
 
-    WindowTab* tabUnderMouse = win->Tabs()[tabIdx];
+    WindowTab* tabUnderMouse = win->GetTab(tabIdx);
+    if (!tabUnderMouse) {
+        return;
+    }
     if (tabUnderMouse->IsAboutTab()) {
         return;
     }
@@ -576,9 +609,119 @@ static void TabsContextMenu(ContextMenuEvent* ev) {
 }
 
 static void MainWindowTabClosed(MainWindow* win, TabsCtrl::ClosedEvent* ev) {
+    if (IsTouchChrome(win) && win->TabCount() <= 1) {
+        return;
+    }
     int closedTabIdx = ev->tabIdx;
     WindowTab* tab = win->GetTab(closedTabIdx);
+    if (!tab) {
+        return;
+    }
     CloseTab(tab, false);
+}
+
+static void MainWindowNewTab(MainWindow* win) {
+    HwndSendCommand(win->hwndFrame, CmdOpenFile);
+}
+
+int TouchTitleBarDy() {
+    if (!SettingsUseTabs()) {
+        return kTitleBarDy;
+    }
+    int dy = TabsLargerTabs() ? kTitleBarTabsLargeDy : kTitleBarTabsDy;
+    if (TabsTwoRowTabs()) {
+        // a wrapped label needs room for the second line
+        dy += kTabTwoRowExtraDy;
+    }
+    return dy;
+}
+
+// The "..." next to the + in the tab bar. Small, self-contained menu: the
+// things you reach for *about the tab strip itself*, which have no other home
+// in the touch chrome (the classic menu bar is hidden there).
+static void MainWindowTabMenu(MainWindow* win) {
+    if (!win || !win->tabsCtrl) {
+        return;
+    }
+    constexpr int kTabMenuReopen = 1;
+    constexpr int kTabMenuTheme = 2;
+    constexpr int kTabMenuLargerTabs = 3;
+    constexpr int kTabMenuTwoRowTabs = 4;
+
+    HMENU popup = CreatePopupMenu();
+    bool canReopen = RecentlyCloseDocumentsCount() > 0;
+    uint reopenFlags = MF_STRING | (canReopen ? MF_ENABLED : (MF_DISABLED | MF_GRAYED));
+    AppendMenuW(popup, reopenFlags, kTabMenuReopen, L"Reopen last closed tab	Ctrl+Shift+T");
+    AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
+    bool larger = gGlobalPrefs->largerTabs;
+    AppendMenuW(popup, MF_STRING | (larger ? MF_CHECKED : MF_UNCHECKED), kTabMenuLargerTabs, L"Larger tabs");
+    bool twoRow = gGlobalPrefs->twoRowTabs;
+    AppendMenuW(popup, MF_STRING | (twoRow ? MF_CHECKED : MF_UNCHECKED), kTabMenuTwoRowTabs, L"Two-row tab labels");
+    bool isDark = !IsLightColor(ThemeWindowBackgroundColor());
+    AppendMenuW(popup, MF_STRING | (isDark ? MF_CHECKED : MF_UNCHECKED), kTabMenuTheme, L"Dark mode");
+    MarkMenuOwnerDraw(popup);
+
+    Rect r = win->tabsCtrl->menuButtonRect;
+    Point pt = HwndClientToScreen(win->tabsCtrl->hwnd, Point{r.x, r.y + r.dy});
+    uint flags = TPM_RETURNCMD | TPM_LEFTBUTTON;
+    int cmdId = TrackPopupMenu(popup, flags, pt.x, pt.y, 0, win->hwndFrame, nullptr);
+    FreeMenuOwnerDrawInfoData(popup);
+    DestroyMenu(popup);
+
+    switch (cmdId) {
+        case kTabMenuReopen:
+            HwndSendCommand(win->hwndFrame, CmdReopenLastClosedFile);
+            break;
+        case kTabMenuTheme:
+            HwndSendCommand(win->hwndFrame, CmdToggleLightDarkTheme);
+            break;
+        case kTabMenuTwoRowTabs:
+        case kTabMenuLargerTabs: {
+            if (cmdId == kTabMenuTwoRowTabs) {
+                gGlobalPrefs->twoRowTabs = !gGlobalPrefs->twoRowTabs;
+                TabsSetTwoRowTabs(gGlobalPrefs->twoRowTabs);
+            } else {
+                gGlobalPrefs->largerTabs = !gGlobalPrefs->largerTabs;
+                TabsSetLargerTabs(gGlobalPrefs->largerTabs);
+            }
+            SaveSettings();
+            // the strip height changes, so the frame has to redo its caption
+            // layout, not just repaint the tabs
+            for (MainWindow* w : gWindows) {
+                ScheduleUiUpdate(w, kUiForceRelayout | kUiToolbarDirty);
+                HwndInvalidate(w->hwndFrame, true);
+            }
+            break;
+        }
+    }
+}
+
+// Anchor the preview strip on the first tab that is actually drawn, not on the
+// switcher button. The button sits to the left of the tabs, so anchoring there
+// pushed the whole strip across by a control's width - the cards looked like
+// they belonged to the tab one over. The hidden Library tab has an empty rect
+// and is skipped, which is what made this visible once it stopped being a tab.
+static Rect TabsPreviewAnchorRect(MainWindow* win) {
+    TabsCtrl* tabs = win->tabsCtrl;
+    if (!tabs) {
+        return {};
+    }
+    int n = std::min(tabs->TabCount(), len(tabs->tabs));
+    for (int i = 0; i < n; i++) {
+        TabInfo* ti = tabs->tabs[i];
+        if (ti && !ti->isHidden && !ti->r.IsEmpty()) {
+            return ti->r;
+        }
+    }
+    return tabs->previewButtonRect;
+}
+
+static void MainWindowPreview(MainWindow* win) {
+    ShowTouchDocumentPreview(win, win->tabsCtrl->hwnd, TabsPreviewAnchorRect(win));
+}
+
+static void MainWindowPreviewHover(MainWindow* win, bool isOver) {
+    HoverTouchDocumentPreview(win, win->tabsCtrl->hwnd, TabsPreviewAnchorRect(win), isOver);
 }
 
 static void MainWindowTabSelectionChanging(MainWindow* win, TabsCtrl::SelectionChangingEvent* ev) {
@@ -588,14 +731,28 @@ static void MainWindowTabSelectionChanging(MainWindow* win, TabsCtrl::SelectionC
 }
 
 static void MainWindowTabSelectionChanged(MainWindow* win, TabsCtrl::SelectionChangedEvent* /*ev*/) {
+    if (!win || !IsMainWindowValid(win) || !win->tabsCtrl) {
+        return;
+    }
+    CloseTouchDocumentPreview(win);
+    if (!IsMainWindowValid(win) || !win->tabsCtrl) {
+        return;
+    }
     int currentIdx = win->tabsCtrl->GetSelected();
-    WindowTab* tab = win->Tabs()[currentIdx];
+    WindowTab* tab = win->GetTab(currentIdx);
+    if (!tab) {
+        logf("MainWindowTabSelectionChanged: no tab at selected index %d\n", currentIdx);
+        return;
+    }
     // page-info tip is restored via MainWindow::pageInfoWanted in LoadModelIntoTab
     LoadModelIntoTab(tab);
 }
 
 static void MainWindowTabMigration(MainWindow* win, TabsCtrl::MigrationEvent* ev) {
     WindowTab* tab = win->GetTab(ev->tabIdx);
+    if (!tab) {
+        return;
+    }
     MainWindow* releaseWnd = nullptr;
     HWND hwnd = HwndWindowFromPoint(ev->releasePoint);
     if (hwnd != nullptr) {
@@ -623,6 +780,10 @@ void CreateTabbar(MainWindow* win) {
     tabsCtrl->onSelectionChanged = MkFunc1(MainWindowTabSelectionChanged, win);
     tabsCtrl->onContextMenu = MkFunc1Void(TabsContextMenu);
     tabsCtrl->onTabMigration = MkFunc1(MainWindowTabMigration, win);
+    tabsCtrl->onNewTab = MkFunc0(MainWindowNewTab, win);
+    tabsCtrl->onTabMenu = MkFunc0(MainWindowTabMenu, win);
+    tabsCtrl->onPreview = MkFunc0(MainWindowPreview, win);
+    tabsCtrl->onPreviewHover = MkFunc1(MainWindowPreviewHover, win);
     tabsCtrl->Create(args);
     win->tabsCtrl = tabsCtrl;
     win->tabSelectionHistory = new Vec<WindowTab*>();
@@ -667,21 +828,22 @@ void SaveCurrentWindowTab(MainWindow* win) {
         return;
     }
     // the find UI (compact bar or floating window) belongs to the previous tab's
-    // search; close it when leaving the tab (HideFindBar also drops the cached
-    // results so the next tab can't show or navigate into the old document's
-    // matches)
-    HideFindBar(win);
+    // search; close it when leaving the tab. The ...ForDocumentChange variant
+    // also drops the cached results unconditionally, so neither the find UI nor
+    // the touch chrome's Search panel can show or navigate into the old
+    // document's matches.
+    HideFindBarForDocumentChange(win);
     HideSelectionToolbar(win);
 
     int current = win->tabsCtrl->GetSelected();
     if (-1 == current) {
         return;
     }
-    if (win->CurrentTab() != win->Tabs()[current]) {
+    WindowTab* tab = win->GetTab(current);
+    if (!tab || win->CurrentTab() != tab) {
         return; // TODO: restore ReportIf() ?
     }
 
-    WindowTab* tab = win->CurrentTab();
     if (win->tocLoaded && tab->ctrl) {
         TocTree* tocTree = tab->ctrl->GetToc();
         UpdateTocExpansionState(tab->tocState, win->tocTreeView, tocTree);
@@ -716,6 +878,10 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate) {
         newTab->tooltip = nullptr;
         newTab->isPinned = true;
         newTab->canClose = true;
+        // In the touch chrome this tab hosts the Library/Web view, which the
+        // rail already represents - showing it in the strip too made the
+        // Library look like an open document. Classic chrome keeps its Home tab.
+        newTab->isHidden = IsTouchChrome(win);
         newTab->userData = (UINT_PTR)homeTab;
         int insertedIdx = tabs->InsertTab(idx, newTab, !deferUpdate);
         ReportIf(insertedIdx != 0);
@@ -738,6 +904,66 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate) {
         UpdateTabWidth(win);
     }
     return tab;
+}
+
+bool SelectTouchHomeTab(MainWindow* win) {
+    if (!win || !win->tabsCtrl) {
+        return false;
+    }
+    for (int i = 0; i < win->TabCount(); i++) {
+        WindowTab* tab = win->GetTab(i);
+        if (tab && tab->IsAboutTab()) {
+            TabsSelect(win, i);
+            return true;
+        }
+    }
+
+    WindowTab* homeTab = new WindowTab(win);
+    homeTab->type = WindowTab::Type::About;
+    homeTab->canvasRc = win->canvasRc;
+    auto* info = new TabInfo();
+    info->text = str::Dup(StrL("Home"));
+    info->isPinned = true;
+    info->canClose = true;
+    // only reached from the rail, i.e. the touch chrome: never a strip tab
+    info->isHidden = true;
+    info->userData = (UINT_PTR)homeTab;
+    // Inserting at index 0 selects the new native tab immediately. Save the
+    // document model before that happens, then load the About model explicitly;
+    // calling TabsSelect(0) afterwards would see index 0 already selected and
+    // leave the document canvas visible under an active Home/Library rail item.
+    SaveCurrentWindowTab(win);
+    int idx = win->tabsCtrl->InsertTab(0, info, true);
+    if (idx < 0) {
+        delete info;
+        delete homeTab;
+        return false;
+    }
+    LoadModelIntoTab(homeTab);
+    return true;
+}
+
+bool SelectTouchDocumentTab(MainWindow* win) {
+    if (!win) {
+        return false;
+    }
+    // Already on a document? Stay there. This used to scan from the end and
+    // select whatever document it found first, so opening a panel while
+    // reading anything other than the last tab silently switched documents -
+    // e.g. clicking Bookmarks in a file with none jumped to a file that had
+    // some, instead of showing an empty panel for the file being read.
+    WindowTab* cur = win->CurrentTab();
+    if (cur && !cur->IsNonDocumentTab()) {
+        return true;
+    }
+    for (int i = win->TabCount() - 1; i >= 0; i--) {
+        WindowTab* tab = win->GetTab(i);
+        if (tab && !tab->IsNonDocumentTab()) {
+            TabsSelect(win, i);
+            return true;
+        }
+    }
+    return false;
 }
 
 // The tab control paints from TabInfo::tabColor, so WindowTab::tabColor has to

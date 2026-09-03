@@ -22,6 +22,7 @@
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
+#include "wingui/Anim.h"
 
 #include "Settings.h"
 #include "DisplayMode.h"
@@ -1326,7 +1327,7 @@ For more information see <a href="%s">Failed to load libsumatrapdf.dll</a>.)",
         flags |= TDF_RTL_LAYOUT;
     }
     dialogConfig.cbSize = sizeof(TASKDIALOGCONFIG);
-    dialogConfig.pszWindowTitle = L"SumatraPDF";
+    dialogConfig.pszWindowTitle = kAppNameW;
     dialogConfig.pszMainInstruction = L"Failed to load libsumatrapdf.dll";
     dialogConfig.pszContent = CWStrTemp(msg);
     dialogConfig.nDefaultButton = IDOK;
@@ -1391,7 +1392,7 @@ Learn more at https://www.sumatrapdfreader.org/docs/Corrupted-installation
         printf("%s", corruptedInstallationConsole.s);
     }
 
-    const auto* title = L"SumatraPDF installer";
+    const auto* title = L"SumatraPDF+ installer";
     TASKDIALOGCONFIG dialogConfig{};
 
     DWORD flags =
@@ -1454,7 +1455,7 @@ static void ShowInstallerHelp() {
         flags |= TDF_RTL_LAYOUT;
     }
     dialogConfig.cbSize = sizeof(TASKDIALOGCONFIG);
-    dialogConfig.pszWindowTitle = L"SumatraPDF installer usage";
+    dialogConfig.pszWindowTitle = L"SumatraPDF+ installer usage";
     dialogConfig.pszMainInstruction = CWStrTemp(msg);
     dialogConfig.pszContent =
         LR"(<a href="https://www.sumatrapdfreader.org/docs/Installer-cmd-line-arguments">Read more on website</a>)";
@@ -2123,6 +2124,9 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     MainWindow* win = nullptr;
     bool showStartPage = false;
     bool restoreSession = false;
+    // declared up here with restoreSession: a goto Exit below would otherwise
+    // jump over its initialization
+    bool reopenAfterUpdate = false;
     HANDLE hMutex = nullptr;
     HWND existingInstanceHwnd = nullptr;
     HWND existingHwnd = nullptr;
@@ -2458,6 +2462,11 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
 
     LoadSettings();
     UpdateGlobalPrefs(flags);
+    // wingui has no access to app prefs, so push the animation settings down
+    AnimSetAppEnabled(gGlobalPrefs->animateUI);
+    AnimSetElaborate(gGlobalPrefs->elaborateAnimations);
+    TabsSetLargerTabs(gGlobalPrefs->largerTabs);
+    TabsSetTwoRowTabs(gGlobalPrefs->twoRowTabs);
     if (gMyWindowWasEmbedded) {
         str::ReplaceWithCopy(&gGlobalPrefs->scrollbars, "windows");
     }
@@ -2617,7 +2626,34 @@ ContinueOpenWindow:
     gInitialSessionData = gGlobalPrefs->sessionData;
     gGlobalPrefs->sessionData = new Vec<SessionData*>();
 
-    restoreSession = SettingsRestoreSession() && (len(*gInitialSessionData) > 0) && !NeedsWindowEmbeddingHacks();
+    // A just-installed update left a one-shot marker asking for the documents
+    // that were open before the handover to come back, even for users who keep
+    // session restore off. Consume it here so it applies exactly once.
+    if (gGlobalPrefs->reopenOnce) {
+        for (Str s : *gGlobalPrefs->reopenOnce) {
+            if (str::EqI(s, StrL("SessionData"))) {
+                reopenAfterUpdate = true;
+                break;
+            }
+        }
+        if (reopenAfterUpdate) {
+            for (Str s : *gGlobalPrefs->reopenOnce) {
+                str::Free(s);
+            }
+            gGlobalPrefs->reopenOnce->Reset();
+            // NOT left empty: the serializer skips an empty array
+            // ("prevent empty arrays from being replaced with the defaults")
+            // and SaveSettings then preserves the previous text, so the marker
+            // would survive and silently turn into permanent session restore.
+            // One empty entry makes the field non-empty, so it is rewritten as
+            // "ReopenOnce =", which no longer matches the SessionData marker.
+            gGlobalPrefs->reopenOnce->Append(str::Dup(StrL("")));
+            log("restoring documents that were open before an update");
+        }
+    }
+
+    restoreSession = (SettingsRestoreSession() || reopenAfterUpdate) && (len(*gInitialSessionData) > 0) &&
+                     !NeedsWindowEmbeddingHacks();
     if (!SettingsUseTabs() && (existingInstanceHwnd != nullptr)) {
         // do not restore a session if tabs are disabled and SumatraPDF is already running
         // TODO: maybe disable restoring if tabs are disabled?
