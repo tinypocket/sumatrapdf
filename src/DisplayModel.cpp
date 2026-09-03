@@ -405,20 +405,16 @@ static float BodyLineGap(const Vec<TextLine>& lines) {
     return gaps[len(gaps) / 2];
 }
 
-void DisplayModel::DetectRunningHeaderFooter() const {
-    if (smartHfChecked) {
-        return;
-    }
-    smartHfChecked = true;
-    smartHfTopPt = 0.0f;
-    smartHfBottomPt = 0.0f;
+// Engine-only, so the background scan can run it off the UI thread.
+static void DetectRunningHeaderFooterIn(EngineBase* engine, float* topOut, float* bottomOut) {
+    *topOut = 0.0f;
+    *bottomOut = 0.0f;
     int nPages = engine ? engine->PageCount() : 0;
     if (nPages < 3) {
         return; // nothing to compare against
     }
 
-    // sample rather than read every page: this runs on the UI thread the first
-    // time a page is laid out, and text extraction is not cheap
+    // sample rather than read every page: text extraction is not cheap
     constexpr int kMaxSamples = 6;
     int step = std::max(1, nPages / kMaxSamples);
     // every page's candidate band, or an empty one where the page had none
@@ -426,7 +422,7 @@ void DisplayModel::DetectRunningHeaderFooter() const {
     Vec<TextLine> footerCands;
     int sampled = 0;
     for (int pageNo = 1; pageNo <= nPages && sampled < kMaxSamples; pageNo += step) {
-        RectF media = PageMediaBox(pageNo);
+        RectF media = engine->PageMediabox(pageNo);
         if (media.IsEmpty()) {
             continue;
         }
@@ -486,12 +482,22 @@ void DisplayModel::DetectRunningHeaderFooter() const {
 
     TextLine band;
     if (modalBand(headerCands, sampled, &band)) {
-        smartHfTopPt = band.bottom - PageMediaBox(1).y;
+        *topOut = band.bottom - engine->PageMediabox(1).y;
     }
     if (modalBand(footerCands, sampled, &band)) {
-        RectF media = PageMediaBox(1);
-        smartHfBottomPt = media.y + media.dy - band.top;
+        RectF media = engine->PageMediabox(1);
+        *bottomOut = media.y + media.dy - band.top;
     }
+}
+
+// The synchronous form, for the manual trim dialog's suggestion; layout gets
+// the same result from the background scan instead.
+void DisplayModel::DetectRunningHeaderFooter() const {
+    if (smartHfChecked) {
+        return;
+    }
+    smartHfChecked = true;
+    DetectRunningHeaderFooterIn(engine, &smartHfTopPt, &smartHfBottomPt);
 }
 
 bool DisplayModel::IsPageMarginExpanded(int pageNo) const {
@@ -555,9 +561,12 @@ static bool IsLoneEdgeLine(const Vec<TextLine>& lines, int idx, bool atBottom, c
     return gap >= minGap && nearEdge && thin;
 }
 
-bool DisplayModel::PageBodyBand(int pageNo, PageBody* out) const {
-    *out = PageBody();
-    RectF media = PageMediaBox(pageNo);
+// Engine-only, so the background scan can run it off the UI thread. hfTopPt /
+// hfBottomPt are the document-wide running bands (0 when there are none).
+static bool ComputePageBody(EngineBase* engine, int pageNo, float hfTopPt, float hfBottomPt,
+                            DisplayModel::PageBody* out) {
+    *out = DisplayModel::PageBody();
+    RectF media = engine->PageMediabox(pageNo);
     if (media.IsEmpty()) {
         return false;
     }
@@ -569,13 +578,13 @@ bool DisplayModel::PageBodyBand(int pageNo, PageBody* out) const {
     // a little slack, so a header that sits a point lower on one page than on
     // the sampled ones is still recognised as the header
     constexpr float kBandSlack = 2.0f;
-    float headerBottom = media.y + smartHfTopPt + kBandSlack;
-    float footerTop = media.y + media.dy - smartHfBottomPt - kBandSlack;
+    float headerBottom = media.y + hfTopPt + kBandSlack;
+    float footerTop = media.y + media.dy - hfBottomPt - kBandSlack;
     int first = -1;
     int last = -1;
     for (int i = 0; i < len(lines); i++) {
-        bool isHeader = smartHfTopPt > 0.0f && lines[i].bottom <= headerBottom;
-        bool isFooter = smartHfBottomPt > 0.0f && lines[i].top >= footerTop;
+        bool isHeader = hfTopPt > 0.0f && lines[i].bottom <= headerBottom;
+        bool isFooter = hfBottomPt > 0.0f && lines[i].top >= footerTop;
         if (isHeader) {
             out->hasHeader = true;
             continue;
@@ -604,6 +613,149 @@ bool DisplayModel::PageBodyBand(int pageNo, PageBody* out) const {
     }
     out->top = lines[first].top;
     out->bottom = lines[last].bottom;
+    return true;
+}
+
+// --- background smart-margin scan ------------------------------------------
+// Text extraction for every page of a long book takes many seconds, which used
+// to happen inside the first layout, on the UI thread. The scan does it on a
+// worker: the document-wide bands first (when enabled), then each page's body.
+// Results land on the UI thread in one batch, the layout is redone once with
+// the view held in place, and progress reaches the window through the
+// controller callback. A model that went away meanwhile is recognised by its
+// absence from gLiveDisplayModels; a scan made stale by a prefs change by its
+// generation.
+static Vec<DisplayModel*> gLiveDisplayModels;
+
+struct SmartMarginScan {
+    DisplayModel* dm = nullptr;
+    int gen = 0;
+    EngineBase* engine = nullptr; // held with a ref for the scan's duration
+    bool detectRunningBands = false;
+    int nPages = 0;
+    float hfTopPt = 0.0f;
+    float hfBottomPt = 0.0f;
+    Vec<DisplayModel::PageBodyCache> results;
+};
+
+struct SmartMarginProgress {
+    DisplayModel* dm = nullptr;
+    int gen = 0;
+    int done = 0;
+    int total = 0;
+};
+
+static bool SmartScanIsCurrent(DisplayModel* dm, int gen) {
+    return gLiveDisplayModels.Contains(dm) && dm->smartScanGen == gen;
+}
+
+static void SmartMarginScanProgressUi(SmartMarginProgress* p) {
+    if (SmartScanIsCurrent(p->dm, p->gen) && p->dm->cb) {
+        p->dm->cb->SmartMarginScanProgress(p->dm, p->done, p->total);
+    }
+    delete p;
+}
+
+static void SmartMarginScanFinishedUi(SmartMarginScan* s) {
+    DisplayModel* dm = s->dm;
+    if (SmartScanIsCurrent(dm, s->gen)) {
+        dm->smartScanRunning = false;
+        dm->smartHfChecked = true;
+        dm->smartHfTopPt = s->hfTopPt;
+        dm->smartHfBottomPt = s->hfBottomPt;
+        dm->pageBodies.Reset();
+        for (int i = 0; i < len(s->results); i++) {
+            const DisplayModel::PageBodyCache& r = s->results[i];
+            dm->pageBodies.Append(r);
+            PageInfo* pi = dm->GetPageInfo(i + 1);
+            if (pi && pi->contentBox.IsEmpty()) {
+                pi->contentBox = r.contentBox;
+            }
+        }
+        // bitmaps rendered before the crop was known are of the untrimmed
+        // page and would be blitted as-is into the trimmed slots
+        gRenderCache->FreeForDisplayModel(dm);
+        ScrollState state = dm->GetScrollState();
+        dm->Relayout(dm->GetZoomVirtual(), dm->GetRotation());
+        dm->SetScrollState(state);
+        if (dm->cb) {
+            dm->cb->SmartMarginScanProgress(dm, s->nPages, s->nPages);
+            dm->cb->Repaint();
+        }
+    }
+    s->engine->Release();
+    delete s;
+}
+
+static void SmartMarginScanThread(SmartMarginScan* s) {
+    if (s->detectRunningBands) {
+        DetectRunningHeaderFooterIn(s->engine, &s->hfTopPt, &s->hfBottomPt);
+    }
+    constexpr int kProgressEvery = 20;
+    for (int pageNo = 1; pageNo <= s->nPages; pageNo++) {
+        DisplayModel::PageBody body;
+        DisplayModel::PageBodyCache entry;
+        entry.contentBox = s->engine->PageContentBox(pageNo);
+        if (ComputePageBody(s->engine, pageNo, s->hfTopPt, s->hfBottomPt, &body)) {
+            entry.state = 2;
+            entry.hasHeader = body.hasHeader;
+            entry.hasFooter = body.hasFooter;
+            entry.top = body.top;
+            entry.bottom = body.bottom;
+        } else {
+            entry.state = 1;
+        }
+        s->results.Append(entry);
+        if (pageNo % kProgressEvery == 0) {
+            auto* p = new SmartMarginProgress();
+            p->dm = s->dm;
+            p->gen = s->gen;
+            p->done = pageNo;
+            p->total = s->nPages;
+            uitask::Post(MkFunc0<SmartMarginProgress>(SmartMarginScanProgressUi, p), "SmartMarginScanProgress");
+        }
+    }
+    uitask::Post(MkFunc0<SmartMarginScan>(SmartMarginScanFinishedUi, s), "SmartMarginScanFinished");
+}
+
+void DisplayModel::StartSmartMarginScan() const {
+    if (smartScanRunning || !engine) {
+        return;
+    }
+    smartScanRunning = true;
+    auto* s = new SmartMarginScan();
+    s->dm = const_cast<DisplayModel*>(this);
+    s->gen = smartScanGen;
+    s->engine = engine;
+    engine->AddRef();
+    s->detectRunningBands = gGlobalPrefs->smartHeaderFooter;
+    s->nPages = PageCount();
+    RunAsync(MkFunc0<SmartMarginScan>(SmartMarginScanThread, s), "SmartMarginScan");
+}
+
+void DisplayModel::InvalidateSmartMargins() {
+    smartScanGen++;
+    smartScanRunning = false;
+    smartHfChecked = false;
+    pageBodies.Reset();
+}
+
+// From the scan's cache; a page not scanned yet reads as "no band" and kicks
+// the scan off.
+bool DisplayModel::PageBodyBand(int pageNo, PageBody* out) const {
+    *out = PageBody();
+    if (pageNo < 1 || pageNo > len(pageBodies)) {
+        StartSmartMarginScan();
+        return false;
+    }
+    const PageBodyCache& c = pageBodies[pageNo - 1];
+    if (c.state != 2) {
+        return false;
+    }
+    out->top = c.top;
+    out->bottom = c.bottom;
+    out->hasHeader = c.hasHeader;
+    out->hasFooter = c.hasFooter;
     return true;
 }
 
@@ -669,31 +821,33 @@ RectF DisplayModel::PageDisplayBox(int pageNo) const {
     if (!pageInfo) {
         return ApplyManualTrim(media, media);
     }
-    if (pageInfo->contentBox.IsEmpty()) {
-        pageInfo->contentBox = engine->PageContentBox(pageNo);
-    }
+    // The content box comes from the background scan along with the text
+    // bands (asking the engine here, for every page of a long book inside one
+    // layout, is what froze the window for many seconds). Until it lands the
+    // page is shown untrimmed; PageBodyBand starts the scan.
+    PageBody body;
+    bool hasBand = PageBodyBand(pageNo, &body);
     RectF content = pageInfo->contentBox;
     if (content.IsEmpty()) {
-        return ApplyManualTrim(media, media); // blank page, or the engine can't tell
+        return ApplyManualTrim(media, media); // not scanned yet, a blank page, or the engine can't tell
     }
     // Trim vertically only. The width is what the zoom is computed from, so
     // touching it would change how large the text renders - the user asked for
     // less scrolling, not a different zoom.
     float top = std::max(media.y, content.y - kSmartMarginPadPt);
     float bottom = std::min(media.y + media.dy, content.y + content.dy + kSmartMarginPadPt);
-    if (gGlobalPrefs->smartHeaderFooter) {
-        DetectRunningHeaderFooter();
-        PageBody body;
-        if (PageBodyBand(pageNo, &body)) {
-            // only crop the side this page actually has a header/footer on:
-            // a page without one may open with a plate or an ornament, and
-            // there is no text line to tell us it is there
-            if (body.hasHeader) {
-                top = std::max(top, body.top - kSmartMarginPadPt);
-            }
-            if (body.hasFooter) {
-                bottom = std::min(bottom, body.bottom + kSmartMarginPadPt);
-            }
+    // The page's own lone edge lines (a source URL, a page number) are part of
+    // plain smart margins; "smart header & footer" adds the document-wide
+    // running bands on top. Both come from the background scan's cache.
+    if (hasBand) {
+        // only crop the side this page actually has a header/footer on:
+        // a page without one may open with a plate or an ornament, and
+        // there is no text line to tell us it is there
+        if (body.hasHeader) {
+            top = std::max(top, body.top - kSmartMarginPadPt);
+        }
+        if (body.hasFooter) {
+            bottom = std::min(bottom, body.bottom + kSmartMarginPadPt);
         }
     }
     if (bottom <= top) {
@@ -859,6 +1013,7 @@ DisplayModel::DisplayModel(EngineBase* engine, DocControllerCallback* cb) : DocC
     this->engine = engine;
     ReportIf(!engine || engine->PageCount() <= 0);
     engineType = engine->kind;
+    gLiveDisplayModels.Append(this);
 
     SetUiDpi(96);
 
@@ -899,6 +1054,7 @@ void DisplayModel::SetUiDpi(int dpi) {
 
 DisplayModel::~DisplayModel() {
     logf("~DisplayModel: 0x%p\n", this);
+    gLiveDisplayModels.Remove(this);
     pauseRendering = true;
     if (cb) {
         cb->CleanUp(this);
@@ -1331,6 +1487,8 @@ void DisplayModel::Relayout(float newZoomVirtual, int newRotation) {
     }
 
     rotation = NormalizeRotation(newRotation);
+    layoutSmartMargins = gGlobalPrefs->smartMargins;
+    layoutSmartHeaderFooter = gGlobalPrefs->smartHeaderFooter;
 
     bool needHScroll = false;
     bool needVScroll = false;

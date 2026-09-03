@@ -70,6 +70,7 @@ constexpr const char* kLinkLibrarySearchScopeOpen = "<Library,SearchScopeOpen>";
 constexpr const char* kLinkLibrarySearchScopeDone = "<Library,SearchScopeDone>";
 constexpr const char* kLinkLibrarySearchScopeClear = "<Library,SearchScopeClear>";
 constexpr const char* kLinkLibrarySearchScopeTogglePrefix = "<Library,SearchScopeToggle>";
+constexpr const char* kLinkLibrarySearchScopeExpandPrefix = "<Library,SearchScopeExpand>";
 
 void SetPromoString(Str s);
 void FreeHomePageTips();

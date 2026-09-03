@@ -301,9 +301,13 @@ static int CountTocLeaves(TocItem* item) {
 static TempStr TocParentPathTemp(TocItem* item) {
     TocItem* chain[64]{};
     int count = 0;
-    for (TocItem* parent = item ? item->parent : nullptr; parent && parent->parent && count < dimofi(chain);
-         parent = parent->parent) {
-        chain[count++] = parent;
+    // every titled ancestor: the top-level chapter is the one the reader most
+    // wants to see ("November" under a saint's day), and it has no parent of
+    // its own, so a parent-of-parent test dropped exactly that one
+    for (TocItem* parent = item ? item->parent : nullptr; parent && count < dimofi(chain); parent = parent->parent) {
+        if (len(parent->title) > 0) {
+            chain[count++] = parent;
+        }
     }
     str::Builder path;
     for (int i = count - 1; i >= 0; i--) {
@@ -1337,18 +1341,29 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     }
 
     TreeView* tv = ev->treeView;
+    // A filtered result row is drawn entirely here, from the row's own rect:
+    // the TreeView's label for it can be empty, which made GetItemRect fail
+    // and cd->rc collapse, and the row went blank but for its page number.
+    bool filteredRows = win && HasTocFilter(win) && TocUsesRedesignedRows(win);
     Rect labelRect{};
-    if (!tv->GetItemRect(ev->treeItem, true, labelRect)) {
-        return;
-    }
+    bool haveLabel = tv->GetItemRect(ev->treeItem, true, labelRect);
     Rect itemRect{};
     tv->GetItemRect(ev->treeItem, false, itemRect);
+    if (!haveLabel) {
+        if (!filteredRows || itemRect.IsEmpty()) {
+            return;
+        }
+        labelRect = itemRect;
+    }
 
     NMTVCUSTOMDRAW* tvcd = ev->nm;
     HDC hdc = tvcd->nmcd.hdc;
     NMCUSTOMDRAW* cd = &tvcd->nmcd;
     if (cd->rc.right <= cd->rc.left || cd->rc.bottom <= cd->rc.top) {
-        return;
+        if (!filteredRows || itemRect.IsEmpty()) {
+            return;
+        }
+        cd->rc = ToRECT(itemRect);
     }
 
     // POSTPAINT often omits CDIS_SELECTED; also check the control selection.
@@ -1383,7 +1398,6 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     StrVec words;
     GetTocFilterWords(win, words);
     bool filterActive = len(words) > 0;
-
     // Always repaint selected / multi-match rows so themed selection colors
     // replace Explorer's light inactive-selection face (issue #5848). Also
     // when page numbers or filter bars need drawing.
@@ -1459,8 +1473,20 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
 
     if (filterActive && TocUsesRedesignedRows(win)) {
         Rect full = ToRect(cd->rc);
+        // The TreeView clips a flat filtered leaf to its own label bounds
+        // during ITEMPOSTPAINT, and the result title is drawn from the row's
+        // left edge, outside them - so the whole row was going blank except
+        // the page number, which already widened the clip for itself. Widen
+        // it for the entire row.
+        Rect client = HwndClientRect(tv->hwnd);
+        int rowDc = SaveDC(hdc);
+        SelectClipRgn(hdc, nullptr);
+        IntersectClipRect(hdc, 0, full.y, client.dx, full.y + full.dy);
+        // width from the control, not from cd->rc: for a filtered leaf that
+        // rect is the label's own bounds, and a short label left no room for
+        // the title once the gutter and page number were taken off it
         Rect resultTitle{DpiScale(tv->hwnd, 16), full.y + DpiScale(tv->hwnd, 5),
-                         full.dx - DpiScale(tv->hwnd, 32) - pageReserve, DpiScale(tv->hwnd, 21)};
+                         std::max(0, client.dx - DpiScale(tv->hwnd, 32) - pageReserve), DpiScale(tv->hwnd, 21)};
         HFONT resultFont = HdcGetUiFont(hdc, 15, FW_MEDIUM);
         SelectObject(hdc, resultFont);
         DrawTreeItemFilterHighlight(hdc, resultTitle, tocItem->title, words, bgCol, txtCol, resultFont);
@@ -1475,7 +1501,7 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
                         DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_WORD_ELLIPSIS | DT_LEFT, HdcGetUiFont(hdc, 13));
         }
         if (showPage && pageW.len > 0) {
-            Rect client = HwndClientRect(tv->hwnd);
+            // (client: the row-wide clip set above)
             int right = client.dx - DpiScale(tv->hwnd, 16);
             Rect pageRect{right - pageSize.dx, full.y, pageSize.dx, full.dy};
             // TreeView can clip a flat filtered leaf to its text bounds during
@@ -1489,6 +1515,7 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
             HdcDrawTextTabular(hdc, pageLabel, pageRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_RIGHT);
             RestoreDC(hdc, savedDc);
         }
+        RestoreDC(hdc, rowDc);
         return;
     }
 

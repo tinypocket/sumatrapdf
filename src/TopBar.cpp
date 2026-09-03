@@ -1041,7 +1041,12 @@ void TouchPreviewWnd::Show(HWND anchorHwnd, Rect anchorRect) {
     // the taskbar's thumbnails - instead of flipping it above the button.
     bool anchoredLow = anchor.y > work.y + (work.dy * 2 / 3);
     if (anchoredLow) {
+        // from the left edge of the document area (past the rail and, when
+        // open, the panel), not from the button
         x = anchor.x + anchorRect.dx + DpiScale(hwnd, 6);
+        if (owner && owner->win && owner->win->hwndCanvas) {
+            x = HwndMapWindowPoint(owner->win->hwndCanvas, nullptr, {0, 0}).x;
+        }
         y = work.y + work.dy - dy - DpiScale(hwnd, 6);
     }
     if (x + dx > work.x + work.dx) {
@@ -1690,7 +1695,8 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
     // only does anything on top of the margin trim, so it follows it and greys
     // out until it is on
     bool hf = gGlobalPrefs->smartHeaderFooter;
-    uint hfFlags = MF_STRING | (hf ? MF_CHECKED : MF_UNCHECKED) | (hasDoc && on ? MF_ENABLED : (MF_DISABLED | MF_GRAYED));
+    uint hfFlags =
+        MF_STRING | (hf ? MF_CHECKED : MF_UNCHECKED) | (hasDoc && on ? MF_ENABLED : (MF_DISABLED | MF_GRAYED));
     AppendMenuW(popup, hfFlags, kOverflowSmartHeaderFooter, L"Smart header && footer");
     // the manual fallback, for documents nothing can be read from
     AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
@@ -1723,6 +1729,9 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
             continue;
         }
         ScrollState state = dm->GetScrollState();
+        // the bands depend on the header/footer pref; the layout restarts
+        // the scan
+        dm->InvalidateSmartMargins();
         dm->Relayout(dm->GetZoomVirtual(), dm->GetRotation());
         dm->SetScrollState(state);
         w->RedrawAll(true);
@@ -2029,8 +2038,8 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             MarkMenuOwnerDraw(popup);
             Rect chip = savedGroupRects[i];
             Point screen = HwndClientToScreen(hwnd, Point{chip.x, chip.y + chip.dy});
-            int cmd = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_LEFTBUTTON, screen.x, screen.y, 0, win->hwndFrame,
-                                     nullptr);
+            int cmd =
+                TrackPopupMenu(popup, TPM_RETURNCMD | TPM_LEFTBUTTON, screen.x, screen.y, 0, win->hwndFrame, nullptr);
             FreeMenuOwnerDrawInfoData(popup);
             DestroyMenu(popup);
             if (cmd > 0 && cmd <= len(*favs)) {

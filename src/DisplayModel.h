@@ -159,6 +159,10 @@ struct DisplayModel : DocController {
     void Relayout(float zoomVirtual, int rotation);
     // pages the user un-trimmed by hand (see PageDisplayBox)
     Vec<int> marginExpandedPages;
+    // the smart-margin prefs the current layout was computed with; a tab
+    // whose layout predates a toggle is relaid out when it is shown again
+    bool layoutSmartMargins = false;
+    bool layoutSmartHeaderFooter = false;
     // Manual header/footer trim, as a fraction of each page's height. Set in
     // the "Trim headers & footers" dialog and remembered per document. Unlike
     // the automatic trim this needs nothing from the page - no text, no content
@@ -187,6 +191,27 @@ struct DisplayModel : DocController {
         bool hasFooter = false;
     };
     bool PageBodyBand(int pageNo, PageBody* out) const;
+    // Per-page bands are found by extracting each page's text, which is far
+    // too slow to do for every page inside a layout. A background scan
+    // (StartSmartMarginScan) fills this in; until a page's entry is in, it is
+    // trimmed to its content box only, and the layout is redone once when the
+    // scan lands.
+    struct PageBodyCache {
+        u8 state = 0; // 0 pending, 1 no band (leave the page alone), 2 band
+        bool hasHeader = false;
+        bool hasFooter = false;
+        float top = 0.0f;
+        float bottom = 0.0f;
+        // the engine's content box, which is as slow to get as the text and
+        // so comes from the same scan (PageInfo::contentBox is set from it)
+        RectF contentBox{};
+    };
+    mutable Vec<PageBodyCache> pageBodies;
+    mutable int smartScanGen = 0;
+    mutable bool smartScanRunning = false;
+    void StartSmartMarginScan() const;
+    // prefs changed: forget the bands; the next layout starts a fresh scan
+    void InvalidateSmartMargins();
 
     Rect GetViewPort() const;
     bool IsHScrollbarVisible() const;

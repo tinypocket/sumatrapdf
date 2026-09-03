@@ -205,15 +205,17 @@ void TabsCtrl::LayoutTabs() {
     // logfa("  closeDx: %d, closeDy: %d\n", closeDx, closeDy);
 
     bool isRtl = IsTabsRtl(hwnd);
-    int closePad = 8; // padding between close circle and tab edge
+    // padding between close circle and tab edge; the title-bar pill gives it
+    // the same room the label gets on the other side
+    int closePad = inTitleBar ? DpiScale(hwnd, 14) : 8;
 
     HFONT hfont = GetFont();
     int titleControlDx = inTitleBar ? DpiScale(hwnd, 28) : 0;
     int titleControlGap = inTitleBar ? DpiScale(hwnd, 4) : 0;
-    // the strip starts with its first tab; the preview switcher sits with the
-    // other strip-level controls (+, ...) after the last one
-    int stripPad = inTitleBar ? DpiScale(hwnd, 8) : 0;
-    int x = isRtl ? rect.dx - stripPad : stripPad;
+    // the preview switcher leads the strip: its cards drop down under the tabs
+    // themselves (anchored to the first one), so the button belongs beside them
+    previewButtonRect = inTitleBar ? Rect{0, (dy - titleControlDx) / 2, titleControlDx, titleControlDx} : Rect{};
+    int x = isRtl ? rect.dx - titleControlDx - titleControlGap : titleControlDx + titleControlGap;
     int xEnd;
     TooltipInfo* tools = AllocArrayTemp<TooltipInfo>(nTabs);
     for (int i = 0; i < nTabs; i++) {
@@ -268,14 +270,11 @@ void TabsCtrl::LayoutTabs() {
     if (inTitleBar) {
         int cy = (dy - titleControlDx) / 2;
         int step = titleControlDx + titleControlGap;
-        int px = isRtl ? x - titleControlGap - titleControlDx : x + titleControlGap;
-        previewButtonRect = Rect{px, cy, titleControlDx, titleControlDx};
-        int ax = isRtl ? px - step : px + step;
+        int ax = isRtl ? x - titleControlGap - titleControlDx : x + titleControlGap;
         addButtonRect = Rect{ax, cy, titleControlDx, titleControlDx};
         int mx = isRtl ? ax - step : ax + step;
         menuButtonRect = Rect{mx, cy, titleControlDx, titleControlDx};
     } else {
-        previewButtonRect = {};
         addButtonRect = {};
         menuButtonRect = {};
     }

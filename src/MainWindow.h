@@ -415,6 +415,10 @@ struct MainWindow {
     // with folders the reader knows are irrelevant to it.
     StrVec librarySearchFolderScope;
     bool librarySearchScopePickerOpen = false;
+    // the picker's tree starts collapsed to the roots; these are opened
+    StrVec librarySearchScopeExpanded;
+    int librarySearchScopeScrollY = 0;
+    int librarySearchScopeScrollMaxY = 0;
     Str libraryRowMenuPath;
     // Which of a folder's two possible rows opened the menu: pinned
     // folders are drawn once in PINNED and again at their ordinary place in

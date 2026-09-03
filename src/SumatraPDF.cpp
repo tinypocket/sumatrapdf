@@ -1061,6 +1061,7 @@ struct ControllerCallbackHandler : DocControllerCallback {
     ~ControllerCallbackHandler() override = default;
 
     void Repaint() override { ScheduleRepaint(win, 0); }
+    void SmartMarginScanProgress(DisplayModel* dm, int done, int total) override;
     void PageNoChanged(DocController* ctrl, int pageNo) override;
     void ZoomChanged(DocController* ctrl, float zoomVirtual) override;
     void UpdateScrollbars(Size canvas) override;
@@ -1496,6 +1497,44 @@ int ToolbarPositionFromPrefs() {
 
 bool ToolbarAtBottom() {
     return ToolbarPositionFromPrefs() == kToolbarBottom;
+}
+
+// The scan runs for the tab whose document it is; the notification is tied to
+// that tab so it hides while another one is current and goes when it lands.
+static Kind kNotifSmartMargins = "notifSmartMargins";
+
+void ControllerCallbackHandler::SmartMarginScanProgress(DisplayModel* dm, int done, int total) {
+    if (!win || !win->hwndCanvas) {
+        return;
+    }
+    NotificationWnd* wnd = GetNotificationForGroup(win->hwndCanvas, kNotifSmartMargins);
+    if (done >= total) {
+        if (wnd) {
+            RemoveNotification(wnd);
+        }
+        return;
+    }
+    int perc = total > 0 ? (done * 100) / total : 0;
+    TempStr msg = fmt("Trimming margins: %d of %d pages", done, total);
+    if (wnd) {
+        UpdateNotificationProgress(wnd, msg, perc);
+        return;
+    }
+    WindowTab* tab = nullptr;
+    for (WindowTab* t : win->Tabs()) {
+        if (t && t->AsFixed() == dm) {
+            tab = t;
+        }
+    }
+    NotificationCreateArgs args;
+    args.hwndParent = win->hwndCanvas;
+    args.groupId = kNotifSmartMargins;
+    args.tab = tab;
+    args.msg = msg;
+    wnd = ShowNotification(args);
+    if (wnd) {
+        UpdateNotificationProgress(wnd, msg, perc);
+    }
 }
 
 void ControllerCallbackHandler::UpdateScrollbars(Size canvas) {
@@ -3959,6 +3998,20 @@ void LoadModelIntoTab(WindowTab* tab) {
     } else if (win->AsFixed() && win->uiaProvider) {
         // tell UI Automation about content change
         win->uiaProvider->OnDocumentLoad(win->AsFixed());
+    }
+
+    // Smart margins toggled while another tab was current: this tab's pages
+    // are still laid out at their untrimmed (or trimmed) heights while they
+    // draw at the other, leaving bars of canvas between them. Bring the
+    // layout up to date before the first paint.
+    if (DisplayModel* dm = win->AsFixed()) {
+        if (dm->layoutSmartMargins != gGlobalPrefs->smartMargins ||
+            dm->layoutSmartHeaderFooter != gGlobalPrefs->smartHeaderFooter) {
+            gRenderCache->FreeForDisplayModel(dm);
+            ScrollState state = dm->GetScrollState();
+            dm->Relayout(dm->GetZoomVirtual(), dm->GetRotation());
+            dm->SetScrollState(state);
+        }
     }
 
     UpdateUiForCurrentTab(win);
