@@ -36,6 +36,32 @@ static bool EditSetCueText(HWND hwnd, Str s) {
     return ok;
 }
 
+// The native cue banner is a fixed system gray: barely readable on a dark
+// theme and unlike every other muted text on screen. This draws the cue in
+// the theme's color instead, where the typed text would start (the format
+// rect plus the left margin), and only while the edit is empty and not
+// focused so it never sits under the caret.
+void EditPaintThemedCue(HWND hwnd, Str cue, COLORREF col) {
+    if (!hwnd || len(cue) == 0 || GetWindowTextLengthW(hwnd) > 0 || GetFocus() == hwnd) {
+        return;
+    }
+    HDC hdc = GetDC(hwnd);
+    if (!hdc) {
+        return;
+    }
+    RECT fmt{};
+    SendMessageW(hwnd, EM_GETRECT, 0, (LPARAM)&fmt);
+    DWORD margins = (DWORD)SendMessageW(hwnd, EM_GETMARGINS, 0, 0);
+    Rect r = ToRect(fmt);
+    r.x += LOWORD(margins);
+    r.dx -= LOWORD(margins) + HIWORD(margins);
+    HFONT font = GetWindowFont(hwnd);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, col);
+    HdcDrawText(hdc, cue, r, DT_SINGLELINE | DT_LEFT | DT_TOP | DT_END_ELLIPSIS | DT_NOPREFIX, font);
+    ReleaseDC(hwnd, hdc);
+}
+
 // average character width for sizing edits by character count
 static int EditAverageCharDx(HWND hwnd, HFONT font) {
     Size s = HwndMeasureText(hwnd, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", font);

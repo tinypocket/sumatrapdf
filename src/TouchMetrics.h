@@ -27,7 +27,7 @@
 #define kPanelTitleFontSize 18
 #define kPanelChipDy 32      // "6 of 42" pill in the header
 #define kPanelChipReserve 44 // gap kept at the right of the header row for it
-#define kPanelFilterDy 44    // filter / search box
+#define kPanelFilterDy 40    // filter / search box
 // left inset of the filter edit, leaving room for the magnifier the parent
 // draws in the pill's left padding
 #define kPanelFilterIconGap 46
@@ -80,7 +80,7 @@
 // extra strip height when a tab label wraps onto a second line
 #define kTabTwoRowExtraDy 16
 #define kTabCloseDy 24 // close button inside a finger-sized title-bar tab
-#define kTabPillGap 4  // horizontal gap between two tab pills
+#define kTabPillGap 6  // horizontal gap between two tab pills
 
 // floating page indicator, bottom right of the canvas. Only shown when tabs
 // take up the top bar, otherwise the page box lives in the top bar.

@@ -210,8 +210,10 @@ void TabsCtrl::LayoutTabs() {
     HFONT hfont = GetFont();
     int titleControlDx = inTitleBar ? DpiScale(hwnd, 28) : 0;
     int titleControlGap = inTitleBar ? DpiScale(hwnd, 4) : 0;
-    previewButtonRect = inTitleBar ? Rect{0, (dy - titleControlDx) / 2, titleControlDx, titleControlDx} : Rect{};
-    int x = isRtl ? rect.dx - titleControlDx - titleControlGap : titleControlDx + titleControlGap;
+    // the strip starts with its first tab; the preview switcher sits with the
+    // other strip-level controls (+, ...) after the last one
+    int stripPad = inTitleBar ? DpiScale(hwnd, 8) : 0;
+    int x = isRtl ? rect.dx - stripPad : stripPad;
     int xEnd;
     TooltipInfo* tools = AllocArrayTemp<TooltipInfo>(nTabs);
     for (int i = 0; i < nTabs; i++) {
@@ -263,14 +265,18 @@ void TabsCtrl::LayoutTabs() {
         }
         x = xEnd;
     }
-    addButtonRect = inTitleBar ? Rect{isRtl ? x - titleControlGap - titleControlDx : x + titleControlGap,
-                                      (dy - titleControlDx) / 2, titleControlDx, titleControlDx}
-                               : Rect{};
     if (inTitleBar) {
-        int mx = isRtl ? addButtonRect.x - titleControlGap - titleControlDx
-                       : addButtonRect.x + titleControlDx + titleControlGap;
-        menuButtonRect = Rect{mx, (dy - titleControlDx) / 2, titleControlDx, titleControlDx};
+        int cy = (dy - titleControlDx) / 2;
+        int step = titleControlDx + titleControlGap;
+        int px = isRtl ? x - titleControlGap - titleControlDx : x + titleControlGap;
+        previewButtonRect = Rect{px, cy, titleControlDx, titleControlDx};
+        int ax = isRtl ? px - step : px + step;
+        addButtonRect = Rect{ax, cy, titleControlDx, titleControlDx};
+        int mx = isRtl ? ax - step : ax + step;
+        menuButtonRect = Rect{mx, cy, titleControlDx, titleControlDx};
     } else {
+        previewButtonRect = {};
+        addButtonRect = {};
         menuButtonRect = {};
     }
     if (withToolTips) {
@@ -409,6 +415,34 @@ static void FillTabShape(Graphics& gfx, const Rect& r, COLORREF col, int radius)
     gfx.SetCompositingMode(prevComp);
 }
 
+// The top and sides of a tab shape, no bottom line: an unselected tab's
+// outline stops where the shape meets the bar. Half-pixel offsets keep a 1px
+// antialiased pen on one pixel row instead of smeared over two.
+static void StrokeTabShapeTop(Graphics& gfx, const Rect& r, COLORREF col, int radius) {
+    int d = std::min(radius * 2, std::min(r.dy * 2, r.dx));
+    if (d <= 0 || r.dy <= 0) {
+        return;
+    }
+    Gdiplus::REAL x = (Gdiplus::REAL)r.x + 0.5f;
+    Gdiplus::REAL y = (Gdiplus::REAL)r.y + 0.5f;
+    Gdiplus::REAL dx = (Gdiplus::REAL)r.dx - 1.0f;
+    Gdiplus::REAL dy = (Gdiplus::REAL)r.dy;
+    Gdiplus::REAL rd = (Gdiplus::REAL)d;
+    Gdiplus::GraphicsPath path;
+    path.AddLine(x, y + dy, x, y + rd / 2);
+    path.AddArc(x, y, rd, rd, 180.0f, 90.0f);
+    path.AddArc(x + dx - rd, y, rd, rd, 270.0f, 90.0f);
+    path.AddLine(x + dx, y + rd / 2, x + dx, y + dy);
+    Pen pen(GdipCol(col), 1.0f);
+    auto prevSmooth = gfx.GetSmoothingMode();
+    auto prevComp = gfx.GetCompositingMode();
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gfx.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+    gfx.DrawPath(&pen, &path);
+    gfx.SetSmoothingMode(prevSmooth);
+    gfx.SetCompositingMode(prevComp);
+}
+
 static void DrawRoundedOutline(Graphics& gfx, Pen& pen, int x, int y, int dx, int dy, int radius) {
     int d = std::min(radius * 2, std::min(dx, dy));
     GraphicsPath path;
@@ -476,8 +510,13 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
     // the bar itself is the control background and an unselected tab is just
     // bar (no pill), so the selected pill has to be the darker shade
     COLORREF tabBgSelected = inTitleBar ? ThemeControlBackgroundColor() : AccentColor(tabBarBg, 25);
-    COLORREF tabBgBackground = tabBarBg;
-    COLORREF tabBgHighlight = AccentColor(tabBarBg, 12);
+    // In the title bar an unselected tab gets a shape of its own, one step off
+    // the bar (darker on a light theme, lighter on a dark one) with an edge,
+    // so the strip reads as a row of tabs rather than one block and loose
+    // text. The classic strip keeps them flat.
+    COLORREF tabBgBackground = inTitleBar ? AccentColor(tabBarBg, 8) : tabBarBg;
+    COLORREF tabBgHighlight = AccentColor(tabBarBg, inTitleBar ? 16 : 12);
+    COLORREF tabEdge = ThemeEdgeColor();
 
     COLORREF tabBgCol;
     for (int i = 0; i < n; i++) {
@@ -512,16 +551,24 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             }
         }
 
-        COLORREF textColor = inTitleBar ? (isSelected ? ThemeWindowTextColor() : ThemeTabInactiveTextColor())
-                                        : TabTextColorForBackground(tabBgCol);
+        COLORREF textColor = inTitleBar ? ThemeWindowTextColor() : TabTextColorForBackground(tabBgCol);
 
         gfx.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
 
+        // the shape's rect: the selected tab fills the strip's full height and
+        // merges with the page below; an unselected one starts 4px lower, so
+        // the selected tab stands proud of the row
+        Rect rShape = ti->r;
+        if (inTitleBar && !isSelected) {
+            int drop = DpiScale(hwnd, 4);
+            rShape.y += drop;
+            rShape.dy -= drop;
+        }
         // draw background. An unselected tab that isn't hovered has the same
         // color as the bar, so drawing a pill for it would just be a no-op
         // shape with antialiased edges over the bar; skip it.
         if (tabBgCol != tabBarBg) {
-            Rect rPill = ti->r;
+            Rect rPill = rShape;
             int gap = DpiScale(hwnd, kTabPillGap);
             rPill.x += gap / 2;
             rPill.dx -= gap;
@@ -531,6 +578,9 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
                 // strip's own bottom edge, which is where FillTabShape's
                 // caller lines its color up with the page below.
                 FillTabShape(gfx, rPill, tabBgCol, DpiScale(hwnd, 10));
+                if (!isSelected) {
+                    StrokeTabShapeTop(gfx, rPill, tabEdge, DpiScale(hwnd, 10));
+                }
             } else {
                 FillPill(gfx, rPill, tabBgCol, -1);
             }
@@ -542,10 +592,10 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             gfx.FillRectangle(&dbgBr, ToGdipRect(ti->rCloseHit));
         }
 
-        // draw text
+        // draw text, centered in the shape rather than the strip
         gfx.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
         r = ti->rClose;
-        rTxt = ToGdipRectF(ti->r);
+        rTxt = ToGdipRectF(rShape);
         // browser tabs give the label more room to breathe than 8px; the
         // classic (non-title-bar) strip keeps its old, tighter spacing
         int textPad = inTitleBar ? DpiScale(hwnd, 14) : 8;
@@ -574,9 +624,9 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             // heights (centered in the taller tab) and cut anything that
             // still doesn't fit, rather than trusting the rect's real height.
             sf2.SetFormatFlags(sf2.GetFormatFlags() | Gdiplus::StringFormatFlagsLineLimit);
-            if (IsTabsRtl(hwnd)) {
-                sf2.SetAlignment(Gdiplus::StringAlignmentFar);
-            }
+            // both lines start at the same left edge; the default alignment
+            // let a wrapped second line drift
+            sf2.SetAlignment(IsTabsRtl(hwnd) ? Gdiplus::StringAlignmentFar : Gdiplus::StringAlignmentNear);
             Gdiplus::RectF rTxt2 = rTxt;
             Gdiplus::REAL twoLineDy = font->GetHeight(&gfx) * 2.0f;
             if (twoLineDy < rTxt2.Height) {
@@ -612,6 +662,14 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             closeArgs.r = ti->rClose;
             closeArgs.isHover = overClose && isUnderMouse;
             closeArgs.colBg = tabBgCol;
+            if (inTitleBar) {
+                // centered in the shape, muted on an unselected tab, and a
+                // hover circle in the edge color rather than the classic red
+                closeArgs.r.y += (rShape.y - ti->r.y) / 2;
+                closeArgs.colX = isSelected ? ThemeWindowTextColor() : ThemeWindowDarkerTextColor();
+                closeArgs.colXHover = ThemeWindowTextColor();
+                closeArgs.colHoverBg = tabEdge;
+            }
             DrawCloseButton(closeArgs);
         }
     }

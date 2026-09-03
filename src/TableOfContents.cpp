@@ -1808,16 +1808,24 @@ static void LayoutTocContainer(MainWindow* win) {
     if (IsTouchChrome(win)) {
         int headerDy = DpiScale(win->hwndTocBox, kPanelHeaderDy);
         int filterDy = DpiScale(win->hwndTocBox, kPanelFilterDy);
-        int filterInsetY = DpiScale(win->hwndTocBox, 8);
-        int filterSide = DpiScale(win->hwndTocBox, 46);
-        int bodyY = headerDy + filterDy + DpiScale(win->hwndTocBox, 14);
+        // the same field recipe as the Library's search pill: 40px pill, its
+        // edges on the row highlights' x, magnifier at +14, text from +38, a
+        // 40px slot at the right end for the clear button
+        // a single-line edit top-aligns its text, so the control is sized to
+        // the font and centered in the pill rather than filling it
+        int editDy =
+            HwndMeasureText(win->hwndTocBox, StrL("Xg"), GetAppFont(win->hwndFrame)).dy + DpiScale(win->hwndTocBox, 2);
+        int filterInsetY = std::max(0, (filterDy - editDy) / 2);
+        int filterX = DpiScale(win->hwndTocBox, kPanelRowPadX + 38);
+        int filterRight = DpiScale(win->hwndTocBox, kPanelRowPadX + 40);
+        int bodyY = headerDy + filterDy + DpiScale(win->hwndTocBox, 12);
         bool showBreadcrumb = win->touchPanelMode == TouchPanelMode::Bookmarks && !HasTocFilter(win);
         int stickyDy = showBreadcrumb ? DpiScale(win->hwndTocBox, 36) : 0;
         int treeY = bodyY + stickyDy;
         int labelDx = HasTocFilter(win) ? rc.dx - DpiScale(win->hwndTocBox, 124) : rc.dx;
         win->tocLabelWithClose->SetBounds(Rect{0, 0, std::max(0, labelDx), headerDy});
-        SetWindowPos(win->tocFilterEdit->hwnd, nullptr, filterSide, headerDy + filterInsetY, rc.dx - 2 * filterSide,
-                     filterDy - 2 * filterInsetY, SWP_NOZORDER);
+        SetWindowPos(win->tocFilterEdit->hwnd, nullptr, filterX, headerDy + filterInsetY,
+                     std::max(0, rc.dx - filterX - filterRight), filterDy - 2 * filterInsetY, SWP_NOZORDER);
         SetWindowPos(win->tocTreeView->hwnd, nullptr, 0, treeY, rc.dx, std::max(0, rc.dy - treeY), SWP_NOZORDER);
         SetWindowPos(win->hwndTocSticky, HWND_TOP, 0, bodyY, rc.dx, stickyDy, SWP_NOACTIVATE);
         bool bookmarks = win->touchPanelMode == TouchPanelMode::Bookmarks;
@@ -1851,6 +1859,11 @@ static Str TouchPanelTitle(TouchPanelMode mode) {
         default:
             return StrL("Bookmarks");
     }
+}
+
+// cue for the panel's filter field, painted by WndProcTocFilterEdit
+static Str TouchPanelFilterCue(MainWindow* win) {
+    return win->touchPanelMode == TouchPanelMode::Bookmarks ? StrL("Search bookmarks") : StrL("Search this document");
 }
 
 static Str* TouchPanelSearchQuery(MainWindow* win, TouchPanelMode mode) {
@@ -1920,10 +1933,11 @@ void UpdateTouchPanelMode(MainWindow* win) {
     win->tocLabelWithClose->SetLabel(TouchPanelTitle(win->touchPanelMode));
     LayoutTocContainer(win);
     if (win->tocFilterEdit) {
-        Str cue = bookmarks ? StrL("Search bookmarks") : StrL("Search this document");
-        WStr cueW = ToWStrTemp(cue);
-        SendMessageW(win->tocFilterEdit->hwnd, EM_SETCUEBANNER, TRUE, (LPARAM)cueW.s);
+        // the cue is painted by WndProcTocFilterEdit (TouchPanelFilterCue);
+        // the native banner is cleared so the two never overlap
+        SendMessageW(win->tocFilterEdit->hwnd, EM_SETCUEBANNER, TRUE, (LPARAM)L"");
         ShowWindow(win->tocFilterEdit->hwnd, hasFilter ? SW_SHOW : SW_HIDE);
+        HwndInvalidate(win->tocFilterEdit->hwnd, false);
     }
     if (win->tocTreeView) {
         ShowWindow(win->tocTreeView->hwnd, bookmarks ? SW_SHOW : SW_HIDE);
@@ -2060,8 +2074,8 @@ static int TouchFavRowsTop(MainWindow* win) {
 // Only within one document: the panel groups by file, and moving a favorite
 // between documents would mean re-homing it, which is a different action.
 static MainWindow* gFavDragWin = nullptr;
-static int gFavDragFromRow = -1;   // index into the flattened row list
-static int gFavDragOverRow = -1;   // where it would land
+static int gFavDragFromRow = -1; // index into the flattened row list
+static int gFavDragOverRow = -1; // where it would land
 static bool gFavDragActive = false;
 
 static void ResetFavDrag() {
@@ -2131,8 +2145,7 @@ static int TouchPanelMaxScroll(MainWindow* win) {
         Vec<TouchFavRow> rows;
         CollectTouchFavRows(rows);
         contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) +
-                        len(rows) * DpiScale(win->hwndTocBox, TouchSidebarListRowDy()) +
-                        DpiScale(win->hwndTocBox, 12);
+                        len(rows) * DpiScale(win->hwndTocBox, TouchSidebarListRowDy()) + DpiScale(win->hwndTocBox, 12);
     } else if (win->touchPanelMode == TouchPanelMode::Attachments && win->ctrl) {
         Vec<TocItem*> attachments;
         TocTree* toc = win->ctrl->GetToc();
@@ -2148,6 +2161,23 @@ static int TouchPanelMaxScroll(MainWindow* win) {
 
 static void PaintTouchPanelPress(MainWindow* win, HDC hdc);
 
+// Search panel: the match count and the prev/next buttons share one 40px row
+// under the filter pill, so they center on the same line. The paint and the
+// hit test (WndProcTocBox) both read these.
+static Rect TouchSearchControlsRect(MainWindow* win) {
+    HWND hwnd = win->hwndTocBox;
+    Rect rc = HwndClientRect(hwnd);
+    return Rect{DpiScale(hwnd, 16), DpiScale(hwnd, kPanelHeaderDy + kPanelFilterDy + 12), rc.dx - DpiScale(hwnd, 32),
+                DpiScale(hwnd, 40)};
+}
+
+static void TouchSearchNavRects(MainWindow* win, Rect* prev, Rect* next) {
+    Rect row = TouchSearchControlsRect(win);
+    int d = row.dy;
+    *next = Rect{row.x + row.dx - d, row.y, d, d};
+    *prev = Rect{next->x - d - DpiScale(win->hwndTocBox, 8), row.y, d, d};
+}
+
 static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
     TouchPanelMode mode = win->touchPanelMode;
     if (mode == TouchPanelMode::Bookmarks) {
@@ -2157,9 +2187,7 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
     struct PressOverlay {
         MainWindow* w;
         HDC dc;
-        ~PressOverlay() {
-            PaintTouchPanelPress(w, dc);
-        }
+        ~PressOverlay() { PaintTouchPanelPress(w, dc); }
     } pressOverlay{win, hdc};
     Rect rc = HwndClientRect(win->hwndTocBox);
     HdcFillRect(hdc, Rect{0, DpiScale(win->hwndTocBox, kPanelHeaderDy), rc.dx, rc.dy}, ThemeHotBackgroundColor());
@@ -2218,22 +2246,41 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
 
     if (mode == TouchPanelMode::Search) {
         win->touchPanelScrollY = std::clamp(win->touchPanelScrollY, 0, TouchPanelMaxScroll(win));
-        int controlsY = DpiScale(win->hwndTocBox, kPanelHeaderDy + kPanelFilterDy + 4);
-        Rect countRc{DpiScale(win->hwndTocBox, 16), controlsY, rc.dx - DpiScale(win->hwndTocBox, 120),
-                     DpiScale(win->hwndTocBox, 44)};
+        // with nothing typed the field's own cue is the whole prompt; the
+        // count row and the buttons only mean something against a query
+        bool hasQuery =
+            win->tocFilterEdit && win->tocFilterEdit->hwnd && GetWindowTextLengthW(win->tocFilterEdit->hwnd) > 0;
+        if (!hasQuery) {
+            return;
+        }
+        int nMatches = len(win->findMatches);
+        Rect controls = TouchSearchControlsRect(win);
+        Rect prevRc;
+        Rect nextRc;
+        TouchSearchNavRects(win, &prevRc, &nextRc);
+        Rect countRc{controls.x, controls.y, std::max(0, prevRc.x - controls.x - DpiScale(win->hwndTocBox, 8)),
+                     controls.dy};
         SetTextColor(hdc, ThemeWindowDarkerTextColor());
-        HdcDrawText(hdc, fmt("%d matches", len(win->findMatches)), countRc, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
-                    HdcGetUiFont(hdc, kFontSizeMeta));
-        int navDy = DpiScale(win->hwndTocBox, 36);
-        Rect prevRc{rc.dx - DpiScale(win->hwndTocBox, 92), controlsY + DpiScale(win->hwndTocBox, 4), navDy, navDy};
-        Rect nextRc{rc.dx - DpiScale(win->hwndTocBox, 48), prevRc.y, navDy, navDy};
-        FillTocPill(hdc, prevRc, navDy / 2, ThemeControlBackgroundColor(), ThemeControlBackgroundColor());
-        FillTocPill(hdc, nextRc, navDy / 2, ThemeControlBackgroundColor(), ThemeControlBackgroundColor());
-        SetTextColor(hdc, ThemeWindowTextColor());
-        HdcDrawText(hdc, StrL("<"), prevRc, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+        Str countText = nMatches == 0   ? StrL("No matches")
+                        : nMatches == 1 ? StrL("1 match")
+                                        : fmt("%d matches", nMatches);
+        HdcDrawText(hdc, countText, countRc, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
                     HdcGetUiFont(hdc, kFontSizeLabel));
-        HdcDrawText(hdc, StrL(">"), nextRc, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
-                    HdcGetUiFont(hdc, kFontSizeLabel));
+        // the panel's surface color with an edge, never the control
+        // background (pure black on the Dark theme, where the two circles read
+        // as holes); up/down, since the results are a vertical list
+        COLORREF navBg = ThemeTouchSurfaceColor();
+        COLORREF navFg = nMatches > 0 ? ThemeWindowTextColor() : ThemeWindowTextDisabledColor();
+        int navIconDy = DpiScale(win->hwndTocBox, 20);
+        HIMAGELIST navIcons = GetTintedToolbarImageList(navIconDy, navFg, navBg);
+        for (int i = 0; i < 2; i++) {
+            Rect r = i == 0 ? prevRc : nextRc;
+            FillTocPill(hdc, r, r.dy / 2, navBg, ThemeEdgeColor());
+            if (navIcons) {
+                ImageList_Draw(navIcons, (int)(i == 0 ? TbIcon::ChevronUp : TbIcon::ChevronDown), hdc,
+                               r.x + (r.dx - navIconDy) / 2, r.y + (r.dy - navIconDy) / 2, ILD_NORMAL);
+            }
+        }
 
         int rowDy = DpiScale(win->hwndTocBox, TouchSearchResultRowDy());
         int first = std::max(0, win->touchPanelScrollY / rowDy - 1);
@@ -2245,8 +2292,9 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
         for (int i = first; i < last; i++) {
             const FindMatch& match = win->findMatches[i];
             Rect row = TouchSearchResultRect(win, i);
-            FillTocPill(hdc, row, DpiScale(win->hwndTocBox, 8), ThemeWindowControlBackgroundColor(),
-                        ThemeWindowControlBackgroundColor());
+            // the panel surface with an edge, like the prev/next buttons above: the
+            // control background is pure black on the Dark theme
+            FillTocPill(hdc, row, DpiScale(win->hwndTocBox, 8), ThemeTouchSurfaceColor(), ThemeEdgeColor());
             Rect pageRc{row.x + DpiScale(win->hwndTocBox, 12), row.y + DpiScale(win->hwndTocBox, 6),
                         row.dx - DpiScale(win->hwndTocBox, 24), DpiScale(win->hwndTocBox, 18)};
             SetTextColor(hdc, ThemeWindowDarkerTextColor());
@@ -2261,9 +2309,9 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
                                      false, win->findMatchWholeWord,
                                      DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX | DT_TOP);
         }
-        if (last > first) {
-            return;
-        }
+        // "No matches" is the count row's job; the generic empty state below
+        // used to paint its own prompt across the pill and the buttons
+        return;
     }
     if (mode == TouchPanelMode::Favorites) {
         Vec<TouchFavRow> rows;
@@ -2289,8 +2337,7 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             Gdiplus::SolidBrush bg(GdiRgbFromCOLORREF(ThemeTouchSurfaceColor()));
             gfx.FillEllipse(&bg, add.x, add.y, add.dx, add.dy);
-            Gdiplus::Pen pen(GdiRgbFromCOLORREF(ThemeWindowLinkColor()),
-                             (Gdiplus::REAL)std::max(1, DpiScale(hw, 2)));
+            Gdiplus::Pen pen(GdiRgbFromCOLORREF(ThemeWindowLinkColor()), (Gdiplus::REAL)std::max(1, DpiScale(hw, 2)));
             pen.SetStartCap(Gdiplus::LineCapRound);
             pen.SetEndCap(Gdiplus::LineCapRound);
             int acx = add.x + add.dx / 2;
@@ -2312,8 +2359,7 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             if (on) {
                 Gdiplus::SolidBrush fill(GdiRgbFromCOLORREF(ThemeWindowLinkColor()));
                 tgx.FillRectangle(&fill, br.x, br.y, br.dx, br.dy);
-                Gdiplus::Pen tick(GdiRgbFromCOLORREF(RGB(255, 255, 255)),
-                                  (Gdiplus::REAL)std::max(1, DpiScale(hw, 2)));
+                Gdiplus::Pen tick(GdiRgbFromCOLORREF(RGB(255, 255, 255)), (Gdiplus::REAL)std::max(1, DpiScale(hw, 2)));
                 tick.SetStartCap(Gdiplus::LineCapRound);
                 tick.SetEndCap(Gdiplus::LineCapRound);
                 tgx.DrawLine(&tick, br.x + box / 4, br.y + box / 2, br.x + box / 2, br.y + (box * 3) / 4);
@@ -2467,9 +2513,6 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
 
     Str message;
     switch (mode) {
-        case TouchPanelMode::Search:
-            message = StrL("Search this document");
-            break;
         case TouchPanelMode::Annotations:
             message = StrL("No annotations on this page");
             break;
@@ -2495,11 +2538,11 @@ static Rect TouchFilterClearRect(MainWindow* win, bool hitTarget) {
     Rect er = HwndWindowRect(edit->hwnd);
     POINT tl{er.x, er.y};
     ScreenToClient(hwnd, &tl);
-    int sideMargin = DpiScale(hwnd, 16);
-    Rect pill{sideMargin, tl.y - DpiScale(hwnd, 8), HwndClientRect(hwnd).dx - (2 * sideMargin),
-              er.dy + DpiScale(hwnd, 16)};
+    int sideMargin = DpiScale(hwnd, kPanelRowPadX);
+    int pillDy = DpiScale(hwnd, kPanelFilterDy);
+    Rect pill{sideMargin, tl.y - (pillDy - er.dy) / 2, HwndClientRect(hwnd).dx - (2 * sideMargin), pillDy};
     int clearDy = DpiScale(hwnd, 22);
-    Rect clear{pill.x + pill.dx - DpiScale(hwnd, 10) - clearDy, pill.y + (pill.dy - clearDy) / 2, clearDy, clearDy};
+    Rect clear{pill.x + pill.dx - DpiScale(hwnd, 9) - clearDy, pill.y + (pill.dy - clearDy) / 2, clearDy, clearDy};
     if (hitTarget) {
         clear.Inflate(DpiScale(hwnd, 9), DpiScale(hwnd, 9));
     }
@@ -2534,42 +2577,51 @@ static void PaintTouchFilterChrome(MainWindow* win, bool ownsBodyBelow) {
     Rect er = HwndWindowRect(edit->hwnd);
     POINT tl{er.x, er.y};
     ScreenToClient(hwnd, &tl);
-    int sideMargin = DpiScale(hwnd, 16);
-    Rect pill{sideMargin, tl.y, rcClient.dx - (2 * sideMargin), er.dy};
-    pill.Inflate(0, DpiScale(hwnd, 8));
+    // same pill as the Library's search field (see DrawTouchLibraryPageV2):
+    // 40px, edges on the rows' x, magnifier at +14, one step of edge color
+    // around it and the accent edge while it has the focus
+    int sideMargin = DpiScale(hwnd, kPanelRowPadX);
+    // the edit is centered in the pill's height, whatever the font made it
+    int pillDy = DpiScale(hwnd, kPanelFilterDy);
+    Rect pill{sideMargin, tl.y - (pillDy - er.dy) / 2, rcClient.dx - (2 * sideMargin), pillDy};
     // The panel is a WC_STATIC and paints its own background, which is the
     // control background (pure black on the Dark theme). Everywhere else that
     // is covered by the header / tree children, but the filter strip is not -
     // so repaint that band in the panel color before drawing the pill on it.
-    int bandY = pill.y - DpiScale(hwnd, 8);
-    int bandBottom = ownsBodyBelow ? rcClient.dy : pill.y + pill.dy;
+    int bandY = pill.y - DpiScale(hwnd, 4);
+    int bandBottom = ownsBodyBelow ? rcClient.dy : pill.y + pill.dy + DpiScale(hwnd, 4);
     Rect band{0, bandY, rcClient.dx, std::max(0, bandBottom - bandY)};
     HdcFillRect(hdc, band, ThemeHotBackgroundColor());
     COLORREF fieldBg = ThemeTouchSurfaceColor();
-    FillTocPill(hdc, pill, pill.dy / 2, fieldBg, ThemeEdgeColor());
+    bool focused = GetFocus() == edit->hwnd;
+    FillTocPill(hdc, pill, pill.dy / 2, fieldBg, focused ? ThemeHotEdgeColor() : ThemeEdgeColor());
 
     int iconDy = DpiScale(hwnd, kPanelFilterIconDy);
     HIMAGELIST iml = GetTintedToolbarImageList(iconDy, ThemeWindowDarkerTextColor(), fieldBg);
     if (iml) {
-        int ix = pill.x + DpiScale(hwnd, 16);
+        int ix = pill.x + DpiScale(hwnd, 14);
         int iy = pill.y + ((pill.dy - iconDy) / 2);
         ImageList_Draw(iml, (int)TbIcon::Search, hdc, ix, iy, ILD_NORMAL);
     }
 
     if (GetWindowTextLengthW(edit->hwnd) > 0) {
+        // a chip one step above the surface in every theme, with the icon
+        // set's × rather than a font glyph
         Rect clear = TouchFilterClearRect(win, false);
-        FillTocPill(hdc, clear, clear.dy / 2, RGB(234, 229, 222), RGB(234, 229, 222));
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, ThemeWindowDarkerTextColor());
-        HdcDrawText(hdc, StrL("×"), clear, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
-                    HdcGetUiFont(hdc, 11, FW_MEDIUM));
+        COLORREF chipBg = ThemeEdgeColor();
+        FillTocPill(hdc, clear, clear.dy / 2, chipBg, chipBg);
+        int closeDy = DpiScale(hwnd, 12);
+        HIMAGELIST closeIcons = GetTintedToolbarImageList(closeDy, ThemeWindowTextColor(), chipBg);
+        if (closeIcons) {
+            ImageList_Draw(closeIcons, (int)TbIcon::Close, hdc, clear.x + (clear.dx - closeDy) / 2,
+                           clear.y + (clear.dy - closeDy) / 2, ILD_NORMAL);
+        }
     }
     ReleaseDC(hwnd, hdc);
     HwndInvalidate(edit->hwnd, false);
 }
 
 constexpr UINT_PTR kTouchPanelPressTimerId = 22;
-
 
 // --- panel press feedback ------------------------------------------------
 // The panel's rows are pure tap targets and answered a tap with nothing until
@@ -2760,10 +2812,9 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
         }
     }
     if (win->touchPanelMode == TouchPanelMode::Search) {
-        int controlsY = DpiScale(hwnd, kPanelHeaderDy + kPanelFilterDy + 4);
-        int navDy = DpiScale(hwnd, 36);
-        Rect prevRc{HwndClientRect(hwnd).dx - DpiScale(hwnd, 92), controlsY + DpiScale(hwnd, 4), navDy, navDy};
-        Rect nextRc{HwndClientRect(hwnd).dx - DpiScale(hwnd, 48), prevRc.y, navDy, navDy};
+        Rect prevRc;
+        Rect nextRc;
+        TouchSearchNavRects(win, &prevRc, &nextRc);
         if (prevRc.Contains(pt)) {
             FindPrev(win);
             return true;
@@ -2947,8 +2998,8 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                 if (idx >= 0 && !rows[idx].isHeader) {
                     Rect client = HwndClientRect(hwnd);
                     int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
-                    Rect row{DpiScale(hwnd, 12), TouchFavRowsTop(win) + idx * rowDy,
-                             client.dx - DpiScale(hwnd, 24), rowDy};
+                    Rect row{DpiScale(hwnd, 12), TouchFavRowsTop(win) + idx * rowDy, client.dx - DpiScale(hwnd, 24),
+                             rowDy};
                     if (!TouchFavDeleteRect(win, row).Contains(Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)})) {
                         gFavDragWin = win;
                         gFavDragFromRow = idx;
@@ -3214,6 +3265,9 @@ static void OnTocFilterTextChanged(MainWindow* win) {
         if (savedQuery) {
             str::ReplaceWithCopy(savedQuery, win->tocFilterEdit->GetTextTemp());
         }
+        // the edit repaints its own text without WM_PAINT; the themed cue
+        // (WndProcTocFilterEdit) needs one when it empties
+        HwndInvalidate(win->tocFilterEdit->hwnd, false);
     }
     if (IsTouchChrome(win) && win->touchPanelMode == TouchPanelMode::Search) {
         TempStr text = win->tocFilterEdit->GetTextTemp();
@@ -3234,6 +3288,15 @@ static LRESULT CALLBACK WndProcTocFilterEdit(HWND hwnd, UINT msg, WPARAM wp, LPA
     MainWindow* win = (MainWindow*)data;
     if (msg == WM_LBUTTONDOWN) {
         CloseTouchDocumentOverlays(win);
+    }
+    if (msg == WM_PAINT && win && IsTouchChrome(win)) {
+        // the cue in the theme's muted color, not the native gray banner
+        LRESULT res = DefSubclassProc(hwnd, msg, wp, lp);
+        EditPaintThemedCue(hwnd, TouchPanelFilterCue(win), ThemeWindowDarkerTextColor());
+        return res;
+    }
+    if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS) {
+        HwndInvalidate(hwnd, false);
     }
     if (msg == WM_KEYDOWN) {
         if (wp == VK_DOWN) {
@@ -3429,17 +3492,18 @@ void CreateToc(MainWindow* win) {
         // underline so the filter field is visible on flat sidebar backgrounds.
         // The redesigned panel draws a pill behind it instead (WndProcTocBox).
         eargs.withBottomBorder = !gGlobalPrefs->touchChrome;
-        eargs.cueText = _TRA("Search Bookmarks");
+        // the touch chrome paints its own themed cue (WndProcTocFilterEdit)
+        eargs.cueText = gGlobalPrefs->touchChrome ? Str{} : _TRA("Search Bookmarks");
         eargs.font = GetAppFont(win->hwndFrame);
         filterEdit->Create(eargs);
     }
     win->tocFilterEdit = filterEdit;
     if (gGlobalPrefs->touchChrome) {
-        // Inset so the pill drawn behind it (WndProcTocBox) has room for its
-        // rounded ends; stretched edge to edge there is nowhere to draw them.
-        // The extra left inset leaves room for the magnifier, which the parent
-        // draws - the edit paints over anything inside its own rect.
-        filterEdit->SetInsetsPt(12, 46, 12, kPanelFilterIconGap);
+        // The edit is placed inside the pill drawn behind it (WndProcTocBox),
+        // to the right of the magnifier and short of the clear button, so it
+        // needs no horizontal inset of its own; the vertical ones center the
+        // text in the 28px it gets
+        filterEdit->SetInsetsPt(12, 2, 12, 2);
     }
     filterEdit->onTextChanged = MkFunc0(OnTocFilterTextChanged, win);
     SetWindowSubclass(filterEdit->hwnd, WndProcTocFilterEdit, NextSubclassId(), (DWORD_PTR)win);

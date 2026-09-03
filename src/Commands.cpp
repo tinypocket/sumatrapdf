@@ -132,6 +132,7 @@ static SeqStrings gCommandNames =
     "CmdOpenSelectedDocumentNewCopy\0"
     "CmdPinSelectedDocument\0"
     "CmdForgetSelectedDocument\0"
+    "CmdShowInLibraryFolder\0"
     "CmdExpandAll\0"
     "CmdCollapseAll\0"
     "CmdSaveEmbeddedFile\0"
@@ -404,6 +405,7 @@ static i32 gCommandIds[] = {
     CmdOpenSelectedDocumentNewCopy,
     CmdPinSelectedDocument,
     CmdForgetSelectedDocument,
+    CmdShowInLibraryFolder,
     CmdExpandAll,
     CmdCollapseAll,
     CmdSaveEmbeddedFile,
@@ -676,6 +678,7 @@ SeqStrings gCommandDescriptions =
     "Open Another Copy\0"
     "Pin Selected Document\0"
     "Remove Selected Document From History\0"
+    "Show In Library Folder\0"
     "Expand All\0"
     "Collapse All\0"
     "Save Embedded File...\0"

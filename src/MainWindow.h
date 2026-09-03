@@ -402,6 +402,10 @@ struct MainWindow {
     // pane shows every file the current query matches instead of a folder.
     // Cleared whenever a folder or Recent is chosen, or the query changes.
     bool librarySearchFilesSelected = false;
+    // "Show in Library folder" from a search result: the file's card is
+    // outlined in its folder and scrolled into view once (the pending flag)
+    Str libraryHighlightFilePath;
+    bool libraryHighlightScrollPending = false;
     StrVec libraryExpandedFolderPaths;
     Str librarySearchQuery;
     // Folders search is restricted to, chosen from the picker opened off the

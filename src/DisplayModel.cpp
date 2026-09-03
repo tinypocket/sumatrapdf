@@ -529,11 +529,34 @@ bool DisplayModel::IsPageMarginTrimmed(int pageNo) const {
 // matter: trimming only to the header band would leave the whole gap between
 // the last body line and the footer, and trimming a page that has no header
 // would eat whatever sits above its first line - a plate, a title ornament.
-bool DisplayModel::PageBodyBand(int pageNo, PageBody* out) const {
-    *out = PageBody();
-    if (smartHfTopPt <= 0.0f && smartHfBottomPt <= 0.0f) {
+// A lone line at the very edge of one page, standing off from the rest by a
+// gap no body spacing produces: a source URL under a hymn, a page number, a
+// date line. The document-wide pass needs most sampled pages to agree on a
+// band, and a book whose pages vary in layout (a Menaion, where one page ends
+// with a URL and the next with nothing) never reaches that agreement - so each
+// page is also judged on its own, with stricter thresholds since there is no
+// second page to confirm it against.
+static bool IsLoneEdgeLine(const Vec<TextLine>& lines, int idx, bool atBottom, const RectF& media) {
+    int n = len(lines);
+    if (n < 3 || idx < 0 || idx >= n) {
         return false;
     }
+    const TextLine& line = lines[idx];
+    const TextLine& neighbor = atBottom ? lines[idx - 1] : lines[idx + 1];
+    if (atBottom ? idx != n - 1 : idx != 0) {
+        return false;
+    }
+    float gap = atBottom ? line.top - neighbor.bottom : neighbor.top - line.bottom;
+    float bodyGap = BodyLineGap(lines);
+    float minGap = std::max(bodyGap * 2.0f, 8.0f);
+    float edgeDist = atBottom ? (media.y + media.dy - line.bottom) : (line.top - media.y);
+    bool nearEdge = edgeDist < media.dy * 0.12f;
+    bool thin = (line.bottom - line.top) <= media.dy * 0.05f;
+    return gap >= minGap && nearEdge && thin;
+}
+
+bool DisplayModel::PageBodyBand(int pageNo, PageBody* out) const {
+    *out = PageBody();
     RectF media = PageMediaBox(pageNo);
     if (media.IsEmpty()) {
         return false;
@@ -566,7 +589,17 @@ bool DisplayModel::PageBodyBand(int pageNo, PageBody* out) const {
         }
         last = i;
     }
-    if (first < 0) {
+    // this page's own lone edge lines, where the document-wide bands did not
+    // account for them (or the document has none)
+    if (!out->hasHeader && first >= 0 && IsLoneEdgeLine(lines, first, false, media)) {
+        out->hasHeader = true;
+        first++;
+    }
+    if (!out->hasFooter && last > first && IsLoneEdgeLine(lines, last, true, media)) {
+        out->hasFooter = true;
+        last--;
+    }
+    if (first < 0 || last < first) {
         return false; // the whole page looked like header/footer: do not crop it
     }
     out->top = lines[first].top;

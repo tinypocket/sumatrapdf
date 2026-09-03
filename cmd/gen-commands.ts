@@ -125,6 +125,7 @@ export const commands = [
     "CmdOpenSelectedDocumentNewCopy", "Open Another Copy",
     "CmdPinSelectedDocument", "Pin Selected Document",
     "CmdForgetSelectedDocument", "Remove Selected Document From History",
+    "CmdShowInLibraryFolder", "Show In Library Folder",
     "CmdExpandAll", "Expand All",
     "CmdCollapseAll", "Collapse All",
     "CmdSaveEmbeddedFile", "Save Embedded File...",

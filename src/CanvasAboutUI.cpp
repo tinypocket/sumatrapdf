@@ -245,8 +245,9 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
                 SetTextColor(hdcEdit, ThemeWindowTextColor());
                 COLORREF bg = ThemeControlBackgroundColor();
                 if (IsTouchChrome(win)) {
-                    bg = win->touchView == TouchView::Library ? ThemeWindowControlBackgroundColor()
-                                                              : ThemeHotBackgroundColor();
+                    // the Library's field sits inside a pill filled with the
+                    // touch surface color; anything else shows as a box in it
+                    bg = win->IsCurrentTabAbout() ? ThemeTouchSurfaceColor() : ThemeHotBackgroundColor();
                 }
                 SetBkColor(hdcEdit, bg);
                 HBRUSH* brush = IsTouchChrome(win) ? &win->brHomeSearchBg : &win->brControlBgColor;
@@ -272,9 +273,13 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
                         // the same field filters the Recent cards
                         win->libraryFilesScrollY = 0;
                     }
+                    HomePageOnSearchQueryChanged(win);
                     // the filter changed the list, so select its first entry (#1136)
                     HomePageSelectFirst(win);
                     HwndInvalidate(win->hwndCanvas);
+                    // the edit repaints its own text without WM_PAINT; the
+                    // themed cue (WndProcHomeSearch) needs one when it empties
+                    HwndInvalidate(win->hwndHomeSearch, false);
                     return 0;
                 }
                 // hide/show keyboard selection outline when focus enters/leaves search
@@ -317,16 +322,15 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
             }
             break;
 
-        case WM_MOUSEMOVE:
-            {
-                // Hover feedback from the move's own coordinates. The
-                // WM_SETCURSOR path hit-tests the real cursor position, which
-                // is right for the cursor but leaves the highlight stale when
-                // the surface scrolls or repaints under a still pointer.
-                StaticLink* hotLink = nullptr;
-                GetStaticLinkAtTemp(win->staticLinks, x, y, &hotLink);
-                HomePageSetHotLink(win, hotLink ? hotLink->target : Str{});
-            }
+        case WM_MOUSEMOVE: {
+            // Hover feedback from the move's own coordinates. The
+            // WM_SETCURSOR path hit-tests the real cursor position, which
+            // is right for the cursor but leaves the highlight stale when
+            // the surface scrolls or repaints under a still pointer.
+            StaticLink* hotLink = nullptr;
+            GetStaticLinkAtTemp(win->staticLinks, x, y, &hotLink);
+            HomePageSetHotLink(win, hotLink ? hotLink->target : Str{});
+        }
             if (HomePageOnLibraryResizeMouse(win, msg, x, y)) {
                 return 0;
             }

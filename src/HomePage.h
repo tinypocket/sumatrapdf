@@ -37,12 +37,18 @@ constexpr const char* kLinkLibraryForward = "<Library,Forward>";
 // stack entry standing for the Recent surface; a real folder path never
 // contains angle brackets, so it cannot collide
 constexpr const char* kLibraryNavRecent = "<Recent>";
+// stack entry for a search's results, the query after the prefix; pushed when
+// the user leaves the results for a folder so Back returns to them
+constexpr const char* kLibraryNavSearchPrefix = "<Search>";
 constexpr const char* kLinkLibraryFolderPrefix = "<Library,Folder>";
 // Same navigation as kLinkLibraryFolderPrefix, given to content-pane
 // elements (cards, list rows, recent-folder pills) so their hover glow
 // never resolves to the sidebar tree row for the same folder - the two
 // are drawn separately and can be visible at once.
 constexpr const char* kLinkLibraryFolderCardPrefix = "<Library,FolderCard>";
+// the folder line under a search result: opens that folder in the tree
+// (the query is cleared; Back re-runs it)
+constexpr const char* kLinkLibraryFolderFromSearchPrefix = "<Library,FolderFromSearch>";
 constexpr const char* kLinkLibraryTogglePrefix = "<Library,Toggle>";
 constexpr const char* kLinkLibraryAddFolder = "<Library,AddFolder>";
 constexpr const char* kLinkLibraryMenuPrefix = "<Library,Menu>";
@@ -103,6 +109,13 @@ void FreeTouchLibraryModel();
 void AddTouchLibraryFolder(MainWindow* win);
 bool HandleTouchLibraryLink(MainWindow* win, Str url);
 void SelectTouchLibraryFolder(MainWindow* win, Str folderPath);
+// the search box's text changed (typed, cleared, or set by Back/Forward)
+void HomePageOnSearchQueryChanged(MainWindow* win);
+// the file lives in a folder the Library indexes
+bool TouchLibraryContainsFile(Str filePath);
+// opens the file's Library folder with the file's card outlined and scrolled
+// into view; from search results, Back returns to the results
+void ShowFileInTouchLibrary(MainWindow* win, Str filePath);
 bool CloseTouchLibraryTransientUi(MainWindow* win);
 bool HandleTouchHomeLink(MainWindow* win, Str url);
 
