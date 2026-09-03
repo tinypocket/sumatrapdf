@@ -596,8 +596,11 @@ struct MainWindow {
     int browserFindGen = 0;         // generation; JS echoes it so stale async results are dropped
     int browserFindPageCurrent = 0; // 1-based current match on the current page (0: none)
     int browserFindCurrent = -1;    // index into findMatches of the current match (-1: none)
-    int browserFindTotal = -1;      // total matches across all pages (-1: sweep not done)
-    Str browserFindTerm;            // owned; the term the current md find ran with
+    // the touch Search panel's current match (index into findMatches, -1:
+    // none); it walks the list itself, see TouchSearchGoTo
+    int touchFindCurrent = -1;
+    int browserFindTotal = -1; // total matches across all pages (-1: sweep not done)
+    Str browserFindTerm;       // owned; the term the current md find ran with
 
     ILinkHandler* linkHandler = nullptr;
     // keyboard link following: when on, visible links are numbered 1..9 and

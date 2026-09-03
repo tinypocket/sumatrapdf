@@ -144,6 +144,11 @@ struct WebviewWnd : Wnd {
     void RevokeForwardingDropTarget();
     bool Embed(WebViewMsgCb& cb);
     void OnControllerReady(ICoreWebView2Controller* controller);
+    // The browser profile's cookies for url as one "Cookie: a=b; c=d\r\n"
+    // request header line, delivered asynchronously on the UI thread ({} when
+    // there are none or the runtime is too old). A download made outside the
+    // webview needs these to pass as the logged-in session.
+    void GetCookieHeaderAsync(Str url, const Func1<Str>& cb);
     void OnProcessFailed(WebViewProcessFailure kind);
     void FailInit();
     void QueuePendingOp(PendingWebViewOp::Kind kind, Str text, int token = 0);

@@ -563,7 +563,7 @@ static bool IsLoneEdgeLine(const Vec<TextLine>& lines, int idx, bool atBottom, c
 
 // Engine-only, so the background scan can run it off the UI thread. hfTopPt /
 // hfBottomPt are the document-wide running bands (0 when there are none).
-static bool ComputePageBody(EngineBase* engine, int pageNo, float hfTopPt, float hfBottomPt,
+static bool ComputePageBody(EngineBase* engine, int pageNo, float hfTopPt, float hfBottomPt, const RectF& contentBox,
                             DisplayModel::PageBody* out) {
     *out = DisplayModel::PageBody();
     RectF media = engine->PageMediabox(pageNo);
@@ -613,6 +613,17 @@ static bool ComputePageBody(EngineBase* engine, int pageNo, float hfTopPt, float
     }
     out->top = lines[first].top;
     out->bottom = lines[last].bottom;
+    // The lines only describe the page's text. Music engraved as vector art
+    // leaves a page with nothing but its running header, a caption and a page
+    // number as text, and cropping to those would keep a sliver and drop the
+    // music. The body has to account for most of what the engine sees as
+    // content, or the page is left to the content-box trim alone.
+    if (!contentBox.IsEmpty()) {
+        float bodyDy = out->bottom - out->top;
+        if (bodyDy < contentBox.dy * 0.5f) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -696,7 +707,7 @@ static void SmartMarginScanThread(SmartMarginScan* s) {
         DisplayModel::PageBody body;
         DisplayModel::PageBodyCache entry;
         entry.contentBox = s->engine->PageContentBox(pageNo);
-        if (ComputePageBody(s->engine, pageNo, s->hfTopPt, s->hfBottomPt, &body)) {
+        if (ComputePageBody(s->engine, pageNo, s->hfTopPt, s->hfBottomPt, entry.contentBox, &body)) {
             entry.state = 2;
             entry.hasHeader = body.hasHeader;
             entry.hasFooter = body.hasFooter;

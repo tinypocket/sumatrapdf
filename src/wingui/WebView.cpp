@@ -2261,3 +2261,92 @@ LRESULT WebviewWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 }
 void WebviewWnd::UpdateWebviewSize() {}
 #endif // !_MSC_VER
+
+// --- cookies for an out-of-webview download -----------------------------------
+
+struct webview2_get_cookies_handler : public ICoreWebView2GetCookiesCompletedHandler {
+    LONG m_refCount = 1;
+    Func1<Str> m_cb;
+
+    explicit webview2_get_cookies_handler(const Func1<Str>& cb) : m_cb(cb) {}
+    virtual ~webview2_get_cookies_handler() = default;
+
+    ULONG STDMETHODCALLTYPE AddRef() { return InterlockedIncrement(&m_refCount); }
+    ULONG STDMETHODCALLTYPE Release() {
+        LONG n = InterlockedDecrement(&m_refCount);
+        if (n == 0) {
+            delete this;
+        }
+        return n;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, LPVOID* ppv) {
+        if (!ppv) {
+            return E_POINTER;
+        }
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == __uuidof(ICoreWebView2GetCookiesCompletedHandler)) {
+            *ppv = static_cast<ICoreWebView2GetCookiesCompletedHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(HRESULT res, ICoreWebView2CookieList* list) {
+        str::Builder header;
+        UINT count = 0;
+        if (SUCCEEDED(res) && list && SUCCEEDED(list->get_Count(&count))) {
+            for (UINT i = 0; i < count; i++) {
+                ICoreWebView2Cookie* cookie = nullptr;
+                if (FAILED(list->GetValueAtIndex(i, &cookie)) || !cookie) {
+                    continue;
+                }
+                WCHAR* name = nullptr;
+                WCHAR* value = nullptr;
+                cookie->get_Name(&name);
+                cookie->get_Value(&value);
+                if (name && value) {
+                    if (header.IsEmpty()) {
+                        header.Append(StrL("Cookie: "));
+                    } else {
+                        header.Append(StrL("; "));
+                    }
+                    header.Append(ToUtf8Temp(WStr(name)));
+                    header.AppendChar('=');
+                    header.Append(ToUtf8Temp(WStr(value)));
+                }
+                if (name) {
+                    CoTaskMemFree(name);
+                }
+                if (value) {
+                    CoTaskMemFree(value);
+                }
+                cookie->Release();
+            }
+        }
+        if (!header.IsEmpty()) {
+            header.Append(StrL("\r\n"));
+        }
+        m_cb.Call(ToStrTemp(header));
+        return S_OK;
+    }
+};
+
+void WebviewWnd::GetCookieHeaderAsync(Str url, const Func1<Str>& cb) {
+    ICoreWebView2_2* wv2 = nullptr;
+    if (webview && SUCCEEDED(webview->QueryInterface(IID_PPV_ARGS(&wv2))) && wv2) {
+        ICoreWebView2CookieManager* mgr = nullptr;
+        HRESULT hr = wv2->get_CookieManager(&mgr);
+        wv2->Release();
+        if (SUCCEEDED(hr) && mgr) {
+            auto* handler = new webview2_get_cookies_handler(cb);
+            WCHAR* urlW = CWStrTemp(url);
+            hr = mgr->GetCookies(urlW, handler);
+            handler->Release();
+            mgr->Release();
+            if (SUCCEEDED(hr)) {
+                return;
+            }
+        }
+    }
+    cb.Call(Str{});
+}

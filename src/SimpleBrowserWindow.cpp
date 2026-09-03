@@ -33,6 +33,7 @@
 #include "wingui/Anim.h"
 
 #include "SimpleBrowserWindow.h"
+#include "Toolbar.h"
 
 constexpr int kNavRowPadding = 6;
 constexpr int kNavBtnGap = 4;
@@ -808,6 +809,15 @@ static void TbRecordDownload(Str path) {
     SaveSettings();
 }
 
+// A document link is noticed twice - by the navigation filter, and again by
+// the content-type takeover once the response comes in, which can be after
+// the first download has already finished - and each started its own
+// download: the same file landed twice and opened in two tabs. Remember what
+// was fetched in the last few seconds.
+static StrVec gTbRecentDownloadUrls;
+static Vec<double> gTbRecentDownloadMs;
+constexpr double kTbRecentDownloadGuardMs = 15000.0;
+
 struct TbDocDownload {
     Str url;
     Str destPath;
@@ -815,7 +825,14 @@ struct TbDocDownload {
     // without this the tab would be labelled e.g. "sum3236.tmp.pdf"
     Str displayName;
     MainWindow* win = nullptr;
+    // the webview's cookies for the URL, so a member-only download made
+    // outside the webview still passes as the logged-in session (without
+    // them a protected link came back as the site's login page, saved and
+    // opened as "document.pdf")
+    Str cookieHeader;
 };
+
+static TbTab* TbActiveTab(TouchBrowser* tb);
 
 static void TbDocDownloadFinish(TbDocDownload* d) {
     if (file::Exists(d->destPath)) {
@@ -828,8 +845,13 @@ static void TbDocDownloadFinish(TbDocDownload* d) {
         }
         LoadDocument(&args);
         SetTouchView(d->win, TouchView::Doc);
+        // the toolbar flag is what the browser view left it at; recompute it
+        // for the document (entering and leaving fullscreen did the same, which
+        // is how a missing top bar used to come back)
+        ShowOrHideToolbar(d->win);
     }
     str::Free(d->url);
+    str::Free(d->cookieHeader);
     str::Free(d->destPath);
     str::Free(d->displayName);
     delete d;
@@ -837,8 +859,14 @@ static void TbDocDownloadFinish(TbDocDownload* d) {
 
 static void TbDocDownloadAsync(TbDocDownload* d) {
     constexpr i64 kMaxWebDocSize = 256LL * 1024 * 1024;
-    HttpGetToFile(d->url, d->destPath, {}, kMaxWebDocSize);
+    HttpGetToFile(d->url, d->destPath, {}, kMaxWebDocSize, d->cookieHeader);
     uitask::Post(MkFunc0<TbDocDownload>(TbDocDownloadFinish, d), "TbDocDownloadFinish");
+}
+
+// UI thread, with the webview's cookies for the URL in hand
+static void TbDocDownloadWithCookies(TbDocDownload* d, Str cookieHeader) {
+    d->cookieHeader = str::Dup(cookieHeader);
+    RunAsync(MkFunc0<TbDocDownload>(TbDocDownloadAsync, d), "TbDocDownloadAsync");
 }
 
 // Downloads `url` into the Downloads folder and opens it as a SumatraPDF tab.
@@ -849,6 +877,17 @@ static void TbStartDocDownload(MainWindow* win, Str url, Str ext) {
     if (!url) {
         return;
     }
+    double nowMs = AnimNowMs();
+    for (int i = len(gTbRecentDownloadUrls) - 1; i >= 0; i--) {
+        if (nowMs - gTbRecentDownloadMs[i] > kTbRecentDownloadGuardMs) {
+            gTbRecentDownloadUrls.RemoveAt(i);
+            gTbRecentDownloadMs.RemoveAt(i);
+        } else if (str::EqI(gTbRecentDownloadUrls[i], url)) {
+            return;
+        }
+    }
+    gTbRecentDownloadUrls.Append(url);
+    gTbRecentDownloadMs.Append(nowMs);
     auto* d = new TbDocDownload();
     d->win = win;
     d->url = str::Dup(url);
@@ -867,6 +906,13 @@ static void TbStartDocDownload(MainWindow* win, Str url, Str ext) {
     }
     if (fileName) {
         d->displayName = str::Dup(fileName);
+    }
+    // the fetch goes out with the browser's cookies for the site, when a
+    // browser tab is there to ask
+    TbTab* act = win && win->touchBrowser ? TbActiveTab(win->touchBrowser) : nullptr;
+    if (act && act->webView) {
+        act->webView->GetCookieHeaderAsync(url, MkFunc1<TbDocDownload, Str>(TbDocDownloadWithCookies, d));
+        return;
     }
     RunAsync(MkFunc0<TbDocDownload>(TbDocDownloadAsync, d), "TbDocDownloadAsync");
 }

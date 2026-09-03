@@ -10221,6 +10221,9 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
         case CmdFindFirst:
             if (win->IsCurrentTabAbout()) {
                 HomePageFocusSearch(win);
+            } else if (IsTouchChrome(win) && win->IsDocLoaded() && win->AsFixed()) {
+                // the touch chrome's find UI is the Search panel
+                OpenTouchSearchPanel(win);
             } else {
                 FindFirst(win);
             }

@@ -48,6 +48,7 @@
 #include "TextSelection.h"
 #include "TextSearch.h"
 #include "SearchAndDDE.h"
+#include "FindBar.h"
 
 static void LayoutTocContainer(MainWindow* win);
 static void UpdateTocStickyHeader(MainWindow* win);
@@ -1929,6 +1930,45 @@ bool IsTouchSearchPanelVisible(MainWindow* win) {
     return win->uiState.tocVisible && win->touchPanelMode == TouchPanelMode::Search;
 }
 
+void OpenTouchSearchPanel(MainWindow* win) {
+    if (!win || !IsTouchChrome(win) || !win->IsDocLoaded()) {
+        return;
+    }
+    // whatever was typed into the compact bar continues in the panel
+    TempStr carried;
+    if (IsFindBarVisible(win) && win->hwndFindEdit) {
+        carried = HwndGetTextTemp(win->hwndFindEdit);
+        HideFindBar(win);
+    }
+    SetTouchPanelMode(win, TouchPanelMode::Search);
+    Edit* edit = win->tocFilterEdit;
+    if (!edit || !edit->hwnd) {
+        return;
+    }
+    if (!str::IsEmptyOrWhiteSpace(carried)) {
+        edit->SetText(carried); // onTextChanged runs the search
+    }
+    HwndSetFocus(edit->hwnd);
+    Edit_SetSel(edit->hwnd, 0, -1);
+}
+
+void CollapseTouchSearchPanelToBar(MainWindow* win) {
+    if (!win || !IsTouchChrome(win)) {
+        return;
+    }
+    TempStr query = win->tocFilterEdit && win->tocFilterEdit->hwnd ? win->tocFilterEdit->GetTextTemp() : TempStr{};
+    SetTouchSidebarCollapsed(win, true);
+    ScheduleUiUpdate(win, kUiForceRelayout | kUiSidebarDirty);
+    ShowFindBar(win);
+    if (win->hwndFindEdit) {
+        if (!str::IsEmptyOrWhiteSpace(query)) {
+            HwndSetText(win->hwndFindEdit, query);
+        }
+        HwndSetFocus(win->hwndFindEdit);
+        Edit_SetSel(win->hwndFindEdit, 0, -1);
+    }
+}
+
 // The Search panel's live query, or {} when the panel is not the one driving
 // the find. The panel never opens the classic find bar, so win->hwndFindEdit
 // (which the find code used to treat as the only source of the query) is empty
@@ -2198,11 +2238,46 @@ static Rect TouchSearchControlsRect(MainWindow* win) {
                 DpiScale(hwnd, 40)};
 }
 
-static void TouchSearchNavRects(MainWindow* win, Rect* prev, Rect* next) {
+// [Aa] [ab]  "3 of 12"        [collapse] [prev] [next]
+struct TouchSearchControls {
+    Rect matchCase;
+    Rect wholeWord;
+    Rect count;
+    Rect collapse;
+    Rect prev;
+    Rect next;
+};
+
+static TouchSearchControls TouchSearchControlsLayout(MainWindow* win) {
+    HWND hwnd = win->hwndTocBox;
     Rect row = TouchSearchControlsRect(win);
     int d = row.dy;
-    *next = Rect{row.x + row.dx - d, row.y, d, d};
-    *prev = Rect{next->x - d - DpiScale(win->hwndTocBox, 8), row.y, d, d};
+    int chip = DpiScale(hwnd, 34);
+    int gap = DpiScale(hwnd, 8);
+    TouchSearchControls c;
+    c.next = Rect{row.x + row.dx - d, row.y, d, d};
+    c.prev = Rect{c.next.x - gap - d, row.y, d, d};
+    c.collapse = Rect{c.prev.x - gap - chip, row.y + (d - chip) / 2, chip, chip};
+    c.matchCase = Rect{row.x, row.y + (d - chip) / 2, chip, chip};
+    c.wholeWord = Rect{c.matchCase.x + chip + DpiScale(hwnd, 4), c.matchCase.y, chip, chip};
+    int countX = c.wholeWord.x + chip + gap;
+    c.count = Rect{countX, row.y, std::max(0, c.collapse.x - gap - countX), row.dy};
+    return c;
+}
+
+// The panel walks the matches itself (rather than through FindNext/FindPrev,
+// which run a fresh search from the selection) so it always knows which one
+// is current, for the "3 of 12" count and the highlighted row.
+static void TouchSearchGoTo(MainWindow* win, int idx) {
+    int n = len(win->findMatches);
+    if (n == 0) {
+        return;
+    }
+    idx = ((idx % n) + n) % n;
+    win->touchFindCurrent = idx;
+    const FindMatch& match = win->findMatches[idx];
+    GoToFindMatch(win, match.startPage, match.startGlyph, match.endPage, match.endGlyph);
+    HwndInvalidate(win->hwndTocBox, false);
 }
 
 static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
@@ -2281,33 +2356,55 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             return;
         }
         int nMatches = len(win->findMatches);
-        Rect controls = TouchSearchControlsRect(win);
-        Rect prevRc;
-        Rect nextRc;
-        TouchSearchNavRects(win, &prevRc, &nextRc);
-        Rect countRc{controls.x, controls.y, std::max(0, prevRc.x - controls.x - DpiScale(win->hwndTocBox, 8)),
-                     controls.dy};
-        SetTextColor(hdc, ThemeWindowDarkerTextColor());
-        Str countText = nMatches == 0   ? StrL("No matches")
-                        : nMatches == 1 ? StrL("1 match")
-                                        : fmt("%d matches", nMatches);
-        HdcDrawText(hdc, countText, countRc, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
-                    HdcGetUiFont(hdc, kFontSizeLabel));
+        TouchSearchControls c = TouchSearchControlsLayout(win);
+        HWND hw = win->hwndTocBox;
         // the panel's surface color with an edge, never the control
         // background (pure black on the Dark theme, where the two circles read
         // as holes); up/down, since the results are a vertical list
         COLORREF navBg = ThemeTouchSurfaceColor();
         COLORREF navFg = nMatches > 0 ? ThemeWindowTextColor() : ThemeWindowTextDisabledColor();
-        int navIconDy = DpiScale(win->hwndTocBox, 20);
-        HIMAGELIST navIcons = GetTintedToolbarImageList(navIconDy, navFg, navBg);
-        for (int i = 0; i < 2; i++) {
-            Rect r = i == 0 ? prevRc : nextRc;
-            FillTocPill(hdc, r, r.dy / 2, navBg, ThemeEdgeColor());
-            if (navIcons) {
-                ImageList_Draw(navIcons, (int)(i == 0 ? TbIcon::ChevronUp : TbIcon::ChevronDown), hdc,
-                               r.x + (r.dx - navIconDy) / 2, r.y + (r.dy - navIconDy) / 2, ILD_NORMAL);
+        COLORREF onBg = 0;
+        COLORREF onFg = 0;
+        ThemeAccentSurfaceColors(&onBg, &onFg);
+        // the find bar's own options, as toggle chips: on = the accent surface
+        struct Chip {
+            Rect r;
+            TbIcon icon;
+            bool on;
+            COLORREF fg;
+        };
+        Chip chips[] = {
+            {c.matchCase, TbIcon::MatchCase, win->findMatchCase, ThemeWindowTextColor()},
+            {c.wholeWord, TbIcon::MatchWholeWord, win->findMatchWholeWord, ThemeWindowTextColor()},
+            {c.collapse, TbIcon::ArrowsDiagonalMinimize, false, ThemeWindowDarkerTextColor()},
+            {c.prev, TbIcon::ChevronUp, false, navFg},
+            {c.next, TbIcon::ChevronDown, false, navFg},
+        };
+        int chipIconDy = DpiScale(hw, 18);
+        int navIconDy = DpiScale(hw, 20);
+        for (const Chip& chip : chips) {
+            COLORREF bg = chip.on ? onBg : navBg;
+            COLORREF fg = chip.on ? onFg : chip.fg;
+            bool round = chip.r.dx == c.next.dx;
+            FillTocPill(hdc, chip.r, round ? chip.r.dy / 2 : DpiScale(hw, 10), bg, chip.on ? onBg : ThemeEdgeColor());
+            int iconDy = round ? navIconDy : chipIconDy;
+            HIMAGELIST icons = GetTintedToolbarImageList(iconDy, fg, bg);
+            if (icons) {
+                ImageList_Draw(icons, (int)chip.icon, hdc, chip.r.x + (chip.r.dx - iconDy) / 2,
+                               chip.r.y + (chip.r.dy - iconDy) / 2, ILD_NORMAL);
             }
         }
+        SetTextColor(hdc, ThemeWindowDarkerTextColor());
+        Str countText;
+        if (nMatches == 0) {
+            countText = StrL("No matches");
+        } else if (win->touchFindCurrent >= 0 && win->touchFindCurrent < nMatches) {
+            countText = fmt("%d of %d", win->touchFindCurrent + 1, nMatches);
+        } else {
+            countText = nMatches == 1 ? StrL("1 match") : fmt("%d matches", nMatches);
+        }
+        HdcDrawText(hdc, countText, c.count, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, kFontSizeLabel));
 
         int rowDy = DpiScale(win->hwndTocBox, TouchSearchResultRowDy());
         int first = std::max(0, win->touchPanelScrollY / rowDy - 1);
@@ -2320,8 +2417,11 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             const FindMatch& match = win->findMatches[i];
             Rect row = TouchSearchResultRect(win, i);
             // the panel surface with an edge, like the prev/next buttons above: the
-            // control background is pure black on the Dark theme
-            FillTocPill(hdc, row, DpiScale(win->hwndTocBox, 8), ThemeTouchSurfaceColor(), ThemeEdgeColor());
+            // control background is pure black on the Dark theme; the current
+            // match carries the accent edge
+            bool isCurrent = i == win->touchFindCurrent;
+            FillTocPill(hdc, row, DpiScale(win->hwndTocBox, 8), ThemeTouchSurfaceColor(),
+                        isCurrent ? ThemeWindowLinkColor() : ThemeEdgeColor(), isCurrent ? 2 : 1);
             Rect pageRc{row.x + DpiScale(win->hwndTocBox, 12), row.y + DpiScale(win->hwndTocBox, 6),
                         row.dx - DpiScale(win->hwndTocBox, 24), DpiScale(win->hwndTocBox, 18)};
             SetTextColor(hdc, ThemeWindowDarkerTextColor());
@@ -2839,15 +2939,33 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
         }
     }
     if (win->touchPanelMode == TouchPanelMode::Search) {
-        Rect prevRc;
-        Rect nextRc;
-        TouchSearchNavRects(win, &prevRc, &nextRc);
-        if (prevRc.Contains(pt)) {
-            FindPrev(win);
+        TouchSearchControls c = TouchSearchControlsLayout(win);
+        bool hasQuery =
+            win->tocFilterEdit && win->tocFilterEdit->hwnd && GetWindowTextLengthW(win->tocFilterEdit->hwnd) > 0;
+        if (hasQuery && c.prev.Contains(pt)) {
+            TouchSearchGoTo(win, win->touchFindCurrent < 0 ? len(win->findMatches) - 1 : win->touchFindCurrent - 1);
             return true;
         }
-        if (nextRc.Contains(pt)) {
-            FindNext(win);
+        if (hasQuery && c.next.Contains(pt)) {
+            TouchSearchGoTo(win, win->touchFindCurrent < 0 ? 0 : win->touchFindCurrent + 1);
+            return true;
+        }
+        if (hasQuery && (c.matchCase.Contains(pt) || c.wholeWord.Contains(pt))) {
+            if (c.matchCase.Contains(pt)) {
+                win->findMatchCase = !win->findMatchCase;
+            } else {
+                win->findMatchWholeWord = !win->findMatchWholeWord;
+            }
+            win->touchFindCurrent = -1;
+            TempStr text = win->tocFilterEdit->GetTextTemp();
+            if (text) {
+                SearchDocumentFromTouchPanel(win, text);
+            }
+            HwndInvalidate(hwnd, false);
+            return true;
+        }
+        if (hasQuery && c.collapse.Contains(pt)) {
+            CollapseTouchSearchPanelToBar(win);
             return true;
         }
         int rowDy = DpiScale(hwnd, TouchSearchResultRowDy());
@@ -2856,9 +2974,7 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
             Rect hit = TouchSearchResultRect(win, idx);
             hit.Inflate(0, DpiScale(hwnd, 4));
             if (hit.Contains(pt)) {
-                const FindMatch& match = win->findMatches[idx];
-                GoToFindMatch(win, match.startPage, match.startGlyph, match.endPage, match.endGlyph);
-                HwndInvalidate(hwnd, false);
+                TouchSearchGoTo(win, idx);
                 return true;
             }
         }
@@ -3298,6 +3414,7 @@ static void OnTocFilterTextChanged(MainWindow* win) {
     }
     if (IsTouchChrome(win) && win->touchPanelMode == TouchPanelMode::Search) {
         TempStr text = win->tocFilterEdit->GetTextTemp();
+        win->touchFindCurrent = -1; // a new query, a new list
         if (text) {
             SearchDocumentFromTouchPanel(win, text);
         } else {

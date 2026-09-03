@@ -10,6 +10,9 @@
 #include "base/GuessFileType.h"
 #include "base/UITask.h"
 #include "base/Win.h"
+#include "base/Timer.h"
+#include <mmsystem.h> // timeBeginPeriod / timeEndPeriod for the pin flight frame loop
+#pragma comment(lib, "winmm.lib")
 
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
@@ -5882,8 +5885,10 @@ void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool now
     gPinFlyFrom = nowPinned ? onCard : onShelf;
     gPinFlyTo = nowPinned ? onShelf : onCard;
     gPinFlyWin = win;
+    // the clock starts after the snapshot below: the repaint it needs took a
+    // good part of the flight's duration on a large library, and the glyph
+    // then appeared already halfway along its path
     gPinFlyVal.Set(0.0f);
-    gPinFlyVal.SetTarget(1.0f, kAnimPinFlightMs);
 
     // Paint the real, already-updated state once - the badge and PINNED
     // section already reflect the new pin state - and snapshot it so every
@@ -5915,6 +5920,7 @@ void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool now
         gPinFlyWin = nullptr;
         return; // nothing to composite onto; the real state is already shown
     }
+    gPinFlyVal.SetTarget(1.0f, kAnimPinFlightMs);
 
     // Driven directly rather than through a WM_TIMER: that timer is the
     // lowest-priority message Windows will synthesize, so even one other
@@ -5926,8 +5932,12 @@ void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool now
     // in the queue. Messages are pumped between frames so the app stays
     // responsive; a second pin tap during the loop starts its own flight
     // (same globals), and this loop notices and steps aside for it.
+    // Sleep rounds to the scheduler tick (15.6ms) unless the timer resolution
+    // is raised, which turned a 16ms frame into 31: the same treatment the
+    // smooth-scroll timer gets (Canvas.cpp).
+    timeBeginPeriod(1);
     while (gPinFlyVal.IsAnimating() && gPinFlyWin == win && IsMainWindowValid(win) && IsWindow(hwnd)) {
-        u64 tickStart = GetTickCount64();
+        TimeStamp tickStart = TimeGet();
         PaintPinFlightFrame(win, hwnd);
         MSG msg;
         // Cap the drain, or a burst of queued input (a flood of mouse-move
@@ -5936,7 +5946,13 @@ void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool now
         // afterwards, so that one frame runs long and every frame after it is
         // late by the same amount, which reads as a stutter partway through
         // the flight rather than a uniformly slower one.
-        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        // Input, posted messages and timers only - not WM_PAINT: a canvas
+        // repaint (hover feedback, a thumbnail landing) is a full page
+        // rebuild that took two or three ticks each, and one per frame left
+        // the flight with a handful of visible positions. Paints stay queued
+        // until the flight is over; the frames are the only thing the canvas
+        // needs to show meanwhile.
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE | PM_QS_INPUT | PM_QS_POSTMESSAGE | PM_QS_SENDMESSAGE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
             // a message in this batch may have closed the window (or the
@@ -5944,7 +5960,7 @@ void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool now
             if (!IsMainWindowValid(win) || !IsWindow(hwnd)) {
                 break;
             }
-            if (GetTickCount64() - tickStart >= kAnimTickMs) {
+            if (TimeSinceInMs(tickStart) >= (double)kAnimTickMs) {
                 break;
             }
         }
@@ -5955,11 +5971,12 @@ void HomePageStartPinFlight(MainWindow* win, Str target, bool isFolder, bool now
         // already spent some of it - so frames land at a steady kAnimTickMs
         // apart instead of that interval stacking on top of however long
         // this iteration's work took.
-        u64 elapsed = GetTickCount64() - tickStart;
-        if (elapsed < kAnimTickMs) {
-            Sleep((DWORD)(kAnimTickMs - elapsed));
+        double elapsed = TimeSinceInMs(tickStart);
+        if (elapsed < (double)kAnimTickMs) {
+            Sleep((DWORD)((double)kAnimTickMs - elapsed));
         }
     }
+    timeEndPeriod(1);
     // Only clean up if this call still owns the shared state: a second pin
     // tap during the loop above starts its own flight (same globals) and
     // takes over gPinFlyWin/gPinFlySnapshot, and that flight's own loop is

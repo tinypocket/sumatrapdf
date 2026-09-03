@@ -26,6 +26,7 @@
 #include "SvgIcons.h"
 #include "Toolbar.h"
 #include "TableOfContents.h"
+#include "TopBar.h"
 #include "SearchAndDDE.h"
 #include "FindBar.h"
 #include "FindWindow.h"
@@ -92,7 +93,7 @@ static TempStr FindBarButtonTooltip(int cmd) {
         case CmdFindToggleMatchWholeWord:
             return AppendCmdAccel(_TRA("Match Whole Word"), cmd);
         case kFindBarPinCmdId:
-            return _TRA("Open in a window");
+            return gGlobalPrefs->touchChrome ? str::DupTemp("Open in pane") : _TRA("Open in a window");
         case kFindBarCloseCmdId:
             return _TRA("Close");
     }
@@ -399,6 +400,10 @@ bool FindBarWnd::OnCommand(WPARAM wparam, LPARAM /*lparam*/) {
             FindToggleMatchWholeWord(win);
             return true;
         case kFindBarPinCmdId:
+            if (IsTouchChrome(win) && win->AsFixed()) {
+                OpenTouchSearchPanel(win); // the pane is the touch chrome's big find UI
+                return true;
+            }
             ToggleFloatingFindUI(win); // pop out into the floating window
             return true;
         case kFindBarCloseCmdId:

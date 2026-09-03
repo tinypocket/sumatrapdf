@@ -12,6 +12,11 @@ void UnsubclassToc(MainWindow*);
 void TocFilterChanged(MainWindow*);
 void UpdateTouchPanelMode(MainWindow*);
 bool IsTouchSearchPanelVisible(MainWindow*);
+// Ctrl+F and the find bar's pop-out in the touch chrome: the Search panel is
+// the find UI. Carries the find bar's text over and focuses the field.
+void OpenTouchSearchPanel(MainWindow*);
+// the panel's collapse: back to the compact find bar with the query
+void CollapseTouchSearchPanelToBar(MainWindow*);
 // the touch Search panel's current query, or {} when that panel isn't the one
 // driving the find (then win->hwndFindEdit is the source, as it always was)
 TempStr TouchSearchPanelQueryTemp(MainWindow*);
