@@ -787,9 +787,12 @@ static TempStr BuildSnippet(EngineBase* engine, const FindMatch& m) {
     int mStart = limitValue(m.startGlyph, 0, textLen);
     int mEnd = (m.endPage == m.startPage) ? m.endGlyph : textLen;
     mEnd = limitValue(mEnd, mStart, textLen);
-    const int kCtx = 40;
-    int from = std::max(0, mStart - kCtx);
-    int to = std::min(textLen, mEnd + kCtx);
+    // the results list draws this on one line: keep the lead-in short so the
+    // match itself is always in view, and let the tail carry the context
+    const int kCtxBefore = 18;
+    const int kCtxAfter = 60;
+    int from = std::max(0, mStart - kCtxBefore);
+    int to = std::min(textLen, mEnd + kCtxAfter);
     Str sub = str::Dup(Utf8SliceByCodepoints(pageText, from, to - from));
     str::NormalizeWSInPlace(sub);
     TempStr u = str::DupTemp(sub);
@@ -1653,7 +1656,10 @@ void PaintAllFindMatches(MainWindow* win, HDC hdc) {
     if (!win->IsDocLoaded() || !win->AsFixed()) {
         return;
     }
-    if (!win->hwndFindEdit || HwndGetTextLen(win->hwndFindEdit) == 0) {
+    // the term comes from the find bar, or from the touch Search pane when
+    // that is the find UI (it has no find edit, and nothing was painted)
+    bool hasBarTerm = win->hwndFindEdit && HwndGetTextLen(win->hwndFindEdit) > 0;
+    if (!hasBarTerm && !TouchSearchPanelQueryTemp(win)) {
         return;
     }
 

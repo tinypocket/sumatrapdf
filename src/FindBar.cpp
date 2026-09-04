@@ -575,7 +575,9 @@ bool IsFindBarVisible(MainWindow* win) {
 }
 
 bool IsFindUIVisible(MainWindow* win) {
-    return IsFindBarVisible(win) || IsFindWindowVisible(win);
+    // the touch Search pane is a find UI too: its matches are painted on the
+    // page like the bar's, and a tapped result shows up where it is
+    return IsFindBarVisible(win) || IsFindWindowVisible(win) || IsTouchSearchPanelVisible(win);
 }
 
 void FocusFindEditSelectAll(MainWindow* win) {
