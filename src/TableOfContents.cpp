@@ -2690,13 +2690,17 @@ static Rect TouchFilterClearRect(MainWindow* win, bool hitTarget) {
 // WM_PAINT; erasing down to the bottom there wipes the match count, the
 // prev/next buttons and the whole results list right after they were drawn.
 // Pass false and the erase stops at the bottom of the pill.
-static void PaintTouchFilterChrome(MainWindow* win, bool ownsBodyBelow) {
+//
+// `hdcInto`: when the caller is already painting into an off-screen buffer
+// (the self-painted modes) draw there, so the pill lands on screen in the
+// same blit as the body under it. The GetDC() route is for Bookmarks mode.
+static void PaintTouchFilterChrome(MainWindow* win, bool ownsBodyBelow, HDC hdcInto = nullptr) {
     Edit* edit = win->tocFilterEdit;
     if (!edit || !edit->hwnd || !HwndIsVisible(edit->hwnd)) {
         return;
     }
     HWND hwnd = win->hwndTocBox;
-    HDC hdc = GetDC(hwnd);
+    HDC hdc = hdcInto ? hdcInto : GetDC(hwnd);
     if (!hdc) {
         return;
     }
@@ -2743,6 +2747,11 @@ static void PaintTouchFilterChrome(MainWindow* win, bool ownsBodyBelow) {
             ImageList_Draw(closeIcons, (int)TbIcon::Close, hdc, clear.x + (clear.dx - closeDy) / 2,
                            clear.y + (clear.dy - closeDy) / 2, ILD_NORMAL);
         }
+    }
+    if (hdcInto) {
+        // buffered path: the edit was never drawn over, so leave it alone -
+        // repainting it on every scroll frame is a flicker of its own
+        return;
     }
     ReleaseDC(hwnd, hdc);
     HwndInvalidate(edit->hwnd, false);
@@ -3046,18 +3055,41 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     // filter pill on WM_ERASEBKGND gets wiped. Draw after the default paint;
     // the edit control paints itself afterwards inside its own rect, and only
     // the pill's rounded ends and border show around it.
+    // The self-painted modes repaint the whole panel on every scroll tick and
+    // press-feedback frame. Drawn straight to the screen that was background
+    // fill, then rows, then the pill on a second DC - three visible passes per
+    // frame, which reads as flicker while scrolling the search results. Build
+    // the frame off-screen and put it up in one blit; the erase is swallowed
+    // for the same reason.
+    if (msg == WM_ERASEBKGND && IsTouchChrome(win) && win->touchPanelMode != TouchPanelMode::Bookmarks) {
+        return TRUE;
+    }
     if (msg == WM_PAINT && IsTouchChrome(win)) {
         if (win->touchPanelMode != TouchPanelMode::Bookmarks) {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
-            HdcFillRect(hdc, HwndClientRect(hwnd), ThemeHotBackgroundColor());
-            PaintTouchPanelMode(win, hdc);
-            EndPaint(hwnd, &ps);
+            Rect rc = HwndClientRect(hwnd);
+            HDC memDc = CreateCompatibleDC(hdc);
+            HBITMAP bmp = memDc ? CreateCompatibleBitmap(hdc, std::max(1, rc.dx), std::max(1, rc.dy)) : nullptr;
+            HDC target = bmp ? memDc : hdc;
+            HGDIOBJ prev = bmp ? SelectObject(memDc, bmp) : nullptr;
+            HdcFillRect(target, rc, ThemeHotBackgroundColor());
+            PaintTouchPanelMode(win, target);
             if (win->touchPanelMode == TouchPanelMode::Search) {
                 // false: PaintTouchPanelMode() just drew the results list under
                 // the field, so the chrome must not erase down to the bottom
-                PaintTouchFilterChrome(win, false);
+                PaintTouchFilterChrome(win, false, target);
             }
+            if (bmp) {
+                Rect clip = ToRect(ps.rcPaint);
+                BitBlt(hdc, clip.x, clip.y, clip.dx, clip.dy, memDc, clip.x, clip.y, SRCCOPY);
+                SelectObject(memDc, prev);
+                DeleteObject(bmp);
+            }
+            if (memDc) {
+                DeleteDC(memDc);
+            }
+            EndPaint(hwnd, &ps);
             return 0;
         }
         LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
@@ -3582,17 +3614,26 @@ static LRESULT CALLBACK WndProcTocTreeStickyTracker(HWND hwnd, UINT msg, WPARAM 
     if (msg == WM_LBUTTONDOWN) {
         CloseTouchDocumentOverlays(win);
     }
-    if (msg == WM_PAINT && win && HasTocFilter(win) && !win->tocFilteredTree) {
-        HDC hdc = GetDC(hwnd);
-        if (hdc) {
+    if (msg == WM_PAINT && win) {
+        // Two empty states share the tree's blank area: a filter that matched
+        // nothing, and (touch pane only, since it stays open for every
+        // document) a document that has no bookmarks at all.
+        TempStr empty = nullptr;
+        WindowTab* tab = win->CurrentTab();
+        if (HasTocFilter(win) && !win->tocFilteredTree) {
             TempStr query = win->tocFilterEdit ? win->tocFilterEdit->GetTextTemp() : TempStr{};
+            empty = fmt("No bookmarks match \"%s\"", query);
+        } else if (IsTouchChrome(win) && !HasTocFilter(win) && tab && !tab->currToc && win->IsDocLoaded()) {
+            empty = str::DupTemp("This document has no bookmarks");
+        }
+        HDC hdc = empty ? GetDC(hwnd) : nullptr;
+        if (hdc) {
             Rect text = HwndClientRect(hwnd);
             text.y += DpiScale(hwnd, 40);
             text.dy = DpiScale(hwnd, 80);
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, ThemeWindowDarkerTextColor());
-            HdcDrawText(hdc, fmt("No bookmarks match \"%s\"", query), text,
-                        DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+            HdcDrawText(hdc, empty, text, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
                         HdcGetUiFont(hdc, kFontSizeLabel));
             ReleaseDC(hwnd, hdc);
         }

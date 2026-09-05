@@ -674,6 +674,11 @@ struct GlobalPrefs {
     // vertical spacing for touch sidebar rows: "condensed", "normal", or
     // "expanded"
     Str touchSidebarDensity;
+    // touch chrome: whether the side pane (Bookmarks, Search, ...) is open
+    // while reading. Set when the user opens or closes the pane and
+    // applies to every document, rather than per file or only when a
+    // document has bookmarks
+    bool touchSidebarOpen;
     // folders imported into the Library view
     Vec<Str>* libraryFolders;
     // folders pinned in the Library view
@@ -1588,7 +1593,7 @@ static const StructInfo gPointInfo = {
 
 static const FieldInfo gGlobalPrefsFields[] = {
     {(size_t)-1, SettingType::Comment,
-     (intptr_t)"For documentation, see https://www.sumatrapdfreader.org/settings/settings3-7-13.html"},
+     (intptr_t)"For documentation, see https://www.sumatrapdfreader.org/settings/settings3-7-20.html"},
     {(size_t)-1, SettingType::Comment, 0},
     {offsetof(GlobalPrefs, defaultDisplayMode), SettingType::String, (intptr_t)"automatic"},
     {offsetof(GlobalPrefs, defaultZoom), SettingType::String, (intptr_t)"fit page"},
@@ -1621,6 +1626,7 @@ static const FieldInfo gGlobalPrefsFields[] = {
     {offsetof(GlobalPrefs, showRail), SettingType::Bool, true},
     {offsetof(GlobalPrefs, touchChrome), SettingType::Bool, true},
     {offsetof(GlobalPrefs, touchSidebarDensity), SettingType::String, (intptr_t)"normal"},
+    {offsetof(GlobalPrefs, touchSidebarOpen), SettingType::Bool, false},
     {offsetof(GlobalPrefs, libraryFolders), SettingType::StringArray, 0},
     {offsetof(GlobalPrefs, libraryPinnedFolders), SettingType::StringArray, 0},
     {offsetof(GlobalPrefs, libraryHiddenFolders), SettingType::StringArray, 0},
@@ -1740,26 +1746,26 @@ static const FieldInfo gGlobalPrefsFields[] = {
 };
 static const StructInfo gGlobalPrefsInfo = {
     sizeof(GlobalPrefs),
-    148,
+    149,
     gGlobalPrefsFields,
     "\0\0DefaultDisplayMode\0DefaultZoom\0DisableJavaScript\0AllowExternalImages\0EnableTeXEnhancements\0EscToExit\0Ful"
     "lPathInTitle\0InverseSearchCmdLine\0LazyLoading\0MainWindowBackground\0NoHomeTab\0HomePageSortByFrequentlyRead\0Ho"
     "mePageViewMode\0ReloadModifiedDocuments\0RememberOpenedFiles\0RememberStatePerDocument\0RestoreSession\0RestoreSes"
     "sionDefaultMigrated\0ReuseInstance\0ShowMenubar\0ShowMenubarWithTabs\0ShowTips\0CustomColors\0ShowToolbar\0Toolbar"
-    "\0ToolbarPosition\0SearchUIFloating\0ShowFavorites\0ShowRail\0TouchChrome\0TouchSidebarDensity\0LibraryFolders\0Li"
-    "braryPinnedFolders\0LibraryHiddenFolders\0SortFavoritesByName\0ShowToc\0ShowLinks\0ShowDocumentFocusIndicator\0Sho"
-    "wAnnotationNotification\0ShowTocPageNumbers\0ShowStartPage\0SidebarDx\0Scrollbars\0ScrollbarInSinglePage\0SmoothSc"
-    "roll\0PaddingAfterLastPage\0CitationHoverDelay\0ReadAloudVoiceId\0ReadAloudSpeed\0FastScrollOverScrollbar\0Prevent"
-    "SleepInFullscreen\0TabWidth\0Theme\0LastLightTheme\0LastDarkTheme\0DocumentColorsFollowTheme\0TocDy\0ToolbarShowRe"
-    "adAloud\0ToolbarSize\0TreeFontName\0TreeFontSize\0UIFontSize\0DisableAntiAlias\0EngineeringDrawingEnhance\0Disable"
-    "AutoLinks\0UseSysColors\0UseTabs\0SelectionToolbar\0TabsMru\0CtrlTabPre36Behavior\0ZoomLevels\0ZoomIncrement\0\0Fi"
-    "xedPageUI\0\0EBookUI\0\0ComicBookUI\0\0ImageUI\0\0ChmUI\0\0MarkdownUI\0\0ClaudeCode\0\0GrokBuild\0\0CodexBuild\0\0"
-    "AIChatSidebarDx\0\0TranslateToLang\0TranslateFromLang\0TranslateEngine\0\0Annotations\0\0ExternalViewers\0\0Forwar"
-    "dSearch\0\0PrinterDefaults\0\0Fullscreen\0\0SelectionHandlers\0\0Shortcuts\0\0Themes\0\0TabGroups\0\0CustomScreenD"
-    "PI\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0WindowState\0WindowPos\0SearchUIWindowPos\0FileStates\0Sessio"
-    "nData\0ReopenOnce\0TimeOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0UpdateFeedURL\0BrowserHomePage\0BrowserBookma"
-    "rks\0BrowserFavoriteTitles\0BrowserDownloads\0AnimateUI\0ElaborateAnimations\0FavoritesInToolbar\0FavoritesManualO"
-    "rder\0SmartMargins\0SmartHeaderFooter\0TwoRowTabs\0LargerTabs\0CheckForUpdates\0\0",
+    "\0ToolbarPosition\0SearchUIFloating\0ShowFavorites\0ShowRail\0TouchChrome\0TouchSidebarDensity\0TouchSidebarOpen\0"
+    "LibraryFolders\0LibraryPinnedFolders\0LibraryHiddenFolders\0SortFavoritesByName\0ShowToc\0ShowLinks\0ShowDocumentF"
+    "ocusIndicator\0ShowAnnotationNotification\0ShowTocPageNumbers\0ShowStartPage\0SidebarDx\0Scrollbars\0ScrollbarInSi"
+    "nglePage\0SmoothScroll\0PaddingAfterLastPage\0CitationHoverDelay\0ReadAloudVoiceId\0ReadAloudSpeed\0FastScrollOver"
+    "Scrollbar\0PreventSleepInFullscreen\0TabWidth\0Theme\0LastLightTheme\0LastDarkTheme\0DocumentColorsFollowTheme\0To"
+    "cDy\0ToolbarShowReadAloud\0ToolbarSize\0TreeFontName\0TreeFontSize\0UIFontSize\0DisableAntiAlias\0EngineeringDrawi"
+    "ngEnhance\0DisableAutoLinks\0UseSysColors\0UseTabs\0SelectionToolbar\0TabsMru\0CtrlTabPre36Behavior\0ZoomLevels\0Z"
+    "oomIncrement\0\0FixedPageUI\0\0EBookUI\0\0ComicBookUI\0\0ImageUI\0\0ChmUI\0\0MarkdownUI\0\0ClaudeCode\0\0GrokBuild"
+    "\0\0CodexBuild\0\0AIChatSidebarDx\0\0TranslateToLang\0TranslateFromLang\0TranslateEngine\0\0Annotations\0\0Externa"
+    "lViewers\0\0ForwardSearch\0\0PrinterDefaults\0\0Fullscreen\0\0SelectionHandlers\0\0Shortcuts\0\0Themes\0\0TabGroup"
+    "s\0\0CustomScreenDPI\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0WindowState\0WindowPos\0SearchUIWindowPos\0"
+    "FileStates\0SessionData\0ReopenOnce\0TimeOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0UpdateFeedURL\0BrowserHomeP"
+    "age\0BrowserBookmarks\0BrowserFavoriteTitles\0BrowserDownloads\0AnimateUI\0ElaborateAnimations\0FavoritesInToolbar"
+    "\0FavoritesManualOrder\0SmartMargins\0SmartHeaderFooter\0TwoRowTabs\0LargerTabs\0CheckForUpdates\0\0",
     "\0\0default layout of pages. valid values: automatic, single page, facing, book view, continuous, continuous "
     "facing, continuous book view\0default zoom. valid values: fit page, fit width, fit height, fit content or percent "
     "like 100%\0if true, JavaScript in PDF documents is disabled (e.g. form-field calculations won't run)\0if true, a "
@@ -1788,7 +1794,9 @@ static const StructInfo gGlobalPrefsInfo = {
     "sidebar\0if true, show the icon rail: the strip of large icon buttons along the left edge that switches what the "
     "sidebar shows. On by default for the touch redesign\0if true, use the touch-friendly chrome: a custom-drawn "
     "toolbar of grouped buttons with finger-sized targets, and a sidebar to match. If false, the classic Windows "
-    "toolbar is used\0vertical spacing for touch sidebar rows: \"condensed\", \"normal\", or \"expanded\"\0folders "
+    "toolbar is used\0vertical spacing for touch sidebar rows: \"condensed\", \"normal\", or \"expanded\"\0touch "
+    "chrome: whether the side pane (Bookmarks, Search, ...) is open while reading. Set when the user opens or closes "
+    "the pane and applies to every document, rather than per file or only when a document has bookmarks\0folders "
     "imported into the Library view\0folders pinned in the Library view\0folders hidden in the Library view\0if true, "
     "favorites within each file are sorted alphabetically by name (or page label); if false (the default), they are "
     "sorted by page number\0if true, show the table of contents (Bookmarks) sidebar when the document has one\0if "

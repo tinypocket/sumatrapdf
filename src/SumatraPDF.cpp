@@ -2089,6 +2089,16 @@ static void UpdateUiForCurrentTab(MainWindow* win) {
     UpdateTopBarForWindow(win);
 }
 
+// Whether the sidebar opens for this tab outside presentation mode. The
+// classic chrome remembers it per document (WindowTab::showToc, from
+// FileState); the touch pane is one setting for every document.
+static bool TabShowToc(MainWindow* win, WindowTab* tab) {
+    if (IsTouchChrome(win)) {
+        return gGlobalPrefs->touchSidebarOpen;
+    }
+    return tab && tab->showToc;
+}
+
 static bool showTocByDefault(Str path) {
     if (!gGlobalPrefs->showToc) {
         return false;
@@ -2178,6 +2188,12 @@ static void ReplaceDocumentInCurrentTab(LoadArgs* args, DocController* ctrl, Fil
             // the tab control paints from the TabInfo (issue #5884)
             SetTabInfoColor(tab);
         }
+    }
+    if (IsTouchChrome(win) && !win->presentation) {
+        // the touch pane is the user's setting, not the file's: whether this
+        // document has bookmarks, or was last seen with the pane open, does not
+        // decide it (see SetTouchSidebarCollapsed)
+        showToc = gGlobalPrefs->touchSidebarOpen;
     }
 
     AbortFinding(args->win, true);
@@ -4020,7 +4036,7 @@ void LoadModelIntoTab(WindowTab* tab) {
     if (win->InPresentation()) {
         SetSidebarVisibility(win, tab->showTocPresentation, gGlobalPrefs->showFavorites);
     } else {
-        SetSidebarVisibility(win, tab->showToc, gGlobalPrefs->showFavorites);
+        SetSidebarVisibility(win, TabShowToc(win, tab), gGlobalPrefs->showFavorites);
     }
 
     // Leaving Favorites tab: restore canvas size/visibility before SetViewPortSize
@@ -7606,7 +7622,7 @@ void ExitFullScreen(MainWindow* win) {
     }
 
     BeginFrameRedrawSuppression(win);
-    bool tocVisible = win->CurrentTab() && win->CurrentTab()->showToc;
+    bool tocVisible = win->CurrentTab() && TabShowToc(win, win->CurrentTab());
     SetSidebarVisibility(win, tocVisible, gGlobalPrefs->showFavorites);
 
     if (win->tabsVisible) {
@@ -8258,7 +8274,13 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites) 
         showFavorites = false;
     }
 
-    if (!win->IsDocLoaded() || !win->ctrl || !win->ctrl->HasToc()) {
+    if (!win->IsDocLoaded() || !win->ctrl) {
+        tocVisible = false;
+    }
+    // the classic sidebar is the bookmarks tree and has nothing to show
+    // without one. The touch pane also holds Search, Thumbnails and the rest,
+    // so it stays open (Bookmarks mode says the document has none)
+    if (tocVisible && !IsTouchChrome(win) && !win->ctrl->HasToc()) {
         tocVisible = false;
     }
 
@@ -8297,6 +8319,10 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites) 
 
     win->uiState.tocVisible = tocVisible;
     win->uiState.favVisible = showFavorites;
+    if (IsTouchChrome(win) && win->touchView == TouchView::Doc && win->IsDocLoaded()) {
+        // keep the rail's reading-mode state in step with the pane
+        win->touchSidebarCollapsed = !tocVisible;
+    }
     ScheduleUiUpdate(win, kUiRelayout | kUiNoToolbars | kUiSidebarDirty);
 }
 

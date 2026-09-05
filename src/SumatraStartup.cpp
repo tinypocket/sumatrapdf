@@ -73,6 +73,7 @@
 #include "SelectTextKeyboard.h"
 #include "SumatraControl.h"
 #include "SumatraLog.h"
+#include "TopBar.h"
 
 // return false if failed in a way that should abort the app
 static NO_INLINE bool MaybeMakePluginWindow(MainWindow* win, HWND hwndParent) {
@@ -394,7 +395,8 @@ void SetTabState(WindowTab* tab, TabState* state) {
     }
 
     tab->tocState = *state->tocState;
-    SetSidebarVisibility(win, state->showToc, gGlobalPrefs->showFavorites);
+    SetSidebarVisibility(win, IsTouchChrome(win) ? gGlobalPrefs->touchSidebarOpen : state->showToc,
+                         gGlobalPrefs->showFavorites);
 
     DisplayMode displayMode = DisplayModeFromString(state->displayMode, DisplayMode::Automatic);
     if (displayMode != DisplayMode::Automatic) {

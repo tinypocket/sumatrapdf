@@ -156,6 +156,12 @@ TouchChrome = true
 ; (introduced in version 3.8)
 TouchSidebarDensity = normal
 
+; touch chrome: whether the side pane (Bookmarks, Search, ...) is open while
+; reading. Set when the user opens or closes the pane and applies to every
+; document, rather than per file or only when a document has bookmarks
+; (introduced in version 3.8)
+TouchSidebarOpen = false
+
 ; folders imported into the Library view (introduced in version 3.8)
 LibraryFolders =
 

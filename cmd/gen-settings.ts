@@ -956,6 +956,14 @@ const globalPrefs: Field[] = [
     "normal",
     'vertical spacing for touch sidebar rows: "condensed", "normal", or "expanded"',
   ).ver("3.8"),
+  field(
+    "TouchSidebarOpen",
+    Bool,
+    false,
+    "touch chrome: whether the side pane (Bookmarks, Search, ...) is open while reading. " +
+      "Set when the user opens or closes the pane and applies to every document, " +
+      "rather than per file or only when a document has bookmarks",
+  ).ver("3.8"),
   compactArray("LibraryFolders", Str, null, "folders imported into the Library view").ver("3.8"),
   compactArray("LibraryPinnedFolders", Str, null, "folders pinned in the Library view").ver("3.8"),
   compactArray("LibraryHiddenFolders", Str, null, "folders hidden in the Library view").ver("3.8"),

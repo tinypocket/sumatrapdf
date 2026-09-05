@@ -70,9 +70,10 @@ static RailItem gRailItems[] = {
     {TbIcon::Attachment, TouchPanelMode::Attachments, TouchView::Doc, 0, false, false},
     // "PDF favorites": saved pages across EVERY document, grouped by file, so
     // a favorite in another PDF is one tap away (it opens that PDF at that
-    // page). Lives in the document sidebar, so like the other panel items it
-    // needs some document open to be shown at all.
-    {TbIcon::Bookmark, TouchPanelMode::Favorites, TouchView::Doc, 0, false, false},
+    // page). It reads across documents rather than describing the current one,
+    // so it belongs to the bottom group with the Library and the browser, not
+    // with the panels above that are about the open document.
+    {TbIcon::Bookmark, TouchPanelMode::Favorites, TouchView::Doc, 0, true, false},
     // Recent used to be a rail item of its own; it's now the Library's first
     // sidebar row, so the Library is the single browsing destination
     {TbIcon::Library, TouchPanelMode::Bookmarks, TouchView::Library, 0, true, false},
@@ -259,19 +260,32 @@ static bool IsRailItemEnabled(MainWindow* win, const RailItem& item) {
     return item.cmdId || item.view != TouchView::Doc || RailHasDocument(win);
 }
 
+// The bookmarks tree is filled lazily, by SetSidebarVisibility, when the
+// classic sidebar opens. The touch pane opens through the paths below without
+// going that way, so a document loaded with the pane closed (the default now)
+// showed an empty Bookmarks list when the pane was opened later.
+static void EnsureTouchPaneLoaded(MainWindow* win) {
+    if (win && win->IsDocLoaded() && win->ctrl && win->CurrentTab() && !win->tocLoaded) {
+        LoadTocTree(win);
+    }
+}
+
 void SetTouchSidebarCollapsed(MainWindow* win, bool collapsed) {
     if (!win || !IsTouchChrome(win) || win->touchView != TouchView::Doc || !win->HasDocsLoaded()) {
         return;
     }
+    if (!collapsed) {
+        EnsureTouchPaneLoaded(win);
+    }
     win->touchSidebarCollapsed = collapsed;
     win->uiState.tocVisible = !collapsed;
     win->uiState.favVisible = false;
-    // Record it on the tab as well. The classic chrome persists the panel's
-    // state through SetSidebarVisibility (which writes tab->showToc); the touch
-    // chrome sets uiState directly and used to leave showToc stale at true. So
-    // closing the panel here and then leaving fullscreen - or reopening the
-    // file later - restored it from that stale true and popped the panel back
-    // open. showToc is also what FileState saves per document.
+    // The pane's state is the user's, not the document's: it is kept globally
+    // (TouchSidebarOpen) so the next document opens the way this one was left,
+    // and a document is never allowed to pop it open just because it has
+    // bookmarks. The tab mirrors it for the classic code paths that read
+    // showToc (fullscreen, tab switches, FileState).
+    gGlobalPrefs->touchSidebarOpen = !collapsed;
     WindowTab* tab = win->CurrentTab();
     if (tab && !tab->IsAboutTab()) {
         tab->showToc = !collapsed;
@@ -318,16 +332,20 @@ void SetTouchView(MainWindow* win, TouchView view) {
             win->touchView = previous;
             return;
         }
-        // Don't force the bookmarks panel open. Honour what this document was
-        // last left at (WindowTab::showToc, restored per file); a document seen
-        // for the first time only opens it when it actually has bookmarks.
+        // The pane opens if the user left it open (TouchSidebarOpen), whatever
+        // the document: it is never forced open by a document's bookmarks, and
+        // never forced shut by their absence (Search and Thumbnails are useful
+        // without any).
+        bool showToc = gGlobalPrefs->touchSidebarOpen;
         WindowTab* docTab = win->CurrentTab();
-        // showToc is restored per file (FileState) and defaults per file type,
-        // so this remembers the last state; requiring HasToc() keeps a document
-        // without any bookmarks from opening an empty panel.
-        bool showToc = docTab && docTab->showToc && win->ctrl && win->ctrl->HasToc();
+        if (docTab && !docTab->IsAboutTab()) {
+            docTab->showToc = showToc;
+        }
         win->uiState.tocVisible = showToc;
         win->touchSidebarCollapsed = !showToc;
+        if (showToc) {
+            EnsureTouchPaneLoaded(win);
+        }
     } else {
         win->touchView = view;
         if (!SelectTouchHomeTab(win)) {
@@ -368,10 +386,12 @@ void SetTouchPanelMode(MainWindow* win, TouchPanelMode mode) {
         win->touchView = previous;
     }
     SetTouchPanelModeAndRestoreSearch(win, mode);
+    EnsureTouchPaneLoaded(win);
     win->touchSidebarCollapsed = false;
     win->touchPanelScrollY = 0;
     win->uiState.tocVisible = true;
     // opening a panel is the other half of the same state (see above)
+    gGlobalPrefs->touchSidebarOpen = true;
     WindowTab* panelTab = win->CurrentTab();
     if (panelTab && !panelTab->IsAboutTab()) {
         panelTab->showToc = true;
@@ -391,10 +411,15 @@ void SetTouchDocumentTab(MainWindow* win, int tabIndex) {
     }
     HomePageDestroySearch(win);
     win->touchView = TouchView::Doc;
-    win->touchSidebarCollapsed = false;
+    // the pane keeps the state the user left it in (see SetTouchSidebarCollapsed)
+    bool showToc = gGlobalPrefs->touchSidebarOpen;
+    win->touchSidebarCollapsed = !showToc;
     TabsSelect(win, tabIndex);
-    win->uiState.tocVisible = true;
+    win->uiState.tocVisible = showToc;
     win->uiState.favVisible = false;
+    if (showToc) {
+        EnsureTouchPaneLoaded(win);
+    }
     UpdateTouchPanelMode(win);
     UpdateRailForWindow(win);
     ScheduleUiUpdate(win, kUiForceRelayout | kUiSidebarDirty | kUiToolbarDirty | kUiTabsDirty);
