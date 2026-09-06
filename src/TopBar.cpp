@@ -61,6 +61,10 @@ struct TouchPreviewWnd : Wnd {
     LRESULT WndProc(HWND, UINT, WPARAM, LPARAM) override;
     bool Create(TopBarWnd*);
     void Show(HWND anchorHwnd, Rect anchorRect);
+    // the tab strip the cards were laid out against, and the left edge of its
+    // first tab, so Show() can align the popup with it
+    HWND layoutTabsHwnd = nullptr;
+    int layoutFirstTabX = 0;
     void Hide();
     void BuildLayout();
     void FreeCards();
@@ -807,7 +811,9 @@ bool TopBarWnd::Layout(HDC hdc, Rect* rects) {
     savedGroupRects.Reset();
     if (bookmarkIdx >= 0 && !rects[bookmarkIdx].IsEmpty() && (len(savedPages) > 0 || len(savedGroupPaths) > 0)) {
         int x = rects[bookmarkIdx].x + rects[bookmarkIdx].dx + DpiScale(hwnd, 8);
-        int trayRight = std::min(x + DpiScale(hwnd, 340), xRight);
+        // the tray takes the whole gap up to the right-hand controls: capping
+        // it at 340px left most of the bar empty and hid chips behind a scroll
+        int trayRight = std::max(x, xRight - DpiScale(hwnd, 8));
         int pillDy = DpiScale(hwnd, 36);
         savedTrayRect = Rect{x, (rc.dy - pillDy) / 2, std::max(0, trayRight - x), pillDy};
         HFONT pillFont = TopBarFontWeighted(hdc, kFontSizeMeta, kFontWeightStrong);
@@ -956,6 +962,8 @@ bool TouchPreviewWnd::Create(TopBarWnd* bar) {
 
 void TouchPreviewWnd::BuildLayout() {
     FreeCards();
+    layoutTabsHwnd = nullptr;
+    layoutFirstTabX = 0;
     int pad = DpiScale(hwnd, 8);
     int gap = DpiScale(hwnd, 12);
     int cardDx = DpiScale(hwnd, 220);
@@ -972,13 +980,31 @@ void TouchPreviewWnd::BuildLayout() {
             break;
         }
     }
+    TabsCtrl* layoutTabs = nullptr;
     if (hwndTabs) {
-        RECT tr{};
-        if (TabCtrl_GetItemRect(hwndTabs, 0, &tr)) {
-            firstTabX = tr.left;
-        } else {
-            hwndTabs = nullptr;
+        for (MainWindow* w : gWindows) {
+            if (w->tabsCtrl && w->tabsCtrl->hwnd == hwndTabs) {
+                layoutTabs = w->tabsCtrl;
+                break;
+            }
         }
+    }
+    // The native tab control keeps its own item rects, which are only
+    // bookkeeping - every pixel of the strip is owner-drawn from TabInfo::r.
+    // Reading the native ones put the cards ~50px off the tabs they belong to.
+    if (layoutTabs) {
+        for (TabInfo* ti : layoutTabs->tabs) {
+            if (ti && !ti->isHidden && !ti->r.IsEmpty()) {
+                firstTabX = ti->r.x;
+                layoutTabsHwnd = hwndTabs;
+                layoutFirstTabX = firstTabX;
+                break;
+            }
+        }
+    }
+    if (!layoutTabsHwnd) {
+        hwndTabs = nullptr;
+        layoutTabs = nullptr;
     }
     for (MainWindow* win : gWindows) {
         for (int i = 0; i < win->TabCount(); i++) {
@@ -986,11 +1012,11 @@ void TouchPreviewWnd::BuildLayout() {
             if (!tab || tab->IsNonDocumentTab()) {
                 continue;
             }
-            if (hwndTabs && win->tabsCtrl && win->tabsCtrl->hwnd == hwndTabs) {
-                RECT tr{};
-                if (TabCtrl_GetItemRect(hwndTabs, i, &tr)) {
-                    x = pad + (tr.left - firstTabX);
-                    cardDx = std::max(DpiScale(hwnd, 80), (int)(tr.right - tr.left));
+            if (layoutTabs && win->tabsCtrl == layoutTabs && i < len(layoutTabs->tabs)) {
+                Rect tr = layoutTabs->tabs[i]->r;
+                if (!tr.IsEmpty()) {
+                    x = pad + (tr.x - firstTabX);
+                    cardDx = std::max(DpiScale(hwnd, 80), tr.dx);
                 }
             }
             PreviewCard card;
@@ -1041,13 +1067,18 @@ void TouchPreviewWnd::Show(HWND anchorHwnd, Rect anchorRect) {
     // the taskbar's thumbnails - instead of flipping it above the button.
     bool anchoredLow = anchor.y > work.y + (work.dy * 2 / 3);
     if (anchoredLow) {
-        // from the left edge of the document area (past the rail and, when
-        // open, the panel), not from the button
+        // the strip runs along the bottom of the window from its left edge,
+        // like the taskbar's thumbnails; not from the button, and not from the
+        // document area (which moves with the panel)
         x = anchor.x + anchorRect.dx + DpiScale(hwnd, 6);
-        if (owner && owner->win && owner->win->hwndCanvas) {
-            x = HwndMapWindowPoint(owner->win->hwndCanvas, nullptr, {0, 0}).x;
+        if (owner && owner->win && owner->win->hwndFrame) {
+            x = HwndMapWindowPoint(owner->win->hwndFrame, nullptr, {0, 0}).x;
         }
         y = work.y + work.dy - dy - DpiScale(hwnd, 6);
+    } else if (layoutTabsHwnd) {
+        // BuildLayout() placed each card at its own tab's offset, starting one
+        // pad in; line that up with the strip so every card sits under its tab
+        x = HwndMapWindowPoint(layoutTabsHwnd, nullptr, {layoutFirstTabX, 0}).x - pad;
     }
     if (x + dx > work.x + work.dx) {
         x = work.x + work.dx - dx;

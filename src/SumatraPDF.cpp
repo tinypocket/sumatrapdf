@@ -805,9 +805,12 @@ static void UpdateSidebarDisplayState(WindowTab* tab, FileState* fs) {
     ReportIf(!tab);
     MainWindow* win = tab->win;
     fs->showToc = tab->showToc;
-    if (win->tocLoaded && tab == win->CurrentTab()) {
+    if (win->tocLoaded && tab == win->CurrentTab() && tab->ctrl) {
+        // null for a document without bookmarks; the pane can be open on one
         TocTree* tocTree = tab->ctrl->GetToc();
-        UpdateTocExpansionState(tab->tocState, win->tocTreeView, tocTree);
+        if (tocTree) {
+            UpdateTocExpansionState(tab->tocState, win->tocTreeView, tocTree);
+        }
     }
     *fs->tocState = tab->tocState;
 }
@@ -6377,6 +6380,13 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
             return;
         }
         if (!win->isToolbarVisible) {
+            return;
+        }
+        if (IsTouchChrome(win)) {
+            // The touch chrome replaces the rebar with the custom top bar and
+            // keeps the rebar hidden (see ShowWindow above). Its height was
+            // still being reserved, which left an unpainted band across the top
+            // of the Library whenever the top bar itself was hidden.
             return;
         }
         Rect rcRebar = HwndWindowRect(win->hwndReBar);
@@ -13105,6 +13115,10 @@ LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
 
         case WM_SIZE:
             if (win && SIZE_MINIMIZED != wp) {
+                // the tab preview strip is positioned against the tabs and the
+                // window edge, both of which just moved: close it rather than
+                // leave it hanging off the new layout
+                CloseTouchDocumentOverlays(win);
                 RememberDefaultWindowPosition(win);
                 // UIState.layout.rc remembers the last laid-out client size;
                 // the scheduled update relayouts only when the size actually
@@ -13156,6 +13170,7 @@ LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
 
         case WM_MOVE:
             if (win) {
+                CloseTouchDocumentOverlays(win);
                 RememberDefaultWindowPosition(win);
                 UpdateOverlayScrollbarPositions(win);
                 // keep the floating find bar anchored over the search icon

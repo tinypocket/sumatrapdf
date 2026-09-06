@@ -714,6 +714,13 @@ static void UpdateDocTocExpansionStateRecur(TreeView* treeView, Vec<int>& tocSta
 }
 
 void UpdateTocExpansionState(Vec<int>& tocState, TreeView* treeView, TocTree* docTree) {
+    // A document with no bookmarks still counts as "toc loaded" (the pane can
+    // be open on it for Search / Thumbnails), and then both the tree's model
+    // and docTree are null - which passed the equality check below and
+    // dereferenced null. Nothing to record in that case.
+    if (!treeView || !docTree || !docTree->root) {
+        return;
+    }
     if (treeView->treeModel != docTree) {
         // CrashMe();
         return;

@@ -1917,6 +1917,23 @@ void RebuildMenuBarButtons(MainWindow* win) {
 
     TbAutosIZE(hwndMb);
 
+    if (IsTouchChrome(win)) {
+        // The band is at least kTouchMenuBarDy tall, but an autosized button is
+        // only as tall as its text, and the rebar puts the child at the TOP of
+        // the band - so the labels hugged the tab strip. Grow the buttons with
+        // vertical padding until they fill the band; the toolbar centers each
+        // label inside its own button.
+        int target = DpiScale(win->hwndFrame, kTouchMenuBarDy);
+        Rect item = TbGetItemRect(hwndMb, 0);
+        if (item.dy > 0 && item.dy < target) {
+            DWORD pad = (DWORD)SendMessageW(hwndMb, TB_GETPADDING, 0, 0);
+            int padX = (int)LOWORD(pad);
+            int padY = (int)HIWORD(pad) + (target - item.dy);
+            SendMessageW(hwndMb, TB_SETPADDING, 0, MAKELPARAM(padX, padY));
+            TbAutosIZE(hwndMb);
+        }
+    }
+
     if (win->hwndMenuReBar) {
         Rect rc = TbGetItemRect(hwndMb, 0);
         int menuBarDy = MenuBarToolbarIdealDy(win);

@@ -62,14 +62,16 @@
 // Replaces the tab strip in the caption when a single document is open: just
 // the document name and the window buttons.
 #define kTitleBarDy 36
-#define kTitleBarTabsDy 48
+// Chrome's tab strip is 40dip tall with a 34dip tab in it; the pill below is
+// drawn 4px shorter than the strip, so this lands on the same size.
+#define kTitleBarTabsDy 40
 #define kTitleBarBtnDx 46
 #define kTitleBarPadX 4
 #define kTouchMenuBarDy 32
 
 // --- tabs, drawn as pills in the top bar ------------------------------------
 
-#define kTabPillDy 44
+#define kTabPillDy 40
 #define kTabPillMinDx 130
 #define kTabPillMaxDx 190
 #define kTabPillInactiveMaxDx 190

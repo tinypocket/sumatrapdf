@@ -2406,6 +2406,16 @@ static int GetMenuCheckMarkCx(HWND hwnd) {
 
 constexpr int kMenuPaddingY = 4;
 constexpr int kMenuPaddingX = 8;
+// Touch chrome: a menu row is a tap target like any other, and text height
+// plus 8px is far below what a finger can hit. Matches the sidebar's row.
+constexpr int kTouchMenuRowDy = 40;
+
+static int MenuRowMinDy(HWND hwnd) {
+    if (!gGlobalPrefs || !gGlobalPrefs->touchChrome) {
+        return 0;
+    }
+    return DpiScale(hwnd, kTouchMenuRowDy);
+}
 
 void MenuCustomDrawMesureItem(HWND hwnd, MEASUREITEMSTRUCT* mis) {
     if (ODT_MENU != mis->CtlType) {
@@ -2440,6 +2450,7 @@ void MenuCustomDrawMesureItem(HWND hwnd, MEASUREITEMSTRUCT* mis) {
 
     int cxMenuCheckMark = GetMenuCheckMarkCx(hwnd);
     mis->itemHeight += padY * 2;
+    mis->itemHeight = std::max(mis->itemHeight, (uint)MenuRowMinDy(hwnd));
     mis->itemWidth = uint(dx + cxMenuCheckMark + (padX * 2));
 }
 
@@ -2549,17 +2560,19 @@ void MenuCustomDrawItem(HWND hwnd, DRAWITEMSTRUCT* dis) {
     Str shortcutText = {};
     TempStr menuText = ParseMenuTextTemp(modi->text, &shortcutText);
 
-    // DrawTextEx handles & => underscore drawing
+    // DrawTextEx handles & => underscore drawing. The row can be taller than
+    // the text asks for (touch), so center in it rather than sit at the top.
+    uint vAlign = DT_VCENTER | DT_SINGLELINE;
     rc.top += padY;
     rc.left += cxCheckMark;
     WCHAR* ws = CWStrTemp(menuText);
-    DrawTextExW(hdc, ws, -1, &rc, DT_LEFT, nullptr);
+    DrawTextExW(hdc, ws, -1, &rc, DT_LEFT | vAlign, nullptr);
     if (shortcutText) {
         ws = CWStrTemp(shortcutText);
         rc = dis->rcItem;
         rc.top += padY;
         rc.right -= (padX + (cxCheckMark / 2));
-        DrawTextExW(hdc, ws, -1, &rc, DT_RIGHT, nullptr);
+        DrawTextExW(hdc, ws, -1, &rc, DT_RIGHT | vAlign, nullptr);
     }
 
     constexpr int kRadioCircleDx = 6;
