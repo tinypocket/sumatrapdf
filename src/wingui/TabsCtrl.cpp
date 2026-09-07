@@ -486,6 +486,11 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
     // strip is 48px tall so 13 fits with room to spare. "Larger tabs" takes it
     // to 16 along with the wider pills and taller strip.
     int tabFontSize = gLargerTabs ? 16 : 13;
+    if (gTwoRowTabs) {
+        // two lines in the same strip height: the label pays for its second
+        // line with a couple of points rather than with a taller tab bar
+        tabFontSize -= gLargerTabs ? 3 : 2;
+    }
     HFONT normalFont = inTitleBar ? HdcGetUiFont(hdc, tabFontSize) : GetFont();
     HFONT selectedFont = inTitleBar ? HdcGetUiFont(hdc, tabFontSize, FW_SEMIBOLD) : GetFont();
     Font fNormal(hdc, normalFont);
@@ -627,10 +632,17 @@ void TabsCtrl::Paint(HDC hdc, const Rect& rc) {
             // let a wrapped second line drift
             sf2.SetAlignment(IsTabsRtl(hwnd) ? Gdiplus::StringAlignmentFar : Gdiplus::StringAlignmentNear);
             Gdiplus::RectF rTxt2 = rTxt;
-            Gdiplus::REAL twoLineDy = font->GetHeight(&gfx) * 2.0f;
+            // LineLimit drops any line that does not fit *entirely*, so a rect
+            // measured at exactly two line heights loses the second one to
+            // rounding. A couple of pixels of slack keeps both.
+            Gdiplus::REAL twoLineDy = font->GetHeight(&gfx) * 2.0f + 2.0f;
             if (twoLineDy < rTxt2.Height) {
                 rTxt2.Y += (rTxt2.Height - twoLineDy) / 2.0f;
                 rTxt2.Height = twoLineDy;
+            } else {
+                // the pill is only just tall enough: give the two lines the
+                // whole of it rather than letting LineLimit drop the second
+                rTxt2.Height = std::max(rTxt2.Height, twoLineDy);
             }
             gfx.DrawString(ws, -1, font, rTxt2, &sf2, &br);
         } else {

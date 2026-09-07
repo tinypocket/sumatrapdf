@@ -206,6 +206,9 @@ struct TopBarWnd : Wnd {
     // the same document keeps the same colour between sessions.
     StrVec savedGroupPaths;
     Vec<Rect> savedGroupRects;
+    // one pill standing in for every other document that has favorites; it
+    // opens a menu of those documents rather than spreading them across the bar
+    Rect savedFilesRect;
     int savedContentDx = 0;
     int savedScrollX = 0;
     bool savedTrayDragging = false;
@@ -344,6 +347,77 @@ void TopBarWnd::PinPreview(HWND anchorHwnd, Rect anchorRect) {
 // in the Favorites pane and survives a restart.
 // A document's colour in the tray: picked from its path, so it is stable
 // across sessions and the same file always reads the same.
+// Label for the pill that stands in for the other documents with favorites.
+static TempStr SavedFilesPillLabelTemp(int nFiles) {
+    if (nFiles == 1) {
+        return str::DupTemp("1 other file");
+    }
+    return fmt("%d other files", nFiles);
+}
+
+// The pill's menu: one entry per other document, each opening a submenu of
+// that document's saved pages (a document with a single page is one entry).
+static void ShowFavoritesFilesMenu(MainWindow* win, Point screen) {
+    if (!win) {
+        return;
+    }
+    Str curPath;
+    WindowTab* tab = win->CurrentTab();
+    if (tab && !tab->IsAboutTab()) {
+        curPath = tab->filePath;
+    }
+    HMENU popup = CreatePopupMenu();
+    // ids are handed out per file/page pair below, starting past 0 (0 means
+    // "nothing chosen" to TrackPopupMenu)
+    StrVec paths;
+    Vec<Favorite*> favs;
+    Vec<FileState*> files;
+    GetFilesWithFavorites(files);
+    int id = 1;
+    for (FileState* fs : files) {
+        if (!fs || !fs->favorites) {
+            continue;
+        }
+        if (curPath && str::Eq(fs->filePath, curPath)) {
+            continue; // its pages are already pills on the bar
+        }
+        HMENU sub = CreatePopupMenu();
+        int nAdded = 0;
+        for (Favorite* fav : *fs->favorites) {
+            if (!fav || fav->isTemporary) {
+                continue;
+            }
+            paths.Append(fs->filePath);
+            favs.Append(fav);
+            TempStr label = FavReadableNameTemp(fav);
+            AppendMenuW(sub, MF_STRING, (UINT_PTR)id, ToWStrTemp(label).s);
+            id++;
+            nAdded++;
+        }
+        if (nAdded == 0) {
+            DestroyMenu(sub);
+            continue;
+        }
+        TempStr name = path::GetBaseNameTemp(fs->filePath);
+        AppendMenuW(popup, MF_POPUP | MF_STRING, (UINT_PTR)sub, ToWStrTemp(name).s);
+    }
+    if (GetMenuItemCount(popup) == 0) {
+        DestroyMenu(popup);
+        return;
+    }
+    MarkMenuOwnerDraw(popup);
+    int cmd = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_LEFTBUTTON, screen.x, screen.y, 0, win->hwndFrame, nullptr);
+    FreeMenuOwnerDrawInfoData(popup);
+    DestroyMenu(popup);
+    int idx = cmd - 1;
+    if (idx >= 0 && idx < len(favs)) {
+        FileState* fs = gFileHistory.FindByPath(paths[idx]);
+        if (fs) {
+            GoToFavorite(win, fs, favs[idx]);
+        }
+    }
+}
+
 COLORREF TouchFavoriteGroupColor(Str filePath) {
     // Dark enough that white text (always used on this palette, see the two
     // draw sites below) stays readable on every entry - the original palette
@@ -809,6 +883,7 @@ bool TopBarWnd::Layout(HDC hdc, Rect* rects) {
         }
     }
     savedGroupRects.Reset();
+    savedFilesRect = {};
     if (bookmarkIdx >= 0 && !rects[bookmarkIdx].IsEmpty() && (len(savedPages) > 0 || len(savedGroupPaths) > 0)) {
         int x = rects[bookmarkIdx].x + rects[bookmarkIdx].dx + DpiScale(hwnd, 8);
         // the tray takes the whole gap up to the right-hand controls: capping
@@ -830,15 +905,16 @@ bool TopBarWnd::Layout(HDC hdc, Rect* rects) {
                 contentDx += gap;
             }
         }
-        // chips for the other documents, sized to their names
+        // One pill for all the other documents. A chip per document read as a
+        // row of unrelated tabs and pushed the current document's own pages off
+        // the bar; the files belong behind a single dropdown.
         HFONT chipFont = TopBarFontWeighted(hdc, kFontSizeMeta, kFontWeightStrong);
-        Vec<int> groupDx;
-        for (int i = 0; i < len(savedGroupPaths); i++) {
-            TempStr name = path::GetBaseNameTemp(savedGroupPaths[i]);
-            Size sz = HdcGetTextExtentPoint32Font(hdc, name, chipFont);
-            int dx = std::min(sz.dx + DpiScale(hwnd, 34), DpiScale(hwnd, 190));
-            groupDx.Append(dx);
-            contentDx += (contentDx > 0 ? gap : 0) + dx;
+        int filesDx = 0;
+        if (len(savedGroupPaths) > 0) {
+            TempStr label = SavedFilesPillLabelTemp(len(savedGroupPaths));
+            Size sz = HdcGetTextExtentPoint32Font(hdc, label, chipFont);
+            filesDx = sz.dx + DpiScale(hwnd, 44); // room for the chevron
+            contentDx += (contentDx > 0 ? gap : 0) + filesDx;
         }
 
         savedContentDx = contentDx;
@@ -857,9 +933,9 @@ bool TopBarWnd::Layout(HDC hdc, Rect* rects) {
                                         DpiScale(hwnd, 26), DpiScale(hwnd, 26)});
             pillX += dx + gap;
         }
-        for (int i = 0; i < len(savedGroupPaths) && i < len(groupDx); i++) {
-            savedGroupRects.Append(Rect{pillX, savedTrayRect.y, groupDx[i], pillDy});
-            pillX += groupDx[i] + gap;
+        if (filesDx > 0) {
+            savedFilesRect = Rect{pillX, savedTrayRect.y, filesDx, pillDy};
+            pillX += filesDx + gap;
         }
     }
     return true;
@@ -1426,19 +1502,20 @@ void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT*) {
         IntersectClipRect(hdc, savedTrayRect.x, savedTrayRect.y, savedTrayRect.x + savedTrayRect.dx,
                           savedTrayRect.y + savedTrayRect.dy);
     }
-    for (int i = 0; i < len(savedGroupRects) && i < len(savedGroupPaths); i++) {
-        Rect chip = savedGroupRects[i];
-        if (chip.Intersect(savedTrayRect).IsEmpty()) {
-            continue;
+    if (!savedFilesRect.IsEmpty() && !savedFilesRect.Intersect(savedTrayRect).IsEmpty()) {
+        Rect pill = savedFilesRect;
+        COLORREF pillBg = ThemeTouchSurfaceColor();
+        FillTrack(hdc, pill, pill.dy / 2, pillBg, ThemeEdgeColor());
+        SetTextColor(hdc, ThemeWindowTextColor());
+        TempStr label = SavedFilesPillLabelTemp(len(savedGroupPaths));
+        Rect tr{pill.x + DpiScale(hwnd, 14), pill.y, pill.dx - DpiScale(hwnd, 40), pill.dy};
+        HdcDrawText(hdc, label, tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX, savedFont);
+        int chevDy = DpiScale(hwnd, 12);
+        HIMAGELIST chev = GetTintedToolbarImageList(chevDy, ThemeWindowTextColor(), pillBg);
+        if (chev) {
+            ImageList_Draw(chev, (int)TbIcon::ChevronDown, hdc, pill.x + pill.dx - DpiScale(hwnd, 22),
+                           pill.y + (pill.dy - chevDy) / 2, ILD_NORMAL);
         }
-        Str fp = savedGroupPaths[i];
-        COLORREF chipCol = TouchFavoriteGroupColor(fp);
-        FillTrack(hdc, chip, chip.dy / 2, chipCol);
-        // every palette entry is dark enough for this to always read
-        SetTextColor(hdc, RGB(255, 255, 255));
-        TempStr name = path::GetBaseNameTemp(fp);
-        Rect tr{chip.x + DpiScale(hwnd, 12), chip.y, chip.dx - DpiScale(hwnd, 24), chip.dy};
-        HdcDrawText(hdc, name, tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX, savedFont);
     }
 
     // Same palette a document reads as elsewhere in the tray (see the chip
@@ -2045,6 +2122,13 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             HwndInvalidate(hwnd, false);
             ShowBookmarkConfirm(idx);
+            return 0;
+        }
+        // the files pill lists every other document that has favorites, each
+        // with its own pages behind it
+        if (savedTrayRect.Contains(pt) && !savedFilesRect.IsEmpty() && savedFilesRect.Contains(pt)) {
+            Point screen = HwndClientToScreen(hwnd, Point{savedFilesRect.x, savedFilesRect.y + savedFilesRect.dy});
+            ShowFavoritesFilesMenu(win, screen);
             return 0;
         }
         // a document chip opens that document's saved pages

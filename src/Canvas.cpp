@@ -45,6 +45,7 @@
 #include "EditAnnotations.h"
 #include "Notifications.h"
 #include "MainWindow.h"
+#include "TableOfContents.h"
 #include "Canvas.h"
 #include "Menu.h"
 #include "uia/Provider.h"
@@ -1270,6 +1271,7 @@ static bool StopDraggingAnnotation(MainWindow* win, int x, int y, bool aborted) 
         // logf(" new rect: x=%.2f, y=%.2f, dx=%.2f, dy=%.2f\n", r.x, r.y, r.dx, r.dy);
         SetRect(annot, r);
         NotifyAnnotationsChanged(win->CurrentTab()->editAnnotsWindow);
+        InvalidateTouchAnnotations(win);
         MainWindowRerender(win);
         ToolbarUpdateStateForWindow(win, true);
     }
@@ -1618,6 +1620,7 @@ static bool StopAnnotationResize(MainWindow* win, bool aborted) {
     // The annotation has already been updated during mouse move,
     // just notify and update toolbar
     NotifyAnnotationsChanged(win->CurrentTab()->editAnnotsWindow);
+    InvalidateTouchAnnotations(win);
     MainWindowRerender(win);
     ToolbarUpdateStateForWindow(win, true);
 
@@ -2335,7 +2338,6 @@ static void DrawSmartMarginBadge(HDC hdc, const Rect& r, bool expanded) {
         gfx.DrawLine(&pen, cx, cy + h, cx + arm, cy - h);
     }
 }
-
 
 // CmdToggleImages. Like showLinks this is a debug aid (both live in the debug
 // menu, so both are debug / pre-release only), and like it the outlines are

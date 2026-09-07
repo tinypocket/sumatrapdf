@@ -88,6 +88,7 @@ struct DisplayModel;
 struct WindowTab;
 
 struct Annotation;
+class EngineBase;
 struct ILinkHandler;
 struct RefHoverState;
 
@@ -589,6 +590,9 @@ struct MainWindow {
     Point touchPanelPointerStart;
     int touchPanelPointerStartScrollY = 0;
     bool touchPanelPointerMoved = false;
+    // the finger landed on a list that was still coasting from a flick, so
+    // this touch is catching the list rather than tapping a row
+    bool touchPanelCaughtCoast = false;
 
     // state of in-page find in a browser-hosted (chm / markdown) webview (see
     // SearchAndDDE.cpp BrowserFind* functions); findMatches then holds (page,
@@ -601,6 +605,22 @@ struct MainWindow {
     int touchFindCurrent = -1;
     int browserFindTotal = -1; // total matches across all pages (-1: sweep not done)
     Str browserFindTerm;       // owned; the term the current md find ran with
+
+    // The Annotations panel's list. Gathering it loads every page, which on a
+    // long document took seconds on the UI thread - and did it again on every
+    // paint - so it runs on a worker thread and the result is cached here.
+    // The pointers belong to the engine's page info, so the cache is keyed by
+    // the engine it was gathered from and dropped when that changes.
+    enum class TouchAnnotsState {
+        NotLoaded,
+        Loading,
+        Loaded
+    };
+    TouchAnnotsState touchAnnotsState = TouchAnnotsState::NotLoaded;
+    Vec<Annotation*> touchAnnots;
+    EngineBase* touchAnnotsEngine = nullptr; // not owned; identity only, never dereferenced
+    int touchAnnotsGen = 0;                  // a late result from a previous document is dropped
+    u64 touchAnnotsStartedMs = 0;            // drives the waiting spinner's phase
 
     ILinkHandler* linkHandler = nullptr;
     // keyboard link following: when on, visible links are numbered 1..9 and

@@ -54,6 +54,8 @@ static void LayoutTocContainer(MainWindow* win);
 static void UpdateTocStickyHeader(MainWindow* win);
 void UpdateTouchPanelMode(MainWindow* win);
 void EngineMupdfGetAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut);
+void EngineMupdfGetAnnotationsInRange(EngineBase* engine, int fromPage, int toPage, Vec<Annotation*>& annotsOut);
+int EngineMupdfPageCount(EngineBase* engine);
 
 int TouchSidebarRowDy() {
     Str density = gGlobalPrefs->touchSidebarDensity;
@@ -2019,6 +2021,7 @@ void UpdateTouchPanelMode(MainWindow* win) {
     HwndInvalidate(win->hwndTocBox, true);
 }
 
+// The page image alone. TouchThumbnailHitRect() is what a finger has to hit.
 static Rect TouchThumbnailRect(MainWindow* win, int pageIndex) {
     HWND hwnd = win->hwndTocBox;
     Rect rc = HwndClientRect(hwnd);
@@ -2032,6 +2035,18 @@ static Rect TouchThumbnailRect(MainWindow* win, int pageIndex) {
     int col = pageIndex % 2;
     return Rect{pad + col * (cardDx + gap), yStart + row * (pageDy + labelDy + gap) - win->touchPanelScrollY, cardDx,
                 pageDy};
+}
+
+// A tap anywhere on the card, its page number included, goes to that page.
+// The number reads as part of the card, and hitting only the image left a
+// dead strip between every row.
+static Rect TouchThumbnailHitRect(MainWindow* win, int pageIndex) {
+    Rect r = TouchThumbnailRect(win, pageIndex);
+    if (r.IsEmpty()) {
+        return r;
+    }
+    r.dy += DpiScale(win->hwndTocBox, 24); // the label row under the page
+    return r;
 }
 
 struct TouchThumbnailRenderData {
@@ -2196,6 +2211,136 @@ static Rect TouchFavAddRect(MainWindow* win) {
     return Rect{client.dx - d - pad, y, d, d};
 }
 
+// repaints the waiting ring while the annotations list is being gathered
+constexpr UINT_PTR kTouchPanelSpinnerTimerId = 23;
+
+// --- annotations panel: loaded off the UI thread ---------------------------
+// Gathering the annotation list loads every page of the document, which on a
+// long one took seconds - and the panel did it again on every paint, every
+// scroll frame and every click. It now runs once on a worker thread per
+// engine, and the panel shows a waiting spinner until the result arrives.
+
+struct TouchAnnotsScan {
+    MainWindow* win = nullptr;
+    EngineBase* engine = nullptr; // AddRef'd for the duration of the scan
+    int gen = 0;
+    Vec<Annotation*> annots;
+};
+
+static bool TouchAnnotsScanIsCurrent(const TouchAnnotsScan* s) {
+    MainWindow* win = s->win;
+    if (!IsMainWindowValid(win) || win->touchAnnotsGen != s->gen) {
+        return false;
+    }
+    DisplayModel* dm = win->AsFixed();
+    return dm && dm->GetEngine() == s->engine;
+}
+
+static void TouchAnnotsScanFinishedUi(TouchAnnotsScan* s) {
+    if (TouchAnnotsScanIsCurrent(s)) {
+        MainWindow* win = s->win;
+        win->touchAnnots = s->annots;
+        win->touchAnnotsEngine = s->engine;
+        win->touchAnnotsState = MainWindow::TouchAnnotsState::Loaded;
+        if (win->hwndTocBox) {
+            KillTimer(win->hwndTocBox, kTouchPanelSpinnerTimerId);
+            HwndInvalidate(win->hwndTocBox, false);
+        }
+    }
+    s->engine->Release();
+    delete s;
+}
+
+static void TouchAnnotsScanThread(TouchAnnotsScan* s) {
+    // a chunk at a time, so the pages lock is released between them and the UI
+    // thread can still render the pages it needs while the sweep runs
+    constexpr int kChunk = 16;
+    int nPages = EngineMupdfPageCount(s->engine);
+    for (int from = 1; from <= nPages; from += kChunk) {
+        EngineMupdfGetAnnotationsInRange(s->engine, from, from + kChunk - 1, s->annots);
+    }
+    uitask::Post(MkFunc0<TouchAnnotsScan>(TouchAnnotsScanFinishedUi, s), "TouchAnnotsScanFinished");
+}
+
+// Drops the cached list: the pointers belong to the engine's page info, so
+// anything that replaces or edits the document has to invalidate them.
+void InvalidateTouchAnnotations(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    win->touchAnnotsGen++;
+    win->touchAnnots.Reset();
+    win->touchAnnotsEngine = nullptr;
+    win->touchAnnotsState = MainWindow::TouchAnnotsState::NotLoaded;
+    if (win->hwndTocBox && win->touchPanelMode == TouchPanelMode::Annotations) {
+        HwndInvalidate(win->hwndTocBox, false);
+    }
+}
+
+// The cached list, kicking off the scan when it is not there yet. Returns
+// nullptr while the scan is in flight, which is what draws the spinner.
+static const Vec<Annotation*>* TouchAnnotationsCached(MainWindow* win) {
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (!dm) {
+        return nullptr;
+    }
+    EngineBase* engine = dm->GetEngine();
+    if (!engine) {
+        return nullptr;
+    }
+    if (win->touchAnnotsState == MainWindow::TouchAnnotsState::Loaded) {
+        if (win->touchAnnotsEngine == engine) {
+            return &win->touchAnnots;
+        }
+        // a different document is showing now
+        InvalidateTouchAnnotations(win);
+    }
+    if (win->touchAnnotsState == MainWindow::TouchAnnotsState::Loading) {
+        return nullptr;
+    }
+    win->touchAnnotsState = MainWindow::TouchAnnotsState::Loading;
+    win->touchAnnotsStartedMs = GetTickCount64();
+    auto* s = new TouchAnnotsScan();
+    s->win = win;
+    s->engine = engine;
+    s->gen = win->touchAnnotsGen;
+    engine->AddRef();
+    if (win->hwndTocBox) {
+        SetTimer(win->hwndTocBox, kTouchPanelSpinnerTimerId, kAnimTickMs, nullptr);
+    }
+    RunAsync(MkFunc0<TouchAnnotsScan>(TouchAnnotsScanThread, s), "TouchAnnotsScan");
+    return nullptr;
+}
+
+// A ring that sweeps around while we wait, with the reason under it. Same
+// idiom as the saved-page hold ring in the top bar.
+static void DrawTouchPanelWaiting(MainWindow* win, HDC hdc, Str label) {
+    HWND hwnd = win->hwndTocBox;
+    Rect rc = HwndClientRect(hwnd);
+    int ringDy = DpiScale(hwnd, 28);
+    int top = DpiScale(hwnd, kPanelHeaderDy + 72);
+    Rect ring{(rc.dx - ringDy) / 2, top, ringDy, ringDy};
+    double elapsed = (double)(GetTickCount64() - win->touchAnnotsStartedMs);
+    // a full turn a second, with the arc itself growing and shrinking so the
+    // ring reads as busy rather than as a progress bar that never fills
+    float start = (float)(fmod(elapsed / 1000.0, 1.0) * 360.0) - 90.0f;
+    float sweep = 60.0f + (float)(sin(elapsed / 250.0) + 1.0) * 90.0f;
+    Gdiplus::Graphics gfx(hdc);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    COLORREF col = ThemeWindowLinkColor();
+    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(col), GetGValue(col), GetBValue(col)), (float)DpiScale(hwnd, 3));
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    gfx.DrawArc(&pen, ring.x, ring.y, ring.dx, ring.dy, start, sweep);
+
+    Rect text{DpiScale(hwnd, 16), ring.y + ring.dy + DpiScale(hwnd, 16), rc.dx - DpiScale(hwnd, 32),
+              DpiScale(hwnd, 24)};
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, ThemeWindowDarkerTextColor());
+    HdcDrawText(hdc, label, text, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+                HdcGetUiFont(hdc, kFontSizeLabel));
+}
+
 static int TouchPanelMaxScroll(MainWindow* win) {
     Rect client = HwndClientRect(win->hwndTocBox);
     int contentBottom = client.dy;
@@ -2210,11 +2355,10 @@ static int TouchPanelMaxScroll(MainWindow* win) {
                         len(win->findMatches) * DpiScale(win->hwndTocBox, TouchSearchResultRowDy()) +
                         DpiScale(win->hwndTocBox, 12);
     } else if (win->touchPanelMode == TouchPanelMode::Annotations && win->AsFixed()) {
-        Vec<Annotation*> annotations;
-        EngineMupdfGetAnnotations(win->AsFixed()->GetEngine(), annotations);
+        const Vec<Annotation*>* annotations = TouchAnnotationsCached(win);
+        int n = annotations ? len(*annotations) : 0;
         contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) +
-                        len(annotations) * DpiScale(win->hwndTocBox, TouchSidebarListRowDy()) +
-                        DpiScale(win->hwndTocBox, 12);
+                        n * DpiScale(win->hwndTocBox, TouchSidebarListRowDy()) + DpiScale(win->hwndTocBox, 12);
     } else if (win->touchPanelMode == TouchPanelMode::Favorites) {
         Vec<TouchFavRow> rows;
         CollectTouchFavRows(rows);
@@ -2575,8 +2719,22 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
         return;
     }
     if (mode == TouchPanelMode::Annotations && win->AsFixed()) {
-        Vec<Annotation*> annotations;
-        EngineMupdfGetAnnotations(win->AsFixed()->GetEngine(), annotations);
+        const Vec<Annotation*>* cached = TouchAnnotationsCached(win);
+        if (!cached) {
+            DrawTouchPanelWaiting(win, hdc, StrL("Looking through the document…"));
+            return;
+        }
+        const Vec<Annotation*>& annotations = *cached;
+        if (len(annotations) == 0) {
+            Rect rcEmpty = HwndClientRect(win->hwndTocBox);
+            Rect text{DpiScale(win->hwndTocBox, 16), DpiScale(win->hwndTocBox, kPanelHeaderDy + 72),
+                      rcEmpty.dx - DpiScale(win->hwndTocBox, 32), DpiScale(win->hwndTocBox, 24)};
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            HdcDrawText(hdc, StrL("No annotations in this document"), text,
+                        DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, HdcGetUiFont(hdc, kFontSizeLabel));
+            return;
+        }
         int y = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) - win->touchPanelScrollY;
         int rowDy = DpiScale(win->hwndTocBox, TouchSidebarListRowDy());
         int count = std::min(len(annotations), 10);
@@ -2788,7 +2946,7 @@ static bool TouchPanelHitRect(MainWindow* win, Point pt, Rect* out) {
     if (mode == TouchPanelMode::Thumbnails && win->ctrl) {
         int count = win->ctrl->PageCount();
         for (int i = 0; i < count; i++) {
-            Rect r = TouchThumbnailRect(win, i);
+            Rect r = TouchThumbnailHitRect(win, i);
             if (r.Contains(pt)) {
                 *out = r;
                 return true;
@@ -2947,7 +3105,7 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
     if (win->touchPanelMode == TouchPanelMode::Thumbnails && win->ctrl) {
         int count = win->ctrl->PageCount();
         for (int i = 0; i < count; i++) {
-            if (TouchThumbnailRect(win, i).Contains(pt)) {
+            if (TouchThumbnailHitRect(win, i).Contains(pt)) {
                 win->ctrl->GoToPage(i + 1, true);
                 HwndInvalidate(hwnd, false);
                 return true;
@@ -2996,13 +3154,15 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
         }
     }
     if (win->touchPanelMode == TouchPanelMode::Annotations && win->AsFixed()) {
+        const Vec<Annotation*>* cached = TouchAnnotationsCached(win);
+        if (!cached) {
+            return true; // still gathering the list; the tap has nothing to hit yet
+        }
         int y = DpiScale(hwnd, kPanelHeaderDy + 12) - win->touchPanelScrollY;
         int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
         int idx = (pt.y - y) / rowDy;
-        Vec<Annotation*> annotations;
-        EngineMupdfGetAnnotations(win->AsFixed()->GetEngine(), annotations);
-        if (pt.y >= y && idx >= 0 && idx < len(annotations)) {
-            win->ctrl->GoToPage(PageNo(annotations[idx]), true);
+        if (pt.y >= y && idx >= 0 && idx < len(*cached)) {
+            win->ctrl->GoToPage(PageNo((*cached)[idx]), true);
             return true;
         }
     }
@@ -3153,6 +3313,14 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                 UpdatePanelPressTimer(win);
                 return 0;
             }
+            if (wp == kTouchPanelSpinnerTimerId) {
+                if (win->touchAnnotsState == MainWindow::TouchAnnotsState::Loading) {
+                    HwndInvalidate(hwnd, false);
+                } else {
+                    KillTimer(hwnd, kTouchPanelSpinnerTimerId);
+                }
+                return 0;
+            }
             if (wp == kTouchPanelScrollTimerId) {
                 bool moving = KsTick(win->touchPanelKs);
                 win->touchPanelScrollY = KsPos(win->touchPanelKs);
@@ -3264,6 +3432,7 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                 SetTouchPanelPressed(win, win->touchPanelPointerStart, true);
                 // touching a coasting list catches it
                 SyncTouchPanelScroll(win);
+                win->touchPanelCaughtCoast = KsIsMoving(win->touchPanelKs);
                 KsStop(win->touchPanelKs);
                 UpdateTouchPanelScrollTimer(win, hwnd);
                 KsDragBegin(win->touchPanelKs, win->touchPanelPointerStart.y);
@@ -3294,7 +3463,20 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         case WM_POINTERUP:
             if (LOWORD(wp) == win->touchPanelPointerId) {
                 Point pt = HwndScreenToClient(hwnd, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
-                bool activate = !win->touchPanelPointerMoved;
+                // A finger rarely lands and lifts on the same pixel, and the
+                // 6px that starts a scroll is well inside that jitter - so the
+                // tap was decided by whether a scroll had *started*, and taps
+                // on the big page cards were being thrown away. Decide it at
+                // lift instead: land and lift close together is a tap, however
+                // the finger wandered in between.
+                int slop = DpiScale(hwnd, 16);
+                int dxLift = abs(pt.x - win->touchPanelPointerStart.x);
+                int dyLift = abs(pt.y - win->touchPanelPointerStart.y);
+                bool nearStart = dxLift <= slop && dyLift <= slop;
+                // ... unless the finger came down on a list that was still
+                // coasting, where the touch was catching it, not tapping a row
+                bool activate = !win->touchPanelPointerMoved || (nearStart && !win->touchPanelCaughtCoast);
+                win->touchPanelCaughtCoast = false;
                 SetTouchPanelPressed(win, Point{}, false);
                 win->touchPanelPointerId = 0;
                 win->touchPanelPointerMoved = false;

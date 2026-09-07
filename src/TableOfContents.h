@@ -17,6 +17,9 @@ bool IsTouchSearchPanelVisible(MainWindow*);
 void OpenTouchSearchPanel(MainWindow*);
 // the panel's collapse: back to the compact find bar with the query
 void CollapseTouchSearchPanelToBar(MainWindow*);
+// drops the Annotations panel's cached list (the document changed, or its
+// annotations did); the panel re-gathers it on a worker thread
+void InvalidateTouchAnnotations(MainWindow*);
 // the touch Search panel's current query, or {} when that panel isn't the one
 // driving the find (then win->hwndFindEdit is the source, as it always was)
 TempStr TouchSearchPanelQueryTemp(MainWindow*);

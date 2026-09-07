@@ -628,12 +628,10 @@ int TouchTitleBarDy() {
     if (!SettingsUseTabs()) {
         return kTitleBarDy;
     }
-    int dy = TabsLargerTabs() ? kTitleBarTabsLargeDy : kTitleBarTabsDy;
-    if (TabsTwoRowTabs()) {
-        // a wrapped label needs room for the second line
-        dy += kTabTwoRowExtraDy;
-    }
-    return dy;
+    // Two-row labels no longer make the strip taller: the second line is won
+    // back by setting those labels a couple of points smaller (see TabsCtrl),
+    // so turning the option on doesn't cost vertical space.
+    return TabsLargerTabs() ? kTitleBarTabsLargeDy : kTitleBarTabsDy;
 }
 
 // The "..." next to the + in the tab bar. Small, self-contained menu: the

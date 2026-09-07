@@ -2714,6 +2714,85 @@ static void CollectRecentFolders(const Vec<FileState*>& files, StrVec& out, int 
 // The "Recent" surface: the PINNED and RECENT file-card sections. It used to be a view of its own (TouchView::Home);
 // now it is drawn into the Library's content pane when its "Recent" sidebar row is selected. contentRc is that pane
 // (right of the sidebar, below the header) and the pane's scroll position is win->libraryFilesScrollY.
+// Nothing has ever been opened and no folder has been added: this is the first
+// run. A one-line hint is a poor welcome, so say what the Library is for and
+// put both ways of filling it on screen.
+static bool TouchLibraryIsFirstRun() {
+    bool noFolders = !gGlobalPrefs->libraryFolders || len(*gGlobalPrefs->libraryFolders) == 0;
+    bool noHistory = !gFileHistory.states || len(*gFileHistory.states) == 0;
+    return noFolders && noHistory;
+}
+
+// `area` is the content area to the right of the sidebar, below the header.
+static void DrawTouchLibraryFirstRun(MainWindow* win, HDC hdc, const Rect& area) {
+    int panelDx = std::min(DpiScale(hdc, 460), area.dx - DpiScale(hdc, 48));
+    if (panelDx <= 0) {
+        return;
+    }
+    int panelX = area.x + (area.dx - panelDx) / 2;
+    int panelY = area.y + std::max(DpiScale(hdc, 24), area.dy / 6);
+
+    int iconDy = DpiScale(hdc, 40);
+    HIMAGELIST icons = GetTintedToolbarImageList(iconDy, ThemeWindowLinkColor(), ThemeWindowBackgroundColor());
+    if (icons) {
+        ImageList_Draw(icons, (int)TbIcon::Library, hdc, panelX + (panelDx - iconDy) / 2, panelY, ILD_NORMAL);
+    }
+    panelY += iconDy + DpiScale(hdc, 20);
+
+    Rect titleRc{panelX, panelY, panelDx, DpiScale(hdc, 34)};
+    SetTextColor(hdc, ThemeWindowTextColor());
+    HdcDrawText(hdc, StrL("Your Library is empty"), titleRc, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+                HdcGetUiFont(hdc, 20, FW_SEMIBOLD));
+    panelY += titleRc.dy + DpiScale(hdc, 8);
+
+    Rect bodyRc{panelX, panelY, panelDx, DpiScale(hdc, 64)};
+    SetTextColor(hdc, ThemeWindowDarkerTextColor());
+    HdcDrawText(hdc,
+                StrL("Add the folders you keep your documents in and everything inside them shows up here, ready "
+                     "to open. Or open a single file to get started."),
+                bodyRc, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX, HdcGetUiFont(hdc, 14));
+    panelY += bodyRc.dy + DpiScale(hdc, 20);
+
+    // Add folder leads: it is the one that makes the Library useful
+    COLORREF selBg = 0;
+    COLORREF selFg = 0;
+    ThemeAccentSurfaceColors(&selBg, &selFg);
+    int btnDy = DpiScale(hdc, 44);
+    int btnGap = DpiScale(hdc, 12);
+    int addDx = DpiScale(hdc, 150);
+    int openDx = DpiScale(hdc, 138);
+    int btnX = panelX + (panelDx - (addDx + btnGap + openDx)) / 2;
+    Rect addBtn{btnX, panelY, addDx, btnDy};
+    Rect openBtn{btnX + addDx + btnGap, panelY, openDx, btnDy};
+    int btnIconDy = DpiScale(hdc, 16);
+
+    FillHomeRoundRect(hdc, addBtn, btnDy / 2, selBg);
+    HIMAGELIST addIcons = GetTintedToolbarImageList(btnIconDy, selFg, selBg);
+    if (addIcons) {
+        ImageList_Draw(addIcons, (int)TbIcon::Folder, hdc, addBtn.x + DpiScale(hdc, 20),
+                       addBtn.y + (btnDy - btnIconDy) / 2, ILD_NORMAL);
+    }
+    SetTextColor(hdc, selFg);
+    Rect addText{addBtn.x + DpiScale(hdc, 44), addBtn.y, addBtn.dx - DpiScale(hdc, 54), btnDy};
+    HdcDrawText(hdc, StrL("Add folder"), addText, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX,
+                HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
+
+    COLORREF openBg = ThemeTouchSurfaceColor();
+    FillHomeRoundRect(hdc, openBtn, btnDy / 2, openBg, ThemeEdgeColor());
+    HIMAGELIST openIcons = GetTintedToolbarImageList(btnIconDy, ThemeWindowTextColor(), openBg);
+    if (openIcons) {
+        ImageList_Draw(openIcons, (int)TbIcon::Open, hdc, openBtn.x + DpiScale(hdc, 18),
+                       openBtn.y + (btnDy - btnIconDy) / 2, ILD_NORMAL);
+    }
+    SetTextColor(hdc, ThemeWindowTextColor());
+    Rect openText{openBtn.x + DpiScale(hdc, 42), openBtn.y, openBtn.dx - DpiScale(hdc, 52), btnDy};
+    HdcDrawText(hdc, StrL("Open a file"), openText, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX,
+                HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
+
+    win->staticLinks.Append(new StaticLink(addBtn, Str(kLinkLibraryAddFolder), StrL("Add a folder")));
+    win->staticLinks.Append(new StaticLink(openBtn, Str(kLinkOpenFile), StrL("Open a document")));
+}
+
 static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc) {
     Vec<FileState*> files;
     StrVec filterWords;
@@ -2839,12 +2918,22 @@ static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc
         y += pillBlockDy + gap;
     }
 
-    drawGroup(StrL("RECENT"), recent, true);
+    // on a first run the welcome panel is the whole view; a "RECENT" heading
+    // over an empty area would just be noise above it
+    bool firstRunEmpty = len(pinned) == 0 && len(recent) == 0 && len(filterWords) == 0 && TouchLibraryIsFirstRun();
+    if (!firstRunEmpty) {
+        drawGroup(StrL("RECENT"), recent, true);
+    }
     if (len(pinned) == 0 && len(recent) == 0) {
-        Rect empty{contentX, y, contentDx, DpiScale(hdc, 40)};
-        SetTextColor(hdc, ThemeWindowDarkerTextColor());
-        Str message = len(filterWords) > 0 ? StrL("No matching files.") : StrL("No recent files yet.");
-        HdcDrawText(hdc, message, empty, DT_SINGLELINE | DT_NOPREFIX, HdcGetUiFont(hdc, 14));
+        if (firstRunEmpty) {
+            Rect area{contentX, y, contentDx, std::max(0, contentBottom - y)};
+            DrawTouchLibraryFirstRun(win, hdc, area);
+        } else {
+            Rect empty{contentX, y, contentDx, DpiScale(hdc, 40)};
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            Str message = len(filterWords) > 0 ? StrL("No matching files.") : StrL("No recent files yet.");
+            HdcDrawText(hdc, message, empty, DT_SINGLELINE | DT_NOPREFIX, HdcGetUiFont(hdc, 14));
+        }
     }
     RestoreDC(hdc, saved);
 }
@@ -5064,7 +5153,11 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                                       folderLine, folderTarget, highlighted);
             }
         }
-        if (itemCount == 0) {
+        bool firstRun = itemCount == 0 && !libraryLoading && !showingSearchFiles && TouchLibraryIsFirstRun();
+        if (firstRun) {
+            Rect area{leftDx, headerDy, rc.dx - leftDx, std::max(0, rc.dy - headerDy)};
+            DrawTouchLibraryFirstRun(win, hdc, area);
+        } else if (itemCount == 0) {
             Rect empty{leftDx + DpiScale(hdc, 40), headerDy + DpiScale(hdc, 40), rc.dx - leftDx - DpiScale(hdc, 80),
                        DpiScale(hdc, 40)};
             SetTextColor(hdc, ThemeWindowDarkerTextColor());
