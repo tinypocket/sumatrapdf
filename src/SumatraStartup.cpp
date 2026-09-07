@@ -42,6 +42,7 @@
 #include "TextSearch.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "Rail.h"
 #include "WindowTab.h"
 #include "UpdateCheck.h"
 #include "resource.h"
@@ -715,6 +716,21 @@ static bool MaybeTranslateAccelerator(MSG& msg) {
     bool doAccels = ((msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST) ||
                      (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST));
     if (!doAccels) return false;
+
+    // The in-app browser's address bar owns Ctrl+A (select the whole address)
+    // and Ctrl+L (jump to it). Both are bound to app commands - Select All and
+    // Presentation mode - which fired first and left the address bar inert.
+    if (msg.message == WM_KEYDOWN && IsCtrlPressed() && !IsAltPressed() && !IsShiftPressed()) {
+        MainWindow* browserWin = FindMainWindowByHwnd(msg.hwnd);
+        if (browserWin && browserWin->touchView == TouchView::Web && browserWin->touchBrowser) {
+            if (msg.wParam == 'L') {
+                return false;
+            }
+            if (msg.wParam == 'A' && IsTouchBrowserUrlEdit(browserWin, msg.hwnd)) {
+                return false;
+            }
+        }
+    }
 
     // Arrows, Home/End and PageUp/PageDown normally accelerate to scroll /
     // go-to-page commands. While the keyboard selection caret is up they move

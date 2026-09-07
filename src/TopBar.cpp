@@ -1138,23 +1138,40 @@ void TouchPreviewWnd::Show(HWND anchorHwnd, Rect anchorRect) {
     HMONITOR monitor = MonitorFromPoint(POINT{anchor.x, anchor.y}, MONITOR_DEFAULTTONEAREST);
     GetMonitorInfoW(monitor, &mi);
     Rect work = ToRect(mi.rcWork);
+    // The strip is the same strip wherever it was opened from: BuildLayout()
+    // placed each card at its own tab's offset, starting one pad in, so lining
+    // the window up with the tabs puts every card under the tab it belongs to.
+    // That also keeps it clear of the rail and the side pane, which the two
+    // buttons that open it sit on top of.
+    bool haveTabAligned = false;
+    int tabAlignedX = 0;
+    if (layoutTabsHwnd) {
+        tabAlignedX = HwndMapWindowPoint(layoutTabsHwnd, nullptr, {layoutFirstTabX, 0}).x - pad;
+        haveTabAligned = true;
+    }
     // Anchored low (the switcher at the bottom of the rail): run the strip
-    // along the bottom of the screen, starting just right of the rail - like
-    // the taskbar's thumbnails - instead of flipping it above the button.
+    // along the bottom of the screen rather than flipping it above the button.
     bool anchoredLow = anchor.y > work.y + (work.dy * 2 / 3);
     if (anchoredLow) {
-        // the strip runs along the bottom of the window from its left edge,
-        // like the taskbar's thumbnails; not from the button, and not from the
-        // document area (which moves with the panel)
-        x = anchor.x + anchorRect.dx + DpiScale(hwnd, 6);
-        if (owner && owner->win && owner->win->hwndFrame) {
-            x = HwndMapWindowPoint(owner->win->hwndFrame, nullptr, {0, 0}).x;
-        }
         y = work.y + work.dy - dy - DpiScale(hwnd, 6);
-    } else if (layoutTabsHwnd) {
-        // BuildLayout() placed each card at its own tab's offset, starting one
-        // pad in; line that up with the strip so every card sits under its tab
-        x = HwndMapWindowPoint(layoutTabsHwnd, nullptr, {layoutFirstTabX, 0}).x - pad;
+        if (haveTabAligned) {
+            x = tabAlignedX;
+        } else if (owner && owner->win && owner->win->hwndCanvas) {
+            // no tab strip to line up with (a single document): start at the
+            // document area, which is already past the rail and the pane
+            x = HwndMapWindowPoint(owner->win->hwndCanvas, nullptr, {0, 0}).x;
+        } else {
+            x = anchor.x + anchorRect.dx + DpiScale(hwnd, 6);
+        }
+    } else if (haveTabAligned) {
+        x = tabAlignedX;
+    }
+    // Never over the rail or the side pane, whichever button opened it: the
+    // tabs start above the rail, so lining up with them would put the strip on
+    // top of the pane while that is open.
+    if (owner && owner->win && owner->win->hwndCanvas) {
+        int docLeft = HwndMapWindowPoint(owner->win->hwndCanvas, nullptr, {0, 0}).x;
+        x = std::max(x, docLeft);
     }
     if (x + dx > work.x + work.dx) {
         x = work.x + work.dx - dx;

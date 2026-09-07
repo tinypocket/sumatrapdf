@@ -20,6 +20,8 @@ void CollapseTouchSearchPanelToBar(MainWindow*);
 // drops the Annotations panel's cached list (the document changed, or its
 // annotations did); the panel re-gathers it on a worker thread
 void InvalidateTouchAnnotations(MainWindow*);
+// frees the Pages panel's own thumbnails (window teardown, document change)
+void FreeTouchThumbnails(MainWindow*);
 // the touch Search panel's current query, or {} when that panel isn't the one
 // driving the find (then win->hwndFindEdit is the source, as it always was)
 TempStr TouchSearchPanelQueryTemp(MainWindow*);

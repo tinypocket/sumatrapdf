@@ -374,7 +374,8 @@ void SetTouchPanelMode(MainWindow* win, TouchPanelMode mode) {
     }
     TouchView previous = win->touchView;
     win->touchView = TouchView::Doc;
-    if (!SelectTouchDocumentTab(win)) {
+    bool haveDoc = SelectTouchDocumentTab(win);
+    if (!haveDoc) {
         // Favorites are stored per file and outlive the session, so the panel
         // is useful with nothing open - it is how you get back to a page you
         // marked. Every other panel describes the current document and has
@@ -383,7 +384,23 @@ void SetTouchPanelMode(MainWindow* win, TouchPanelMode mode) {
             win->touchView = previous;
             return;
         }
-        win->touchView = previous;
+    }
+    // Coming from the in-app browser, the webview covers the whole content
+    // area and stays on top of whatever the panel is opened beside - so
+    // opening a panel from the browser looked like nothing happened. Leave the
+    // browser properly: the last document takes the right-hand side, or the
+    // Library when there is no document to go back to.
+    if (previous == TouchView::Web) {
+        ShowTouchWebView(win, false);
+        HomePageDestroySearch(win);
+    }
+    if (haveDoc) {
+        win->touchView = TouchView::Doc;
+    } else {
+        win->touchView = TouchView::Library;
+        SelectTouchHomeTab(win);
+        SetTouchHomeTabLabel(win, TouchView::Library);
+        win->lastNonDocView = TouchView::Library;
     }
     SetTouchPanelModeAndRestoreSearch(win, mode);
     EnsureTouchPaneLoaded(win);

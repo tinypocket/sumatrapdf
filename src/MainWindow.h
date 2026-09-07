@@ -89,6 +89,7 @@ struct WindowTab;
 
 struct Annotation;
 class EngineBase;
+struct Pixmap;
 struct ILinkHandler;
 struct RefHoverState;
 
@@ -581,7 +582,17 @@ struct MainWindow {
     // Render state for the touch thumbnail panel. The bitset is reset when
     // the active display model changes, so each visible page is queued once.
     DisplayModel* touchThumbnailDm = nullptr;
-    Vec<int> touchThumbnailRequested;
+    // The Pages panel's own thumbnails. They used to live in the shared render
+    // cache, which the document view evicts as soon as it renders anything
+    // else - so after a few taps every card went blank. These are rendered
+    // once and owned here until the document changes.
+    struct TouchThumb {
+        int pageNo = 0;
+        Pixmap* bmp = nullptr; // owned; freed with FreePixmap
+    };
+    Vec<TouchThumb> touchThumbs;
+    Vec<int> touchThumbQueue; // pages waiting to be rendered, in request order
+    bool touchThumbRendering = false;
     int touchPanelScrollY = 0;
     // momentum for the panel list (thumbnails, search results, annotations);
     // drives touchPanelScrollY, which is what the paint code reads

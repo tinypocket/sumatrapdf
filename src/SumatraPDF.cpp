@@ -8285,7 +8285,13 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites) 
     }
 
     if (!win->IsDocLoaded() || !win->ctrl) {
-        tocVisible = false;
+        // The touch Favorites panel lists saved pages across every document
+        // and is exactly what you want with nothing open - it is how you get
+        // back to a page you marked. Every other panel needs a document.
+        bool favPanel = IsTouchChrome(win) && win->touchPanelMode == TouchPanelMode::Favorites;
+        if (!favPanel) {
+            tocVisible = false;
+        }
     }
     // the classic sidebar is the bookmarks tree and has nothing to show
     // without one. The touch pane also holds Search, Thumbnails and the rest,
@@ -13280,6 +13286,14 @@ LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
 
         case WM_KEYDOWN:
             if (win && !win->isBeingClosed) {
+                // Ctrl+L belongs to the browser's address bar. It is handled
+                // here rather than in FrameOnKeydown, which returns early when
+                // no document is loaded - and the browser often has none.
+                if (wp == 'L' && IsCtrlPressed() && !IsShiftPressed() && !IsAltPressed() &&
+                    win->touchView == TouchView::Web && win->touchBrowser) {
+                    TouchBrowserFocusAddressBar(win);
+                    return 0;
+                }
                 FrameOnKeydown(win, wp, lp);
             }
             break;

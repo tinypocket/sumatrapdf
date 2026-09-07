@@ -129,6 +129,7 @@ MainWindow::~MainWindow() {
     str::Free(librarySelectedFolderPath);
     str::Free(libraryRowMenuPath);
     str::Free(tocStickyText);
+    FreeTouchThumbnails(this);
     str::Free(touchBookmarkSearchQuery);
     str::Free(touchDocumentSearchQuery);
 

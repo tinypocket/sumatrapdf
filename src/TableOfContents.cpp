@@ -2049,59 +2049,129 @@ static Rect TouchThumbnailHitRect(MainWindow* win, int pageIndex) {
     return r;
 }
 
-struct TouchThumbnailRenderData {
-    HWND hwnd = nullptr;
+// --- Pages panel thumbnails ------------------------------------------------
+// Rendered one at a time on a worker thread straight from the open engine, and
+// owned by the window. The shared render cache cannot hold them: the document
+// view evicts a thumbnail as soon as it renders a page of its own, which is
+// exactly what tapping a card does, so the cards went white after a few taps.
+
+constexpr int kMaxTouchThumbs = 80;
+
+void FreeTouchThumbnails(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    for (MainWindow::TouchThumb& t : win->touchThumbs) {
+        FreePixmap(t.bmp);
+    }
+    win->touchThumbs.Reset();
+    win->touchThumbQueue.Reset();
+}
+
+static Pixmap* FindTouchThumbnail(MainWindow* win, int pageNo) {
+    for (MainWindow::TouchThumb& t : win->touchThumbs) {
+        if (t.pageNo == pageNo) {
+            return t.bmp;
+        }
+    }
+    return nullptr;
+}
+
+struct TouchThumbRender {
     MainWindow* win = nullptr;
-    int pageIdx = -1;
+    EngineBase* engine = nullptr; // AddRef'd for the render
+    DisplayModel* dm = nullptr;   // identity only, never dereferenced off the UI thread
+    int pageNo = 0;
+    int cardDx = 0;
+    int cardDy = 0;
+    Pixmap* bmp = nullptr;
 };
 
-// Back on the UI thread: the render is no longer in flight, so a later cache
-// miss for this page is free to ask for it again.
-static void TouchThumbnailRenderDone(TouchThumbnailRenderData* data) {
-    MainWindow* win = data->win;
-    if (IsMainWindowValid(win)) {
-        int at = win->touchThumbnailRequested.Find(data->pageIdx);
-        if (at >= 0) {
-            win->touchThumbnailRequested.RemoveAt(at);
+static void PumpTouchThumbnails(MainWindow* win);
+
+static void TouchThumbRenderFinishedUi(TouchThumbRender* r) {
+    MainWindow* win = r->win;
+    bool keep = IsMainWindowValid(win) && win->touchThumbnailDm == r->dm && r->bmp != nullptr;
+    if (keep) {
+        // the newest are the ones being looked at; drop from the front
+        while (len(win->touchThumbs) >= kMaxTouchThumbs) {
+            FreePixmap(win->touchThumbs[0].bmp);
+            win->touchThumbs.RemoveAt(0);
         }
+        MainWindow::TouchThumb t;
+        t.pageNo = r->pageNo;
+        t.bmp = r->bmp;
+        win->touchThumbs.Append(t);
+        r->bmp = nullptr;
         if (win->hwndTocBox) {
             HwndInvalidate(win->hwndTocBox, false);
         }
     }
-    delete data;
-}
-
-// Runs on the render thread (RenderCache guarantees exactly one call per
-// request, including failures and queue evictions).
-static void TouchThumbnailRenderFinished(TouchThumbnailRenderData* data, PageRenderRequest*) {
-    // InvalidateRect is safe across threads. The HWND value can be stale if
-    // the window closed, in which case Windows simply rejects the request.
-    if (data->hwnd) {
-        InvalidateRect(data->hwnd, nullptr, FALSE);
+    FreePixmap(r->bmp);
+    r->engine->Release();
+    if (IsMainWindowValid(win)) {
+        win->touchThumbRendering = false;
+        PumpTouchThumbnails(win);
     }
-    // touchThumbnailRequested is UI-thread state, so clearing the in-flight
-    // mark has to hop threads. Without it the mark was permanent, and once the
-    // shared render cache evicted a thumbnail (which it does as soon as the
-    // document view renders anything else) the page was never re-requested -
-    // that is why reopening the panel showed blank white cards.
-    uitask::Post(MkFunc0<TouchThumbnailRenderData>(TouchThumbnailRenderDone, data), "TouchThumbnailRenderDone");
+    delete r;
 }
 
-static void RequestTouchThumbnail(MainWindow* win, DisplayModel* dm, int pageNo, Rect card) {
-    auto* engine = dm->GetEngine();
-    RectF pageRect = engine->PageMediabox(pageNo);
-    if (pageRect.IsEmpty()) {
+static void TouchThumbRenderThread(TouchThumbRender* r) {
+    RectF pageRect = r->engine->PageMediabox(r->pageNo);
+    if (!pageRect.IsEmpty()) {
+        RectF fitted = r->engine->Transform(pageRect, r->pageNo, 1.0f, 0);
+        float zoom = std::min((float)r->cardDx / fitted.dx, (float)r->cardDy / fitted.dy);
+        RectF box = r->engine->Transform(fitted, r->pageNo, 1.0f, 0, true);
+        RenderPageArgs args(r->pageNo, zoom, 0, &box);
+        r->bmp = r->engine->RenderPage(args);
+    }
+    uitask::Post(MkFunc0<TouchThumbRender>(TouchThumbRenderFinishedUi, r), "TouchThumbRenderFinished");
+}
+
+// One render in flight at a time: the engine is shared with the document view,
+// and a panel full of cards must not flood it.
+static void PumpTouchThumbnails(MainWindow* win) {
+    if (!win || win->touchThumbRendering || len(win->touchThumbQueue) == 0) {
         return;
     }
-    pageRect = engine->Transform(pageRect, pageNo, 1.0f, 0);
-    float zoom = std::min((float)card.dx / pageRect.dx, (float)card.dy / pageRect.dy);
-    pageRect = engine->Transform(pageRect, pageNo, 1.0f, 0, true);
-    auto* data = new TouchThumbnailRenderData();
-    data->hwnd = win->hwndTocBox;
-    data->win = win;
-    data->pageIdx = pageNo - 1;
-    auto cb = MkFunc1(TouchThumbnailRenderFinished, data);
-    gRenderCache->Render(dm, pageNo, 0, zoom, pageRect, cb);
+    DisplayModel* dm = win->AsFixed();
+    if (!dm || dm != win->touchThumbnailDm) {
+        win->touchThumbQueue.Reset();
+        return;
+    }
+    EngineBase* engine = dm->GetEngine();
+    if (!engine) {
+        win->touchThumbQueue.Reset();
+        return;
+    }
+    int pageNo = win->touchThumbQueue[0];
+    win->touchThumbQueue.RemoveAt(0);
+    if (FindTouchThumbnail(win, pageNo)) {
+        PumpTouchThumbnails(win); // already arrived while it waited
+        return;
+    }
+    Rect card = TouchThumbnailRect(win, pageNo - 1);
+    if (card.dx <= 0 || card.dy <= 0) {
+        return;
+    }
+    auto* r = new TouchThumbRender();
+    r->win = win;
+    r->dm = dm;
+    r->engine = engine;
+    engine->AddRef();
+    r->pageNo = pageNo;
+    r->cardDx = card.dx;
+    r->cardDy = card.dy;
+    win->touchThumbRendering = true;
+    RunAsync(MkFunc0<TouchThumbRender>(TouchThumbRenderThread, r), "TouchThumbRender");
+}
+
+static void RequestTouchThumbnailPage(MainWindow* win, int pageNo) {
+    if (FindTouchThumbnail(win, pageNo) || win->touchThumbQueue.Contains(pageNo)) {
+        return;
+    }
+    win->touchThumbQueue.Append(pageNo);
+    PumpTouchThumbnails(win);
 }
 
 static void CollectAttachmentItems(TocItem* item, Vec<TocItem*>& items) {
@@ -2451,7 +2521,7 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
         auto* dm = win->AsFixed();
         if (win->touchThumbnailDm != dm) {
             win->touchThumbnailDm = dm;
-            win->touchThumbnailRequested.Reset();
+            FreeTouchThumbnails(win);
         }
         int count = pageCount;
         int first = 0;
@@ -2472,21 +2542,14 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             FillTocPill(hdc, card, DpiScale(win->hwndTocBox, 6), RGB(255, 255, 255), border,
                         isCurrent ? DpiScale(win->hwndTocBox, 2) : 1);
             if (dm) {
-                auto* engine = dm->GetEngine();
-                RectF pageRect = engine->PageMediabox(i + 1);
-                pageRect = engine->Transform(pageRect, i + 1, 1.0f, 0);
-                float zoom =
-                    pageRect.IsEmpty() ? 0.0f : std::min((float)card.dx / pageRect.dx, (float)card.dy / pageRect.dy);
-                BitmapCacheEntry* entry = zoom > 0 ? gRenderCache->Find(dm, i + 1, 0, zoom) : nullptr;
-                if (entry) {
+                Pixmap* bmp = FindTouchThumbnail(win, i + 1);
+                if (bmp) {
                     int inset = DpiScale(win->hwndTocBox, 2);
                     Rect imageRc = card;
                     imageRc.Inflate(-inset, -inset);
-                    BlitPixmap(entry->bitmap, hdc, imageRc);
-                    gRenderCache->DropCacheEntry(entry);
-                } else if (win->touchThumbnailRequested.Find(i) < 0) {
-                    win->touchThumbnailRequested.Append(i);
-                    RequestTouchThumbnail(win, dm, i + 1, card);
+                    BlitPixmap(bmp, hdc, imageRc);
+                } else {
+                    RequestTouchThumbnailPage(win, i + 1);
                 }
             }
             Rect label{card.x, card.y + card.dy, card.dx, DpiScale(win->hwndTocBox, 24)};

@@ -778,6 +778,87 @@ void InvalidateFindForDocumentChange(MainWindow* win) {
 }
 
 // build a one-line "...context match context..." snippet (UTF-8) around a match
+// Text a font can produce that is not text at all.
+//
+// A symbolic font with no usable character map - the neume fonts in Byzantine
+// chant books are the case that showed this up - hands its glyphs back as
+// private-use codepoints, and where the extractor falls back to WinAnsi they
+// arrive as stray Latin letters. Both end up glued into the words around them,
+// so a search result read "...ourfffsouls ffbe saved" instead of "...our souls
+// be saved". None of it is readable, and none of it is what was matched: it is
+// dropped from the preview, and what is dropped becomes a single space so the
+// words on either side do not run together.
+static bool IsPrivateUse(int c) {
+    return (c >= 0xe000 && c <= 0xf8ff) || (c >= 0xf0000 && c <= 0xffffd) || (c >= 0x100000 && c <= 0x10fffd);
+}
+
+static bool IsUnreadableInSnippet(int c, bool symbolFontPage) {
+    if (c == 0xfffd) {
+        return true; // replacement character: the extractor had nothing
+    }
+    if (IsPrivateUse(c)) {
+        return true;
+    }
+    if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') {
+        return true;
+    }
+    if (c == 0x200b || c == 0x200c || c == 0x200d || c == 0xfeff) {
+        return true; // zero-width and byte-order marks
+    }
+    // Only where the page has already proved it uses a symbol font (it has
+    // private-use codepoints in it) is the WinAnsi fallback letter treated as
+    // noise; a document that genuinely writes "ƒ" keeps it.
+    if (symbolFontPage && c == 0x192) {
+        return true;
+    }
+    return false;
+}
+
+// Whether this page draws with a symbol font, judged by the whole page rather
+// than by the slice being previewed: the neumes and the stray Latin letters
+// they fall back to are spread across the page, and a snippet can easily sit
+// between them.
+static bool PageUsesSymbolFont(Str pageText) {
+    // Utf8CodepointNext walks by byte index and stops by returning 0 once the
+    // index is past the end - it never returns a negative
+    int idx = 0;
+    while (idx < pageText.len) {
+        int c = Utf8CodepointNext(pageText, idx);
+        if (c == 0) {
+            break;
+        }
+        if (IsPrivateUse(c)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static TempStr CleanSnippetTemp(Str s, bool symbolFontPage) {
+    str::Builder out;
+    bool pendingGap = false;
+    int idx = 0;
+    while (idx < s.len) {
+        int c = Utf8CodepointNext(s, idx);
+        if (c == 0) {
+            break;
+        }
+        if (IsUnreadableInSnippet(c, symbolFontPage)) {
+            pendingGap = true;
+            continue;
+        }
+        if (pendingGap) {
+            out.AppendChar(' ');
+            pendingGap = false;
+        }
+        char buf[8];
+        int off = 0;
+        str::Utf8Encode(buf, off, c);
+        out.Append(Str{buf, off});
+    }
+    return str::DupTemp(Str{out.els, (int)out.len});
+}
+
 static TempStr BuildSnippet(EngineBase* engine, const FindMatch& m) {
     int textLen = 0;
     Str pageText = engine->GetTextForPage(m.startPage, &textLen);
@@ -794,9 +875,12 @@ static TempStr BuildSnippet(EngineBase* engine, const FindMatch& m) {
     int from = std::max(0, mStart - kCtxBefore);
     int to = std::min(textLen, mEnd + kCtxAfter);
     Str sub = str::Dup(Utf8SliceByCodepoints(pageText, from, to - from));
-    str::NormalizeWSInPlace(sub);
-    TempStr u = str::DupTemp(sub);
+    TempStr cleaned = CleanSnippetTemp(sub, PageUsesSymbolFont(pageText));
     str::FreePtr(&sub);
+    Str norm = str::Dup(cleaned);
+    str::NormalizeWSInPlace(norm);
+    TempStr u = str::DupTemp(norm);
+    str::FreePtr(&norm);
     return fmt("%s%s%s", Str(from > 0 ? "..." : ""), u, Str(to < textLen ? "..." : ""));
 }
 

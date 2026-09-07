@@ -490,7 +490,20 @@ struct TouchBrowser {
     TbMenuWnd* menuWnd = nullptr;
     TbFavMgrWnd* favMgr = nullptr;
     TbScrimWnd* scrim = nullptr;
+    // the address field just took focus, so the click that gave it focus
+    // selects the whole address (as every browser does) rather than dropping a
+    // caret in the middle of the url
+    bool urlSelectOnClick = false;
 };
+
+// Keys the page must not swallow. Ctrl+L belongs to the address bar, so it is
+// handed back to the frame, which puts the caret there (see FrameOnKeydown).
+static int TbResolveAccelCmd(void* /*ctx*/, u16 vk, bool ctrl, bool shift, bool alt) {
+    if (vk == 'L' && ctrl && !shift && !alt) {
+        return kWebViewForwardKey;
+    }
+    return 0;
+}
 
 static Str TouchBrowserHomeUrl() {
     Str url = gGlobalPrefs->browserHomePage;
@@ -2570,6 +2583,37 @@ struct TbChromeWnd : Wnd {
 // Enter in the URL field navigates (prefixing https:// when no scheme is typed)
 static LRESULT CALLBACK TbUrlEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
     auto* tb = (TouchBrowser*)ref;
+    // Taking focus selects the whole address, and the click that brought focus
+    // here must not then collapse that selection to a caret. Clicking again,
+    // once the field already has focus, places the caret as usual.
+    if (msg == WM_SETFOCUS) {
+        LRESULT res = DefSubclassProc(hwnd, msg, wp, lp);
+        SendMessageW(hwnd, EM_SETSEL, 0, -1);
+        if (tb) {
+            tb->urlSelectOnClick = true;
+        }
+        return res;
+    }
+    if (msg == WM_KILLFOCUS && tb) {
+        tb->urlSelectOnClick = false;
+    }
+    if (msg == WM_LBUTTONDOWN) {
+        // Clicking a field that does not have focus selects all of it,
+        // whichever order focus and the click arrive in.
+        if (GetFocus() != hwnd) {
+            SetFocus(hwnd);
+            SendMessageW(hwnd, EM_SETSEL, 0, -1);
+            if (tb) {
+                tb->urlSelectOnClick = false;
+            }
+            return 0;
+        }
+        if (tb && tb->urlSelectOnClick) {
+            tb->urlSelectOnClick = false;
+            SendMessageW(hwnd, EM_SETSEL, 0, -1);
+            return 0;
+        }
+    }
     if (msg == WM_KEYDOWN && wp == VK_RETURN) {
         TempStr txt = HwndGetTextTemp(hwnd);
         WebviewWnd* wv = tb ? TbActiveWebView(tb) : nullptr;
@@ -2594,6 +2638,25 @@ static LRESULT CALLBACK TbUrlEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         return 0;
     }
     return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+// Ctrl+L: put the caret in the address field with the whole address selected,
+// ready to be typed over. Reached from the browser chrome, from the page (the
+// webview forwards the key) and from the frame's own key handling.
+bool IsTouchBrowserUrlEdit(MainWindow* win, HWND hwnd) {
+    TouchBrowser* tb = win ? win->touchBrowser : nullptr;
+    return tb && tb->chrome && tb->chrome->hwndUrl && tb->chrome->hwndUrl == hwnd;
+}
+
+void TouchBrowserFocusAddressBar(MainWindow* win) {
+    TouchBrowser* tb = win ? win->touchBrowser : nullptr;
+    if (!tb || !tb->chrome || !tb->chrome->hwndUrl) {
+        return;
+    }
+    HWND edit = tb->chrome->hwndUrl;
+    SetFocus(edit);
+    SendMessageW(edit, EM_SETSEL, 0, -1);
+    tb->urlSelectOnClick = false;
 }
 
 TbChromeWnd::TbChromeWnd() {
@@ -3547,6 +3610,7 @@ static TbTab* TbCreateTab(TouchBrowser* tb, Str url) {
     t->webView->events.historyChanged = TbHistoryChanged;
     t->webView->events.documentTitleChanged = TbDocumentTitleChanged;
     t->webView->events.mainDocumentResponse = TbMainDocumentResponse;
+    t->webView->events.resolveAccelCmd = TbResolveAccelCmd;
     t->webView->forwardAppAccelerators = true;
     CreateWebViewArgs cargs;
     cargs.parent = frame;
