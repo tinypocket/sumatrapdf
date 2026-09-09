@@ -81,11 +81,19 @@ export function writePdfWithToc(name: string, nPages = 3): string {
   return writePdf(name, nPages, true);
 }
 
+// a saved page in a document, as the Favorites panel lists it
+export type TouchFavorite = {
+  path: string;
+  pageNo: number;
+  name: string;
+};
+
 export type TouchPrefs = {
   sidebarOpen?: boolean;
   twoRowTabs?: boolean;
   largerTabs?: boolean;
   libraryFolders?: string[];
+  favorites?: TouchFavorite[];
 };
 
 // A settings directory of this test's own, so a run never reads or writes the
@@ -109,6 +117,27 @@ export function makeAppdata(name: string, prefs: TouchPrefs = {}): string {
   ];
   if (prefs.libraryFolders && prefs.libraryFolders.length > 0) {
     lines.push(`LibraryFolders = ${prefs.libraryFolders.map((f) => `"${f}"`).join(" ")}`);
+  }
+  if (prefs.favorites && prefs.favorites.length > 0) {
+    // favorites live in the per-file state, one block per document
+    lines.push("FavoritesInToolbar = true");
+    lines.push("FileStates [");
+    for (const fav of prefs.favorites) {
+      lines.push(
+        "\t[",
+        `\t\tFilePath = ${fav.path}`,
+        "\t\tFavorites [",
+        "\t\t\t[",
+        `\t\t\t\tName = ${fav.name}`,
+        `\t\t\t\tPageNo = ${fav.pageNo}`,
+        "\t\t\t]",
+        "\t\t]",
+        "\t\tIsMissing = false",
+        "\t\tOpenCount = 3",
+        "\t]",
+      );
+    }
+    lines.push("]");
   }
   lines.push("");
   writeFileSync(join(dir, "SumatraPDF-settings.txt"), lines.join("\n"));

@@ -1171,6 +1171,13 @@ void LoadTocTree(MainWindow* win) {
         ReportIf(true);
         return;
     }
+    // No document in this tab - the Library tab, or a document tab whose load
+    // has not finished. There is no toc to read, and asking the controller for
+    // one read through a null pointer. Not marked loaded: the tab gets its tree
+    // when it has something to give.
+    if (!tab->ctrl) {
+        return;
+    }
 
     if (win->tocLoaded) {
         return;

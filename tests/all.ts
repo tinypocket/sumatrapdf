@@ -73,6 +73,7 @@ import { testit as reloadDebounce } from "./reload-debounce.ts";
 import { testit as parseTipBrackets } from "./parse-tip-brackets.ts";
 import { testit as ghsaP2ph2rvmQ37m } from "./security-ghsa-p2ph-2rvm-q37m.ts";
 import { testit as ghsaCrhmW5qrWjj4 } from "./security-ghsa-crhm-w5qr-wjj4.ts";
+import { testit as touchFavoritesOpen } from "./touch-favorites-open.ts";
 import { testit as touchPaneNoToc } from "./touch-pane-no-toc.ts";
 import { testit as touchSidebarPref } from "./touch-sidebar-pref.ts";
 
@@ -140,6 +141,7 @@ const tests: [string, () => void | Promise<void>][] = [
   ["parse-tip-brackets", parseTipBrackets],
   ["security-ghsa-p2ph-2rvm-q37m", ghsaP2ph2rvmQ37m],
   ["security-ghsa-crhm-w5qr-wjj4", ghsaCrhmW5qrWjj4],
+  ["touch-favorites-open", touchFavoritesOpen],
   ["touch-pane-no-toc", touchPaneNoToc],
   ["touch-sidebar-pref", touchSidebarPref],
 ];

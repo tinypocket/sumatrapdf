@@ -265,7 +265,14 @@ static bool IsRailItemEnabled(MainWindow* win, const RailItem& item) {
 // going that way, so a document loaded with the pane closed (the default now)
 // showed an empty Bookmarks list when the pane was opened later.
 static void EnsureTouchPaneLoaded(MainWindow* win) {
-    if (win && win->IsDocLoaded() && win->ctrl && win->CurrentTab() && !win->tocLoaded) {
+    if (!win || win->tocLoaded || !win->IsDocLoaded()) {
+        return;
+    }
+    // tab->ctrl, not win->ctrl: the two are the same document once a tab switch
+    // has settled, but during one the window can still point at the document it
+    // was showing while the tab now current has none
+    WindowTab* tab = win->CurrentTab();
+    if (tab && tab->ctrl) {
         LoadTocTree(win);
     }
 }

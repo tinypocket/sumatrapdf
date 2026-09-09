@@ -6728,6 +6728,16 @@ static void UpdateOverlayScrollbarPositions(MainWindow* win) {
 static void FrameUpdateUi(MainWindow* win) {
     MainWindow::UIState& ui = win->uiState;
     ui.updatePending = false;
+    // The document toolbar is not allowed over the Library or the in-app
+    // browser (they carry their own header), so moving there switches it off.
+    // Every way back to a document has to switch it on again - opening a
+    // favorite from the Library, say - or the document arrives with no toolbar
+    // above it. Recomputing it here covers all of them: ShowOrHideToolbar reads
+    // the current state and returns without doing anything when it is already
+    // right.
+    if (IsTouchChrome(win)) {
+        ShowOrHideToolbar(win);
+    }
     bool updateToolbars = ui.updateToolbars;
     int sidebarDx = ui.sidebarDx;
     ui.updateToolbars = false;
@@ -8305,7 +8315,12 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites) 
         showFavorites = false;
     }
 
-    if (tocVisible) {
+    // The touch Favorites panel is allowed to be open with no document (above),
+    // and a tab whose load has not finished has no controller either. Ask for
+    // the bookmarks tree only when there is a document to read one from - the
+    // same condition LoadTocTree itself applies, so the check below still holds.
+    WindowTab* tocTab = win->CurrentTab();
+    if (tocVisible && tocTab && tocTab->ctrl) {
         LoadTocTree(win);
         ReportIf(!win->tocLoaded);
     }
