@@ -494,6 +494,11 @@ struct TouchBrowser {
     // selects the whole address (as every browser does) rather than dropping a
     // caret in the middle of the url
     bool urlSelectOnClick = false;
+    // WebView2's browser process died and took every tab's control with it; a
+    // rebuild is queued (see TbProcessFailed). lastRebuildMs keeps a runtime
+    // that dies again straight away from being rebuilt in a loop.
+    bool rebuildPending = false;
+    double lastRebuildMs = 0.0;
 };
 
 // Keys the page must not swallow. Ctrl+L belongs to the address bar, so it is
@@ -3587,41 +3592,113 @@ static void TbCloseTab(TbTab* t) {
     uitask::Post(MkFunc0<TbCloseTabReq>(TbCloseTabNow, req), "TbCloseTabNow");
 }
 
-// Creates a tab and its webview. Like SimpleBrowserWindow the control is created
-// at a real size (not 0x0), and `url` is parked in pendingUrl because WebView2
+static bool TbProcessFailed(void* ctx, WebViewProcessFailure kind);
+
+// A tab's webview. Like SimpleBrowserWindow the control is created at a real
+// size (not 0x0); its first Navigate waits for LayoutTouchWebView (see
+// TbTab::pendingUrl).
+static WebviewWnd* TbCreateWebView(TbTab* t) {
+    HWND frame = t->tb->win->hwndFrame;
+    auto* wv = new WebviewWnd();
+    wv->dataDir = str::Dup(GetWebViewDataDirTemp());
+    wv->enableAutofill = true;
+    wv->enableBrowserChrome = true;
+    wv->events.ctx = t;
+    wv->events.navigationStarting = TbNavigationStarting;
+    wv->events.navigationCompleted = TbNavigationCompleted;
+    wv->events.historyChanged = TbHistoryChanged;
+    wv->events.documentTitleChanged = TbDocumentTitleChanged;
+    wv->events.mainDocumentResponse = TbMainDocumentResponse;
+    wv->events.resolveAccelCmd = TbResolveAccelCmd;
+    wv->events.processFailed = TbProcessFailed;
+    wv->forwardAppAccelerators = true;
+    CreateWebViewArgs cargs;
+    cargs.parent = frame;
+    cargs.pos = HwndClientRect(frame);
+    if (!wv->Create(cargs)) {
+        delete wv;
+        return nullptr;
+    }
+    return wv;
+}
+
+// Creates a tab and its webview. `url` is parked in pendingUrl because WebView2
 // drops a Navigate issued before the control has bounds and a first layout;
 // LayoutTouchWebView issues it. Returns nullptr when the strip is full.
 static TbTab* TbCreateTab(TouchBrowser* tb, Str url) {
     if (len(tb->tabs) >= kTbMaxTabs) {
         return nullptr;
     }
-    HWND frame = tb->win->hwndFrame;
     auto* t = new TbTab();
     t->tb = tb;
     t->pendingUrl = str::Dup(url);
-
-    t->webView = new WebviewWnd();
-    t->webView->dataDir = str::Dup(GetWebViewDataDirTemp());
-    t->webView->enableAutofill = true;
-    t->webView->enableBrowserChrome = true;
-    t->webView->events.ctx = t;
-    t->webView->events.navigationStarting = TbNavigationStarting;
-    t->webView->events.navigationCompleted = TbNavigationCompleted;
-    t->webView->events.historyChanged = TbHistoryChanged;
-    t->webView->events.documentTitleChanged = TbDocumentTitleChanged;
-    t->webView->events.mainDocumentResponse = TbMainDocumentResponse;
-    t->webView->events.resolveAccelCmd = TbResolveAccelCmd;
-    t->webView->forwardAppAccelerators = true;
-    CreateWebViewArgs cargs;
-    cargs.parent = frame;
-    cargs.pos = HwndClientRect(frame);
-    if (!t->webView->Create(cargs)) {
-        delete t->webView;
-        t->webView = nullptr;
-    }
+    t->webView = TbCreateWebView(t);
     tb->tabs.Append(t);
     TbRedrawChrome(tb);
     return t;
+}
+
+// --- recovering from a dead WebView2 -----------------------------------------
+// When WebView2's browser process exits, every control in the browser dies
+// with it: the webview windows are destroyed and nothing was left where the
+// page had been - the chrome stayed up over an empty content area, and no
+// button brought a page back. Build every tab a new control and reopen it where
+// it was, as a browser does after its renderer crashes.
+
+// a runtime that dies again this soon after being rebuilt is not rebuilt again
+constexpr double kTbRebuildGuardMs = 10000.0;
+
+struct TbRebuildReq {
+    MainWindow* win = nullptr;
+};
+
+static void TbRebuildNow(TbRebuildReq* req) {
+    MainWindow* win = req->win;
+    delete req;
+    if (!IsMainWindowValid(win) || !win->touchBrowser) {
+        return;
+    }
+    TouchBrowser* tb = win->touchBrowser;
+    tb->rebuildPending = false;
+    tb->lastRebuildMs = AnimNowMs();
+    for (TbTab* t : tb->tabs) {
+        // the page it was on, or the one it was about to open
+        Str reopen = t->url ? t->url : t->pendingUrl;
+        TempStr url = str::DupTemp(reopen ? reopen : TouchBrowserHomeUrl());
+        str::ReplaceWithCopy(&t->pendingUrl, url);
+        delete t->webView;
+        t->webView = TbCreateWebView(t);
+        t->didInitialNav = false;
+        t->loading = false;
+    }
+    // the new controls go through the same show/hide and z-order as a tab
+    // switch; the relayout gives them bounds and issues the active tab's
+    // Navigate (a background tab loads when it is activated)
+    TbSetChildrenVisible(tb, win->touchView == TouchView::Web);
+    ScheduleUiUpdate(win, kUiForceRelayout);
+    TbUpdateNavButtons(tb);
+}
+
+static bool TbProcessFailed(void* ctx, WebViewProcessFailure kind) {
+    auto* tab = (TbTab*)ctx;
+    TouchBrowser* tb = tab->tb;
+    if (kind == WebViewProcessFailure::BrowserExited && !tb->rebuildPending) {
+        double now = AnimNowMs();
+        if (tb->lastRebuildMs > 0.0 && now - tb->lastRebuildMs < kTbRebuildGuardMs) {
+            logf("TbProcessFailed: WebView2 died again right after a rebuild, not rebuilding\n");
+        } else {
+            // posted: the failure is raised inside a WebView2 event, and the
+            // default handling below still has to drop the dead environment
+            // before new controls can be made
+            tb->rebuildPending = true;
+            auto* req = new TbRebuildReq();
+            req->win = tb->win;
+            uitask::Post(MkFunc0<TbRebuildReq>(TbRebuildNow, req), "TbRebuildNow");
+        }
+    }
+    // not handled: a dead renderer is still reloaded, and a dead browser
+    // process still takes its environment down with it
+    return false;
 }
 
 static void TbActivateTab(TouchBrowser* tb, int idx) {

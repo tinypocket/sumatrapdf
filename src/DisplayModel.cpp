@@ -500,33 +500,47 @@ void DisplayModel::DetectRunningHeaderFooter() const {
     DetectRunningHeaderFooterIn(engine, &smartHfTopPt, &smartHfBottomPt);
 }
 
-bool DisplayModel::IsPageMarginExpanded(int pageNo) const {
-    for (int p : marginExpandedPages) {
-        if (p == pageNo) {
-            return true;
+int DisplayModel::PageMarginExpandedEdges(int pageNo) const {
+    for (const MarginExpansion& e : marginExpanded) {
+        if (e.pageNo == pageNo) {
+            return e.edges;
         }
     }
-    return false;
+    return 0;
 }
 
-void DisplayModel::TogglePageMarginExpanded(int pageNo) {
-    for (int i = 0; i < len(marginExpandedPages); i++) {
-        if (marginExpandedPages[i] == pageNo) {
-            marginExpandedPages.RemoveAt(i);
-            return;
+void DisplayModel::SetPageMarginExpanded(int pageNo, int edges, bool expanded) {
+    for (int i = 0; i < len(marginExpanded); i++) {
+        MarginExpansion& e = marginExpanded[i];
+        if (e.pageNo != pageNo) {
+            continue;
         }
+        e.edges = expanded ? (e.edges | edges) : (e.edges & ~edges);
+        if (e.edges == 0) {
+            marginExpanded.RemoveAt(i);
+        }
+        return;
     }
-    marginExpandedPages.Append(pageNo);
+    if (expanded && edges != 0) {
+        marginExpanded.Append({pageNo, edges});
+    }
 }
 
-// true when this page is actually showing less than its full height
-bool DisplayModel::IsPageMarginTrimmed(int pageNo) const {
-    if (!gGlobalPrefs->smartMargins || IsPageMarginExpanded(pageNo)) {
-        return false;
+// the edges this page is actually showing less of than its full height
+int DisplayModel::PageMarginTrimmedEdges(int pageNo) const {
+    if (!gGlobalPrefs->smartMargins) {
+        return 0;
     }
     RectF media = PageMediaBox(pageNo);
     RectF display = PageDisplayBox(pageNo);
-    return display.dy < media.dy - 1.0f;
+    int edges = 0;
+    if (display.y > media.y + 1.0f) {
+        edges |= kPageEdgeTop;
+    }
+    if (display.y + display.dy < media.y + media.dy - 1.0f) {
+        edges |= kPageEdgeBottom;
+    }
+    return edges;
 }
 
 // The body of one page: the text between a running header and a running footer.
@@ -825,9 +839,20 @@ RectF DisplayModel::PageDisplayBox(int pageNo) const {
     if (media.IsEmpty()) {
         return media;
     }
-    if (IsPageMarginExpanded(pageNo)) {
+    int expanded = PageMarginExpandedEdges(pageNo);
+    if (expanded == kPageEdgesAll) {
         return media; // user asked for this page's margins back
     }
+    RectF box = PageTrimmedBox(pageNo, media);
+    // and the edges they asked back one at a time
+    float top = (expanded & kPageEdgeTop) ? media.y : box.y;
+    float bottom = (expanded & kPageEdgeBottom) ? media.y + media.dy : box.y + box.dy;
+    box.y = top;
+    box.dy = bottom - top;
+    return box;
+}
+
+RectF DisplayModel::PageTrimmedBox(int pageNo, RectF media) const {
     if (!gGlobalPrefs->smartMargins) {
         return ApplyManualTrim(media, media);
     }

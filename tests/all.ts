@@ -76,6 +76,7 @@ import { testit as ghsaCrhmW5qrWjj4 } from "./security-ghsa-crhm-w5qr-wjj4.ts";
 import { testit as touchFavoritesOpen } from "./touch-favorites-open.ts";
 import { testit as touchPaneNoToc } from "./touch-pane-no-toc.ts";
 import { testit as touchSidebarPref } from "./touch-sidebar-pref.ts";
+import { testit as touchSmartMargins } from "./touch-smart-margins.ts";
 
 const tests: [string, () => void | Promise<void>][] = [
   ["lint-command-ids", lintCommandIds],
@@ -144,6 +145,7 @@ const tests: [string, () => void | Promise<void>][] = [
   ["touch-favorites-open", touchFavoritesOpen],
   ["touch-pane-no-toc", touchPaneNoToc],
   ["touch-sidebar-pref", touchSidebarPref],
+  ["touch-smart-margins", touchSmartMargins],
 ];
 
 export type AllTestOptions = {

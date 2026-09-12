@@ -40,6 +40,11 @@ struct PageInfo {
     bool failedToRender = false;
 };
 
+// the two edges of a page that smart margins trim, in page space
+constexpr int kPageEdgeTop = 1;
+constexpr int kPageEdgeBottom = 2;
+constexpr int kPageEdgesAll = kPageEdgeTop | kPageEdgeBottom;
+
 /* The current scroll state (needed for saving/restoring the scroll position) */
 /* coordinates are in user space units (per page) */
 struct ScrollState {
@@ -142,13 +147,18 @@ struct DisplayModel : DocController {
     // into a rect of another and every hit-tested thing (selection, links,
     // annotations, search highlights) shifts by the trimmed margin.
     RectF PageDisplayBox(int pageNo) const;
+    // what the trims alone make of the page, before any edge the user expanded
+    // back is restored
+    RectF PageTrimmedBox(int pageNo, RectF media) const;
     // Smart margins can only be as good as the engine's content box, and on
-    // some documents that under-reports and clips real content. So any trimmed
-    // page can be expanded back to its full height individually, and the rest
-    // stay trimmed.
-    bool IsPageMarginTrimmed(int pageNo) const;
-    bool IsPageMarginExpanded(int pageNo) const;
-    void TogglePageMarginExpanded(int pageNo);
+    // some documents that under-reports and clips real content. So a trimmed
+    // edge can be given back individually, and the rest stay trimmed. Top and
+    // bottom are separate: the footer of one page and the header of the next
+    // are one gap on screen, and are opened together (see Canvas.cpp).
+    // Edges are in page space, as kPageEdgeTop | kPageEdgeBottom masks.
+    int PageMarginTrimmedEdges(int pageNo) const;
+    int PageMarginExpandedEdges(int pageNo) const;
+    void SetPageMarginExpanded(int pageNo, int edges, bool expanded);
     // device-space offset of the display box within the media box at this
     // zoom/rotation; zero unless smart margins trimmed something
     PointF PageCropOffset(int pageNo, float zoom) const;
@@ -157,8 +167,12 @@ struct DisplayModel : DocController {
     int GetRotation() const;
     float GetZoomReal(int pageNo) const;
     void Relayout(float zoomVirtual, int rotation);
-    // pages the user un-trimmed by hand (see PageDisplayBox)
-    Vec<int> marginExpandedPages;
+    // edges the user un-trimmed by hand (see PageDisplayBox)
+    struct MarginExpansion {
+        int pageNo = 0;
+        int edges = 0;
+    };
+    Vec<MarginExpansion> marginExpanded;
     // the smart-margin prefs the current layout was computed with; a tab
     // whose layout predates a toggle is relaid out when it is shown again
     bool layoutSmartMargins = false;

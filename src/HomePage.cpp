@@ -2083,6 +2083,18 @@ static void FillHomeRoundRectAlpha(HDC hdc, const Rect& r, int radius, COLORREF 
     gfx.FillPath(&br, &path);
 }
 
+// The round badge behind a card's pin. GDI's RoundRect stair-steps a circle
+// this small, which made the badge - and the pin in it - look low resolution.
+static void FillPinBadgeDisc(HDC hdc, const Rect& r, COLORREF col) {
+    FillHomeRoundRectAlpha(hdc, r, r.dy / 2, col, 255);
+}
+
+// The pin is drawn as an opaque square in the badge's color, so its corners
+// have to stay inside the disc: at 16/25 of the diameter they reach 0.45 of it.
+static int PinBadgeIconDy(int badgeDx) {
+    return badgeDx * 16 / 25;
+}
+
 static void DrawHomeViewButton(HDC hdc, HIMAGELIST himl, Rect r, TbIcon icon, bool selected) {
     if (selected) {
         Rect chip = r;
@@ -2617,9 +2629,9 @@ static void DrawTouchFileCardPath(MainWindow* win, HDC hdc, Str filePath, FileSt
         int badgeDx = DpiScale(hdc, 28);
         Rect badge{card.x + card.dx - badgeDx - DpiScale(hdc, 6), card.y + DpiScale(hdc, 6), badgeDx, badgeDx};
         COLORREF badgeBg = ThemeControlBackgroundColor();
-        FillHomeRoundRect(hdc, badge, badge.dy / 2, badgeBg);
+        FillPinBadgeDisc(hdc, badge, badgeBg);
         COLORREF pinCol = isPinned ? ThemeWindowLinkColor() : ThemeWindowDarkerTextColor();
-        int pinDy = DpiScale(hdc, 16);
+        int pinDy = PinBadgeIconDy(badgeDx);
         HIMAGELIST pinIml = GetTintedToolbarImageList(pinDy, pinCol, badgeBg);
         if (pinIml) {
             int px = badge.x + ((badge.dx - pinDy) / 2);
@@ -4345,9 +4357,9 @@ static void DrawTouchLibraryFolderCard(MainWindow* win, HDC hdc, Str folderPath,
     Rect badgeLink = badge.Intersect(clip);
     if (!badgeLink.IsEmpty()) {
         COLORREF badgeBg = ThemeControlBackgroundColor();
-        FillHomeRoundRect(hdc, badge, badge.dy / 2, badgeBg);
+        FillPinBadgeDisc(hdc, badge, badgeBg);
         COLORREF pinCol = isPinned ? ThemeWindowLinkColor() : ThemeWindowDarkerTextColor();
-        int pinDy = DpiScale(hdc, 16);
+        int pinDy = PinBadgeIconDy(badgeDx);
         HIMAGELIST pinIml = GetTintedToolbarImageList(pinDy, pinCol, badgeBg);
         if (pinIml) {
             ImageList_Draw(pinIml, (int)TbIcon::Pin, hdc, badge.x + ((badge.dx - pinDy) / 2),

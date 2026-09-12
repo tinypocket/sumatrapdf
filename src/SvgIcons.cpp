@@ -251,10 +251,9 @@ static const char* gIconHomeThumbnails =
 static const char* gIconPin =
     R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="1.6" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
   <rect x="0" y="0" width="24" height="24" stroke="none"></rect>
-  <path d="M15 4.5l4.5 4.5" />
-  <path d="M14.5 9.5l-5 5" />
-  <path d="M9 15l-4 4" />
-  <path d="M9.5 4l10.5 10.5l-5.5 0.5l-4 4l-1 -4.5l-4.5 -1l4 -4z" />
+  <path d="M15 4.5l-4 4l-4 1.5l-1.5 1.5l7 7l1.5 -1.5l1.5 -4l4 -4" />
+  <path d="M9 15l-4.5 4.5" />
+  <path d="M14.5 4l5.5 5.5" />
 </svg>)";
 
 // 4a uses a compact overflow menu here rather than a settings gear.
