@@ -7,6 +7,7 @@
 #include "base/Dpi.h"
 #include "base/DirScan.h"
 #include "base/File.h"
+#include "base/GdiPlusUtil.h"
 #include "base/GuessFileType.h"
 #include "base/UITask.h"
 #include "base/Win.h"
@@ -2012,10 +2013,13 @@ void HomePageOnCanvasMouseLeave() {
 }
 
 // A soft drop shadow, approximated by stacking a few rounded rects that step
-// from the page background toward a darker tone. GDI has no blur, and going
-// through GDI+ just for this would mean another surface per card.
+// from the page background toward a darker tone. GDI has no blur; stacked
+// fills are far cheaper than compositing a blurred surface per card.
 static void DrawHomeShadow(HDC hdc, const Rect& r, int radius, COLORREF pageBg) {
     constexpr int kLayers = 4;
+    // one GDI+ surface for all the layers, not one each
+    Gdiplus::Graphics gfx(hdc);
+    SetSmoothPixelAligned(gfx);
     for (int i = kLayers; i >= 1; i--) {
         int spread = DpiScale(hdc, i);
         Rect sr = r;
@@ -2024,12 +2028,7 @@ static void DrawHomeShadow(HDC hdc, const Rect& r, int radius, COLORREF pageBg) 
         // Each layer steps further from the background. AccentColor darkens a
         // light color and lightens a dark one, so the shadow reads on both.
         COLORREF col = AccentColor(pageBg, 5 * (kLayers - i + 1));
-        AutoDeleteBrush br = CreateSolidBrush(col);
-        AutoDeletePen pen = CreatePen(PS_SOLID, 1, col);
-        ScopedSelectObject selBr(hdc, br);
-        ScopedSelectObject selPen(hdc, pen);
-        int d = std::min((radius + spread) * 2, std::min(sr.dx, sr.dy));
-        RoundRect(hdc, sr.x, sr.y, sr.x + sr.dx, sr.y + sr.dy, d, d);
+        FillRoundRectAA(gfx, sr, radius + spread, col);
     }
 }
 
@@ -2041,15 +2040,9 @@ static COLORREF HomeTextColorOn(COLORREF bg) {
 // filled rounded rect, used for the home chrome (search field, view toggle,
 // the Open button). radius is in unscaled px
 static void FillHomeRoundRect(HDC hdc, const Rect& r, int radius, COLORREF col, COLORREF borderCol = kColorUnset) {
-    int d = DpiScale(hdc, radius) * 2;
-    d = std::min(d, std::min(r.dx, r.dy));
-    AutoDeleteBrush br = CreateSolidBrush(col);
     // a themed fill can be the same color as what's behind it (the search field
     // on a dark theme); those need the border to be visible at all
-    AutoDeletePen pen = CreatePen(PS_SOLID, 1, borderCol == kColorUnset ? col : borderCol);
-    ScopedSelectObject selBr(hdc, br);
-    ScopedSelectObject selPen(hdc, pen);
-    RoundRect(hdc, r.x, r.y, r.x + r.dx, r.y + r.dy, d, d);
+    FillRoundRectAA(hdc, r, DpiScale(hdc, radius), col, borderCol);
 }
 
 // Translucent rounded fill. GDI's RoundRect has no alpha, and the Library
@@ -2130,11 +2123,9 @@ static TempStr FileSizeForHomeListTemp(i64 size) {
 // dark page background
 constexpr COLORREF kHomeSelectionColor = RGB(0x4c, 0xa6, 0xff);
 
+// `radius` is RoundRect's corner diameter, which is what the callers pass
 static void DrawHomeSelectionOutline(HDC hdc, const Rect& r, int radius) {
-    int penDx = DpiScale(hdc, 2);
-    ScopedSelectObject pen(hdc, CreatePen(PS_SOLID, penDx, kHomeSelectionColor), true);
-    ScopedSelectObject brush(hdc, GetStockBrush(NULL_BRUSH));
-    RoundRect(hdc, r.x, r.y, r.x + r.dx, r.y + r.dy, radius, radius);
+    StrokeRoundRectAA(hdc, r, radius / 2, kHomeSelectionColor, DpiScale(hdc, 2));
 }
 
 // Give the file name the width it needs and put the directory path in what's
@@ -2272,6 +2263,8 @@ static void DrawHomePageLayout(HomePageLayout& l) {
     HFONT fontText = HdcGetUiFont(hdc, kFontSizeLabel, kFontWeightStrong);
 
     AutoDeletePen penThumbBorder(CreatePen(PS_SOLID, kThumbsBorderDx, ThemeEdgeColor()));
+    // a thumbnail card's corner radius (it was a fixed 5px, so it shrank on scaled displays)
+    int thumbCardRadius = DpiScale(hdc, 5);
     color = ThemeWindowLinkColor();
     AutoDeletePen penLinkLine(CreatePen(PS_SOLID, 1, color));
 
@@ -2347,10 +2340,7 @@ static void DrawHomePageLayout(HomePageLayout& l) {
             thumb.szThumb = thumbImg->GetSize();
             // the card is a surface and the page sits on it, inset, as in the
             // redesign - rather than the image filling the card edge to edge
-            AutoDeleteBrush brCard = CreateSolidBrush(ThemeControlBackgroundColor());
-            ScopedSelectObject selCard(hdc, brCard);
-            RoundRect(hdc, page.x, page.y, page.x + page.dx, page.y + page.dy, 10, 10);
-            SelectObject(hdc, GetStockBrush(NULL_BRUSH));
+            FillRoundRectAA(hdc, page, thumbCardRadius, ThemeControlBackgroundColor());
 
             int inset = DpiScale(hdc, 10);
             Rect innerBox = page;
@@ -2360,12 +2350,11 @@ static void DrawHomePageLayout(HomePageLayout& l) {
         }
         if (!thumbImg) {
             // no thumbnail yet: the card is still a surface, not a hole
-            AutoDeleteBrush brCard = CreateSolidBrush(ThemeControlBackgroundColor());
-            ScopedSelectObject selCard(hdc, brCard);
-            RoundRect(hdc, page.x, page.y, page.x + page.dx, page.y + page.dy, 10, 10);
-            SelectObject(hdc, GetStockBrush(NULL_BRUSH));
+            FillRoundRectAA(hdc, page, thumbCardRadius, ThemeControlBackgroundColor(), ThemeEdgeColor(),
+                            kThumbsBorderDx);
         } else {
-            RoundRect(hdc, page.x, page.y, page.x + page.dx, page.y + page.dy, 10, 10);
+            // the outline goes on over the thumbnail
+            StrokeRoundRectAA(hdc, page, thumbCardRadius, ThemeEdgeColor(), kThumbsBorderDx);
         }
 
         const Rect& rect = thumb.rcText;

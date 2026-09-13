@@ -1261,7 +1261,9 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
     ICoreWebView2Controller2* controller2 = nullptr;
     HRESULT bgHr = controller->QueryInterface(IID_PPV_ARGS(&controller2));
     if (SUCCEEDED(bgHr) && controller2) {
-        COREWEBVIEW2_COLOR bg = {0, 0, 0, 0};
+        // {A, R, G, B}
+        COREWEBVIEW2_COLOR bg =
+            opaqueBackground ? COREWEBVIEW2_COLOR{255, 255, 255, 255} : COREWEBVIEW2_COLOR{0, 0, 0, 0};
         controller2->put_DefaultBackgroundColor(bg);
         controller2->Release();
     }
@@ -2011,6 +2013,11 @@ static Microsoft::WRL::ComPtr<CoreWebView2EnvironmentOptions> CreateOfflineEnvir
         L"--disable-features=AutofillServerCommunication,MediaRouter,OptimizationHints,Translate,"
         L"CertificateTransparencyComponentUpdater "
         L"--metrics-recording-only "
+#if defined(DEBUG)
+        // debug builds: a DevTools port on localhost, to look inside a page
+        // that misbehaves in the in-app browser from outside the app
+        L"--remote-debugging-port=9223 "
+#endif
         L"--no-pings");
     return options;
 }

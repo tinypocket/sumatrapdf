@@ -26,6 +26,7 @@
 #include "EngineAll.h"
 #include "MainWindow.h"
 #include "SumatraPDF.h"
+#include "Notifications.h"
 #include "Rail.h"
 #include "Theme.h"
 #include "Translations.h"
@@ -429,6 +430,12 @@ constexpr float kTbProgCreepTo = 0.85f;
 constexpr UINT_PTR kTbProgTimerId = 71;
 // hover cross-fade / press sink, only while ElaborateAnimations is on
 constexpr UINT_PTR kTbHoverTimerId = 72;
+// A page can take seconds before its server even answers, and the progress
+// bar under the address only speaks for the tab on screen - so a loading tab
+// also carries a spinner in front of its label, as a browser's tabs do.
+constexpr UINT_PTR kTbSpinTimerId = 73;
+constexpr int kTbSpinnerDx = 14;
+constexpr double kTbSpinnerTurnMs = 900.0;
 // how deep a pressed chrome button sinks, matching the top bar
 constexpr int kTbPressInset = 2;
 
@@ -793,6 +800,42 @@ static TempStr TbUrlFileNameTemp(Str url) {
     return name ? str::DupTemp(name) : TempStr{};
 }
 
+// Sites that guard their downloads often keep the file name in the query -
+// "/?download_protected_acf=August-31st-Doxastika.pdf" - and the path, "/",
+// has none, so the download was saved as "document.pdf". The first query value
+// that names a file with the expected extension, or an empty string.
+static TempStr TbQueryFileNameTemp(Str url, Str ext) {
+    int q = str::IndexOfChar(url, '?');
+    if (q < 0 || !ext) {
+        return {};
+    }
+    Str rest = Str(url.s + q + 1, url.len - q - 1);
+    int hash = str::IndexOfChar(rest, '#');
+    if (hash >= 0) {
+        rest = Str(rest.s, hash);
+    }
+    while (rest.len > 0) {
+        int amp = str::IndexOfChar(rest, '&');
+        Str pair = amp >= 0 ? Str(rest.s, amp) : rest;
+        rest = amp >= 0 ? Str(rest.s + amp + 1, rest.len - amp - 1) : Str();
+        int eq = str::IndexOfChar(pair, '=');
+        if (eq < 0) {
+            continue;
+        }
+        TempStr value = str::DupTemp(Str(pair.s + eq + 1, pair.len - eq - 1));
+        str::TransCharsInPlace(value, "+", " ");
+        url::DecodeInPlace(value);
+        value = str::DupTemp(value.s); // decoding shortens it in place
+        // a value can be a path of its own; keep its last segment
+        int slash = std::max(str::LastIndexOfChar(value, '/'), str::LastIndexOfChar(value, '\\'));
+        Str name = slash >= 0 ? Str(value.s + slash + 1, value.len - slash - 1) : Str(value);
+        if (name.len > ext.len && str::EndsWithI(name, ext)) {
+            return str::DupTemp(name);
+        }
+    }
+    return {};
+}
+
 // The user's Downloads folder; documents opened from the browser are saved
 // there (like a normal browser) instead of a temp file, so they persist and
 // have a real name.
@@ -852,8 +895,44 @@ struct TbDocDownload {
 
 static TbTab* TbActiveTab(TouchBrowser* tb);
 
+// A download that should have been a document but is a web page: a members-
+// only link whose session did not come through, answered with the site's
+// sign-in page. Opened, it showed as a broken "document.pdf" of the site's own
+// markup. No document format starts out as HTML, so the first bytes tell.
+static bool TbDownloadIsWebPage(Str path) {
+    u8 buf[1024];
+    int n = file::ReadN(path, buf, sizeof(buf));
+    if (n <= 0) {
+        return false;
+    }
+    Str start((const char*)buf, n);
+    return str::ContainsI(start, StrL("<!doctype html")) || str::ContainsI(start, StrL("<html"));
+}
+
+// Where a note about the browser is seen: over the page while the browser is
+// showing (the frame's own corner is the title bar), else over the document.
+static HWND TbNotificationParent(MainWindow* win) {
+    if (win->touchView == TouchView::Web && win->touchBrowser) {
+        TbTab* act = TbActiveTab(win->touchBrowser);
+        if (act && act->webView && act->webView->hwnd) {
+            return act->webView->hwnd;
+        }
+    }
+    return win->hwndCanvas;
+}
+
 static void TbDocDownloadFinish(TbDocDownload* d) {
-    if (file::Exists(d->destPath)) {
+    logf("tb: download finished '%s' -> '%s' exists=%d\n", d->url, d->destPath, (int)file::Exists(d->destPath));
+    if (file::Exists(d->destPath) && TbDownloadIsWebPage(d->destPath)) {
+        logf("tb: the download is a web page, not a document; not opening it\n");
+        file::Delete(d->destPath);
+        if (IsMainWindowValid(d->win)) {
+            ShowWarningNotification(TbNotificationParent(d->win),
+                                    StrL("The site sent a web page instead of the document. You may need to sign in "
+                                         "to the site again."),
+                                    6000);
+        }
+    } else if (file::Exists(d->destPath)) {
         TbRecordDownload(d->destPath);
     }
     if (IsMainWindowValid(d->win) && file::Exists(d->destPath)) {
@@ -883,6 +962,12 @@ static void TbDocDownloadAsync(TbDocDownload* d) {
 
 // UI thread, with the webview's cookies for the URL in hand
 static void TbDocDownloadWithCookies(TbDocDownload* d, Str cookieHeader) {
+    // how many, never what: the values are the user's sessions
+    int nCookies = 0;
+    for (int i = 0; i < len(cookieHeader); i++) {
+        nCookies += cookieHeader.s[i] == '=' ? 1 : 0;
+    }
+    logf("tb: downloading with %d cookies from the webview\n", nCookies);
     d->cookieHeader = str::Dup(cookieHeader);
     RunAsync(MkFunc0<TbDocDownload>(TbDocDownloadAsync, d), "TbDocDownloadAsync");
 }
@@ -892,6 +977,7 @@ static void TbDocDownloadWithCookies(TbDocDownload* d, Str cookieHeader) {
 // already says); a content-type detected document usually has no extension in
 // its URL at all, and SumatraPDF picks its engine from the file name.
 static void TbStartDocDownload(MainWindow* win, Str url, Str ext) {
+    logf("tb: document download '%s' ext='%s'\n", url, ext);
     if (!url) {
         return;
     }
@@ -911,6 +997,12 @@ static void TbStartDocDownload(MainWindow* win, Str url, Str ext) {
     d->url = str::Dup(url);
     TempStr dir = TbDownloadsDirTemp();
     TempStr fileName = TbUrlFileNameTemp(url);
+    if (ext && !str::EndsWithI(fileName, ext)) {
+        TempStr fromQuery = TbQueryFileNameTemp(url, ext);
+        if (len(fromQuery) > 0) {
+            fileName = fromQuery;
+        }
+    }
     if (ext && !str::EndsWithI(fileName, ext)) {
         Str base = str::IsEmptyOrWhiteSpace(fileName) ? StrL("document") : Str(fileName);
         fileName = str::JoinTemp(base, ext);
@@ -980,6 +1072,7 @@ static bool TbIsActiveTab(TbTab* t) {
 // webview has already declined to handle - we turn those into browser tabs.
 static bool TbNavigationStarting(void* ctx, Str url, bool newWindow) {
     auto* tab = (TbTab*)ctx;
+    logf("tb: navigation starting '%s' newWindow=%d\n", url, (int)newWindow);
     TouchBrowser* tb = tab->tb;
     Str ext;
     if (TouchBrowserUrlIsDoc(url, &ext)) {
@@ -1017,6 +1110,7 @@ static void TbUpdateNavButtons(TouchBrowser* tb) {
 
 static void TbNavigationCompleted(void* ctx, Str url, bool /*success*/) {
     auto* tab = (TbTab*)ctx;
+    logf("tb: navigation completed '%s'\n", url);
     str::ReplaceWithCopy(&tab->url, url);
     // both success and failure land here - including a navigation WebView2
     // cancelled - so the progress bar always gets to finish
@@ -1078,15 +1172,28 @@ static void TbDocTakeoverNow(TbDocTakeoverReq* req) {
         if (!sameAsLast) {
             str::ReplaceWithCopy(&tab->lastTakeoverUrl, url);
             tab->lastTakeoverMs = now;
-            TbStartDocDownload(win, url, ext);
             // ...and get out of Edge's viewer, back to the page the link was on
             WebviewWnd* wv = tab->webView;
-            if (wv) {
-                if (wv->CanGoBack()) {
-                    wv->GoBack();
-                } else {
-                    wv->Navigate(TouchBrowserHomeUrl());
-                }
+            TouchBrowser* tb = win->touchBrowser;
+            bool goBack = wv && wv->CanGoBack();
+            // A link with target=_blank opened this tab just for the document:
+            // there is no page to go back to, and sending it to the home page
+            // left a stray Google tab. It is closed instead - but only after
+            // the tab the link was on is back in front, because the download
+            // takes the site's cookies from the active tab's webview, and the
+            // webview of a tab being closed never answers.
+            bool closeTab = !goBack && len(tb->tabs) > 1;
+            if (closeTab) {
+                int idx = tb->tabs.Find(tab);
+                TbActivateTab(tb, idx > 0 ? idx - 1 : idx + 1);
+            }
+            TbStartDocDownload(win, url, ext);
+            if (goBack) {
+                wv->GoBack();
+            } else if (closeTab) {
+                TbCloseTab(tab);
+            } else if (wv) {
+                wv->Navigate(TouchBrowserHomeUrl());
             }
         }
         TbRelayoutChrome(win->touchBrowser);
@@ -1098,6 +1205,7 @@ static void TbDocTakeoverNow(TbDocTakeoverReq* req) {
 
 static void TbMainDocumentResponse(void* ctx, Str url, Str contentType) {
     auto* tab = (TbTab*)ctx;
+    logf("tb: main document '%s' content-type '%s'\n", url, contentType);
     FileType ft = TouchBrowserFileTypeFromContentType(contentType);
     if (ft == FileType::Unknown || !TouchBrowserFileTypeIsDownloadableDoc(ft)) {
         return; // ordinary web content: keep browsing
@@ -2534,6 +2642,10 @@ struct TbChromeWnd : Wnd {
     void ProgressReset();
     void SyncProgressToActiveTab();
     void OnProgTick();
+    // runs the spinner's timer while any tab is loading
+    void UpdateSpinner();
+    void OnSpinTick();
+    void DrawSpinner(HDC hdc, const Rect& box);
 
     TouchBrowser* tb = nullptr;
     HWND hwndUrl = nullptr;
@@ -2561,6 +2673,7 @@ struct TbChromeWnd : Wnd {
     TbHit pressed;
 
     AnimTimer progTimer;
+    AnimTimer spinTimer;
     AnimVal progVal;  // 0..1 of the bar's width
     AnimVal progFade; // 1 while loading, eases to 0 after the bar hits 100%
     TbProgState progState = TbProgState::Idle;
@@ -2672,6 +2785,7 @@ TbChromeWnd::~TbChromeWnd() {
     // before ~Wnd tears the window down, so no timer outlives the object
     progTimer.Stop();
     hoverTimer.Stop();
+    spinTimer.Stop();
     delete tooltip;
     if (urlBrush) {
         DeleteObject(urlBrush);
@@ -2705,6 +2819,7 @@ bool TbChromeWnd::Create(TouchBrowser* browser) {
     SetWindowSubclass(hwndUrl, TbUrlEditProc, NextSubclassId(), (DWORD_PTR)tb);
     progTimer.Init(hwnd, kTbProgTimerId);
     hoverTimer.Init(hwnd, kTbHoverTimerId);
+    spinTimer.Init(hwnd, kTbSpinTimerId);
     return true;
 }
 
@@ -2901,6 +3016,51 @@ void TbChromeWnd::OnProgTick() {
     if (!running) {
         progTimer.Stop();
     }
+}
+
+static bool TbAnyTabLoading(TouchBrowser* tb) {
+    for (TbTab* t : tb->tabs) {
+        if (t->loading) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void TbChromeWnd::UpdateSpinner() {
+    // with animations off the spinner is drawn, but still
+    if (TbAnyTabLoading(tb) && AnimEnabled()) {
+        spinTimer.Start();
+    } else {
+        spinTimer.Stop();
+    }
+    HwndInvalidateRect(hwnd, tabsRow, false);
+}
+
+void TbChromeWnd::OnSpinTick() {
+    if (!TbAnyTabLoading(tb)) {
+        spinTimer.Stop();
+    }
+    HwndInvalidateRect(hwnd, tabsRow, false);
+}
+
+// a faint ring with a quarter of it in the accent colour, going round
+void TbChromeWnd::DrawSpinner(HDC hdc, const Rect& box) {
+    Gdiplus::Graphics gfx(hdc);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    float w = (float)std::max(2, DpiScale(hwnd, 2));
+    // the pen straddles the circle, so it runs half a pen width inside the box
+    Gdiplus::RectF rc((float)box.x + w / 2, (float)box.y + w / 2, (float)box.dx - w, (float)box.dy - w);
+    Gdiplus::Pen track(GdiRgbFromCOLORREF(ThemeEdgeColor()), w);
+    gfx.DrawEllipse(&track, rc);
+    float start = 0.0f;
+    if (AnimEnabled()) {
+        start = (float)(fmod(AnimNowMs(), kTbSpinnerTurnMs) / kTbSpinnerTurnMs * 360.0);
+    }
+    Gdiplus::Pen arc(GdiRgbFromCOLORREF(ThemeWindowLinkColor()), w);
+    arc.SetStartCap(Gdiplus::LineCapRound);
+    arc.SetEndCap(Gdiplus::LineCapRound);
+    gfx.DrawArc(&arc, rc, start, 90.0f);
 }
 
 // how tall the chrome wants to be: the favorites bar only exists when there is
@@ -3134,7 +3294,13 @@ void TbChromeWnd::Draw(HDC hdc) {
             TbFillTab(hdc, fillR, radius, bg, edge);
 
             Rect close = tabCloseRects[i];
-            Rect label{r.x + padLeft, r.y, std::max(0, close.x - innerGap - (r.x + padLeft)), r.dy};
+            int labelX = r.x + padLeft;
+            if (tb->tabs[i]->loading) {
+                int sd = DpiScale(hwnd, kTbSpinnerDx);
+                DrawSpinner(hdc, Rect{labelX, r.y + (r.dy - sd) / 2, sd, sd});
+                labelX += sd + innerGap;
+            }
+            Rect label{labelX, r.y, std::max(0, close.x - innerGap - labelX), r.dy};
             SetTextColor(hdc, text);
             HdcDrawText(hdc, TbTabLabel(tb->tabs[i]), label,
                         DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
@@ -3376,6 +3542,10 @@ LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         OnProgTick();
         return 0;
     }
+    if (msg == WM_TIMER && wp == kTbSpinTimerId) {
+        OnSpinTick();
+        return 0;
+    }
     if (msg == WM_SIZE) {
         EnsureLayout();
         HwndInvalidate(hw, false);
@@ -3501,6 +3671,10 @@ static void TbSyncUrlBar(TouchBrowser* tb) {
 static void TbSetTabLoading(TbTab* t, bool loading) {
     t->loading = loading;
     TbChromeWnd* chrome = t->tb ? t->tb->chrome : nullptr;
+    if (chrome) {
+        // every tab shows its own spinner, background ones included
+        chrome->UpdateSpinner();
+    }
     if (!chrome || !TbIsActiveTab(t)) {
         return; // a background tab never writes to the nav row
     }
@@ -3603,6 +3777,7 @@ static WebviewWnd* TbCreateWebView(TbTab* t) {
     wv->dataDir = str::Dup(GetWebViewDataDirTemp());
     wv->enableAutofill = true;
     wv->enableBrowserChrome = true;
+    wv->opaqueBackground = true;
     wv->events.ctx = t;
     wv->events.navigationStarting = TbNavigationStarting;
     wv->events.navigationCompleted = TbNavigationCompleted;
@@ -3653,6 +3828,7 @@ struct TbRebuildReq {
 };
 
 static void TbRebuildNow(TbRebuildReq* req) {
+    logf("tb: rebuilding the webviews\n");
     MainWindow* win = req->win;
     delete req;
     if (!IsMainWindowValid(win) || !win->touchBrowser) {
@@ -3680,6 +3856,7 @@ static void TbRebuildNow(TbRebuildReq* req) {
 }
 
 static bool TbProcessFailed(void* ctx, WebViewProcessFailure kind) {
+    logf("tb: WebView2 process failed, kind %d\n", (int)kind);
     auto* tab = (TbTab*)ctx;
     TouchBrowser* tb = tab->tb;
     if (kind == WebViewProcessFailure::BrowserExited && !tb->rebuildPending) {
@@ -3758,6 +3935,7 @@ static void TbOpenNewTabNow(TbNewTabReq* req) {
 // for re-entrancy trouble, so target=_blank links open their tab from the
 // message loop instead
 static void TbRequestNewTab(MainWindow* win, Str url) {
+    logf("tb: new tab requested '%s'\n", url);
     auto* req = new TbNewTabReq();
     req->win = win;
     req->url = str::Dup(url);
@@ -3786,6 +3964,7 @@ static TouchBrowser* CreateTouchBrowser(MainWindow* win) {
 }
 
 static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
+    logf("tb: browser windows %s\n", show ? StrL("shown") : StrL("hidden"));
     if (!show) {
         // the popups are top-level windows, so leaving the browser would
         // otherwise leave them floating over the document view

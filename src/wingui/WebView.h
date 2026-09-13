@@ -197,6 +197,11 @@ struct WebviewWnd : Wnd {
     // chrome (default context menus). Off for the manual / AI-chat webviews.
     bool enableAutofill = false;
     bool enableBrowserChrome = false;
+    // Paint white behind the page, as a browser does, instead of the default
+    // transparent background. A page that draws no background of its own - an
+    // empty page a site sent back after a sign-in - otherwise showed whatever
+    // was on screen behind the control: the Library, in the in-app browser.
+    bool opaqueBackground = false;
     // when false, WebView2 won't claim external (file) drops, so they fall
     // through to the host window's drop target (e.g. to open the file)
     bool allowExternalDrop = true;

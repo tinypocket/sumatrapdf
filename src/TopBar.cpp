@@ -6,6 +6,7 @@
 #include "base/File.h"
 #include "base/ScopedWin.h"
 #include "base/Win.h"
+#include "base/GdiPlusUtil.h"
 
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
@@ -967,13 +968,7 @@ static bool GroupHasTrack(int g) {
 }
 
 static void FillTrack(HDC hdc, const Rect& r, int radius, COLORREF col, COLORREF borderCol = kColorUnset) {
-    int d = radius * 2;
-    d = std::min(d, std::min(r.dx, r.dy));
-    AutoDeleteBrush br = CreateSolidBrush(col);
-    AutoDeletePen pen = CreatePen(PS_SOLID, 1, borderCol == kColorUnset ? col : borderCol);
-    ScopedSelectObject selBr(hdc, br);
-    ScopedSelectObject selPen(hdc, pen);
-    RoundRect(hdc, r.x, r.y, r.x + r.dx, r.y + r.dy, d, d);
+    FillRoundRectAA(hdc, r, radius, col, borderCol);
 }
 
 TouchPreviewWnd::TouchPreviewWnd() {
@@ -1373,11 +1368,7 @@ void TouchBookmarkConfirmWnd::Hide() {
 void TouchBookmarkConfirmWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
     HdcFillRect(hdc, ToRect(ps->rcPaint), ThemeControlBackgroundColor());
     Rect rc = HwndClientRect(hwnd);
-    AutoDeletePen border = CreatePen(PS_SOLID, 1, ThemeEdgeColor());
-    ScopedSelectObject selPen(hdc, border);
-    SelectObject(hdc, GetStockBrush(NULL_BRUSH));
-    int radius = DpiScale(hwnd, 10);
-    RoundRect(hdc, 0, 0, rc.dx, rc.dy, radius * 2, radius * 2);
+    StrokeRoundRectAA(hdc, Rect{0, 0, rc.dx, rc.dy}, DpiScale(hwnd, 10), ThemeEdgeColor(), 1);
 
     Rect prompt{DpiScale(hwnd, 14), DpiScale(hwnd, 12), rc.dx - DpiScale(hwnd, 28), DpiScale(hwnd, 34)};
     SetBkMode(hdc, TRANSPARENT);

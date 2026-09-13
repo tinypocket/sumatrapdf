@@ -8,6 +8,7 @@
 #include "base/File.h"
 #include "base/UITask.h"
 #include "base/Win.h"
+#include "base/GdiPlusUtil.h"
 
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
@@ -1341,14 +1342,9 @@ static void DrawTocHierarchyGuides(HDC hdc, HWND hwnd, const Rect& row, int dept
 // page label, and multi-match "current page" highlight (issue #4642).
 static void FillTocPill(HDC hdc, const Rect& r, int radius, COLORREF col, COLORREF borderCol = kColorUnset,
                         int borderWidth = 1) {
-    int d = std::min(radius * 2, std::min(r.dx, r.dy));
-    AutoDeleteBrush br = CreateSolidBrush(col);
     // the filter field is the same color as the panel, so only a border makes
     // it readable as a field
-    AutoDeletePen pen = CreatePen(PS_SOLID, borderWidth, borderCol == kColorUnset ? col : borderCol);
-    ScopedSelectObject selBr(hdc, br);
-    ScopedSelectObject selPen(hdc, pen);
-    RoundRect(hdc, r.x, r.y, r.x + r.dx, r.y + r.dy, d, d);
+    FillRoundRectAA(hdc, r, radius, col, borderCol, borderWidth);
 }
 
 static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win) {
@@ -2545,9 +2541,8 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
         for (int i = first; i < last; i++) {
             Rect card = TouchThumbnailRect(win, i);
             bool isCurrent = i + 1 == current;
-            COLORREF border = isCurrent ? ThemeWindowLinkColor() : RGB(255, 255, 255);
-            FillTocPill(hdc, card, DpiScale(win->hwndTocBox, 6), RGB(255, 255, 255), border,
-                        isCurrent ? DpiScale(win->hwndTocBox, 2) : 1);
+            int cardRadius = DpiScale(win->hwndTocBox, 6);
+            FillTocPill(hdc, card, cardRadius, RGB(255, 255, 255));
             if (dm) {
                 Pixmap* bmp = FindTouchThumbnail(win, i + 1);
                 if (bmp) {
@@ -2558,6 +2553,11 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
                 } else {
                     RequestTouchThumbnailPage(win, i + 1);
                 }
+            }
+            // after the page image, whose square corners would otherwise paint
+            // over the border just where it curves
+            if (isCurrent) {
+                StrokeRoundRectAA(hdc, card, cardRadius, ThemeWindowLinkColor(), DpiScale(win->hwndTocBox, 2));
             }
             Rect label{card.x, card.y + card.dy, card.dx, DpiScale(win->hwndTocBox, 24)};
             SetTextColor(hdc, (i + 1 == current) ? ThemeWindowLinkColor() : ThemeWindowTextColor());

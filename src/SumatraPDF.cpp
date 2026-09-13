@@ -3966,6 +3966,7 @@ void LoadModelIntoTab(WindowTab* tab) {
             // the about tab shows the Library now; Recent is one of its sidebar
             // rows instead of a view of its own
             win->touchView = TouchView::Library;
+            logf("tab switch: the Library tab is current, view -> Library\n");
             win->uiState.tocVisible = false;
             win->uiState.favVisible = false;
         } else if (!tab->IsNonDocumentTab()) {
@@ -6430,6 +6431,10 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     // Same for the web view: the canvas would otherwise paint the Home page over
     // the WebView2 control that covers the same content area.
     bool webAsTab = win->touchView == TouchView::Web && win->touchBrowser;
+    if (webAsTab == HwndIsVisible(win->hwndCanvas)) {
+        logf("layout: canvas %s (view %d)\n", webAsTab ? StrL("hidden under the browser") : StrL("shown"),
+             (int)win->touchView);
+    }
     HwndSetVisible(win->hwndCanvas, !favAsTab && !webAsTab);
 
     if (favAsTab) {

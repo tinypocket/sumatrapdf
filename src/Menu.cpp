@@ -8,6 +8,7 @@
 #include "base/BitManip.h"
 #include "base/Dpi.h"
 #include "base/Win.h"
+#include "base/GdiPlusUtil.h"
 
 #include "wingui/UIModels.h"
 
@@ -2533,10 +2534,8 @@ void MenuCustomDrawItem(HWND hwnd, DRAWITEMSTRUCT* dis) {
 
     auto* brBg = CreateSolidBrush(bgCol);
     HdcFillRect(hdc, ToRect(rc), brBg);
-    auto* brTxt = CreateSolidBrush(txtCol);
 
     AutoDeleteObject deleteBgBrush(brBg);
-    AutoDeleteObject deleteTxtBrush(brTxt);
 
     if (isSeparator) {
         ReportIf(modi->text);
@@ -2586,20 +2585,16 @@ void MenuCustomDrawItem(HWND hwnd, DRAWITEMSTRUCT* dis) {
             rc.right = rc.left + dx;
             rc.top = rc.top + (rcDy / 2) - (dx / 2);
             rc.bottom = rc.top + dx;
-            ScopedSelectObject restoreBrush(hdc, brTxt);
-            Ellipse(hdc, rc.left, rc.top, rc.right, rc.bottom);
+            FillEllipseAA(hdc, ToRect(rc), txtCol);
             return;
         }
 
         // draw a checkmark
-        AutoDeletePen pen(CreatePen(PS_SOLID, 2, txtCol));
-        ScopedSelectPen restorePen(hdc, pen);
-        POINT points[3];
         int offX = DpiScale(hwnd, 6); // 6 is chosen experimentally
-        points[0] = {rc.left + offX, rc.top + (rcDy / 2)};
-        points[1] = {rc.left + (cxCheckMark / 2), rc.bottom - (padY * 3)};
-        points[2] = {rc.left + cxCheckMark - offX, rc.top + (padY * 3)};
-        Polyline(hdc, points, dimof(points));
+        Point points[3] = {{rc.left + offX, rc.top + (rcDy / 2)},
+                           {rc.left + (cxCheckMark / 2), rc.bottom - (padY * 3)},
+                           {rc.left + cxCheckMark - offX, rc.top + (padY * 3)}};
+        DrawPolylineAA(hdc, points, 3, txtCol, 2);
     }
 }
 

@@ -173,7 +173,16 @@ bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbPro
     }
 
     headersW = len(extraHeaders) > 0 ? CWStrTemp(extraHeaders) : nullptr;
-    hReq = InternetOpenUrlW(hInet, url, headersW, headersW ? (DWORD)-1L : 0, 0, 0);
+    {
+        // The caller's headers can carry the cookies of a signed-in browser
+        // session (the in-app browser's downloads). WinINet adds cookies from
+        // its own store to every request unless told not to, and those replaced
+        // the caller's: a members-only download arrived signed out and came back
+        // as the site's sign-in page. NO_COOKIES keeps the caller's header as
+        // the only cookies sent, and keeps the site's cookies out of the store.
+        DWORD reqFlags = headersW ? INTERNET_FLAG_NO_COOKIES : 0;
+        hReq = InternetOpenUrlW(hInet, url, headersW, headersW ? (DWORD)-1L : 0, reqFlags, 0);
+    }
     if (!hReq) {
         goto Exit;
     }

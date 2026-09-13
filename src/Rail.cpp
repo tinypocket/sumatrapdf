@@ -5,6 +5,7 @@
 #include "base/Dpi.h"
 #include "base/ScopedWin.h"
 #include "base/Win.h"
+#include "base/GdiPlusUtil.h"
 
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
@@ -320,6 +321,7 @@ void SetTouchView(MainWindow* win, TouchView view) {
     if (!win || !IsTouchChrome(win)) {
         return;
     }
+    logf("touch view %d -> %d\n", (int)win->touchView, (int)view);
     // Home folded into the Library (its "Recent" sidebar row); nothing should
     // navigate to it any more
     if (view == TouchView::Home) {
@@ -512,11 +514,7 @@ int RailWnd::ItemFromPoint(Point pt) {
 }
 
 static void FillRoundedRect(HDC hdc, const Rect& r, int radius, COLORREF col) {
-    AutoDeleteBrush br = CreateSolidBrush(col);
-    AutoDeletePen pen = CreatePen(PS_SOLID, 1, col);
-    ScopedSelectObject selBr(hdc, br);
-    ScopedSelectObject selPen(hdc, pen);
-    RoundRect(hdc, r.x, r.y, r.x + r.dx, r.y + r.dy, radius * 2, radius * 2);
+    FillRoundRectAA(hdc, r, radius, col);
 }
 
 SidebarToggleWnd::SidebarToggleWnd() {
@@ -546,22 +544,15 @@ void SidebarToggleWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
     Rect surface = rc;
     surface.dy -= DpiScale(hwnd, 2);
     COLORREF bg = hot ? AccentColor(ThemeWindowControlBackgroundColor(), 8) : ThemeWindowControlBackgroundColor();
-    AutoDeleteBrush brush = CreateSolidBrush(bg);
-    AutoDeletePen pen = CreatePen(PS_SOLID, 1, ThemeEdgeColor());
-    ScopedSelectObject selectBrush(hdc, brush);
-    ScopedSelectObject selectPen(hdc, pen);
-    RoundRect(hdc, surface.x, surface.y, surface.x + surface.dx, surface.y + surface.dy, radius * 2, radius * 2);
+    FillRoundRectAA(hdc, surface, radius, bg, ThemeEdgeColor());
     int chevronDx = DpiScale(hwnd, 3);
     int chevronDy = DpiScale(hwnd, 5);
     int cx = surface.x + surface.dx / 2;
     int cy = surface.y + surface.dy / 2;
     int outerX = cx + chevronDx;
     int innerX = cx - chevronDx;
-    AutoDeletePen chevronPen = CreatePen(PS_SOLID, DpiScale(hwnd, 2), ThemeWindowDarkerTextColor());
-    ScopedSelectObject selectChevronPen(hdc, chevronPen);
-    MoveToEx(hdc, outerX, cy - chevronDy, nullptr);
-    LineTo(hdc, innerX, cy);
-    LineTo(hdc, outerX, cy + chevronDy);
+    Point chevron[3] = {{outerX, cy - chevronDy}, {innerX, cy}, {outerX, cy + chevronDy}};
+    DrawPolylineAA(hdc, chevron, 3, ThemeWindowDarkerTextColor(), DpiScale(hwnd, 2));
 }
 
 LRESULT SidebarToggleWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
