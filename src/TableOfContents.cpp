@@ -80,12 +80,15 @@ static int TouchSearchResultRowDy() {
     return std::max(TouchSidebarRowDy() + 18, 68);
 }
 
-// the row of suggested words under the search field, while there are any
+// the rows of suggested words under the search field, while there are any:
+// up to two rows of chips, kSuggestRowDy for the first and a chip and a gap
+// more for the second
 constexpr int kSuggestRowDy = 44;
+constexpr int kSuggestChipDy = 34;
+constexpr int kSuggestChipGap = 8;
+constexpr int kSuggestRows = 2;
 
-static int TouchSuggestRowDy(MainWindow* win) {
-    return len(win->touchSuggestions) > 0 ? DpiScale(win->hwndTocBox, kSuggestRowDy) : 0;
-}
+static int TouchSuggestRowDy(MainWindow* win);
 
 static int TouchSearchResultsY(MainWindow* win) {
     return DpiScale(win->hwndTocBox, kPanelHeaderDy + kPanelFilterDy + 64) + TouchSuggestRowDy(win) -
@@ -2089,6 +2092,10 @@ static Pixmap* FindTouchThumbnail(MainWindow* win, int pageNo) {
     return nullptr;
 }
 
+// the page image sits this far inside its card, so a sliver of the card's
+// paper frames it
+constexpr int kTouchThumbInset = 2;
+
 struct TouchThumbRender {
     MainWindow* win = nullptr;
     EngineBase* engine = nullptr; // AddRef'd for the render
@@ -2169,6 +2176,10 @@ static void PumpTouchThumbnails(MainWindow* win) {
         return;
     }
     Rect card = TouchThumbnailRect(win, pageNo - 1);
+    // the size it is drawn at, inside the card's paper edge, so the paint can
+    // copy it rather than scale it
+    int inset = DpiScale(win->hwndTocBox, kTouchThumbInset);
+    card.Inflate(-inset, -inset);
     if (card.dx <= 0 || card.dy <= 0) {
         return;
     }
@@ -2504,7 +2515,8 @@ struct DocWordIndex {
 
 constexpr int kMinSuggestWordLen = 3;
 constexpr int kMinSuggestPrefixLen = 2;
-constexpr int kMaxSuggestions = 6;
+// enough to fill the two rows; the ones that don't fit are dropped
+constexpr int kMaxSuggestions = 12;
 
 struct TouchWordIndexBuild {
     MainWindow* win = nullptr;
@@ -2676,27 +2688,55 @@ static void UpdateTouchSuggestions(MainWindow* win) {
     }
 }
 
-// Chips laid out left to right under the field, as many as fit. The paint and
-// the hit test both read these.
-static void TouchSuggestChipRects(MainWindow* win, HDC hdc, Vec<Rect>& out) {
+// Chips laid out left to right under the field, wrapping onto a second row, as
+// many as fit. The paint and the hit test both read these. Returns the number
+// of rows used.
+static int TouchSuggestChipRects(MainWindow* win, HDC hdc, Vec<Rect>& out) {
     HWND hwnd = win->hwndTocBox;
     Rect rc = HwndClientRect(hwnd);
     int y = DpiScale(hwnd, kPanelHeaderDy + kPanelFilterDy + 8);
-    int dy = DpiScale(hwnd, 34);
+    int dy = DpiScale(hwnd, kSuggestChipDy);
     int pad = DpiScale(hwnd, 14);
-    int gap = DpiScale(hwnd, 8);
-    int x = DpiScale(hwnd, 16);
+    int gap = DpiScale(hwnd, kSuggestChipGap);
+    int left = DpiScale(hwnd, 16);
     int right = rc.dx - DpiScale(hwnd, 16);
+    int x = left;
+    int rows = 0;
     HFONT font = HdcGetUiFont(hdc, kFontSizeLabel);
     for (int i = 0; i < len(win->touchSuggestions); i++) {
         Size sz = HdcMeasureText(hdc, win->touchSuggestions.At(i), DT_SINGLELINE | DT_NOPREFIX, font);
-        int dx = sz.dx + 2 * pad;
+        // a word wider than the whole row gets the whole row, cut short
+        int dx = std::min(sz.dx + 2 * pad, std::max(0, right - left));
         if (x + dx > right) {
-            break;
+            if (rows == kSuggestRows) {
+                break;
+            }
+            // the next row
+            x = left;
+            y += dy + gap;
+        }
+        if (x == left) {
+            rows++;
         }
         out.Append(Rect{x, y, dx, dy});
         x += dx + gap;
     }
+    return rows;
+}
+
+static int TouchSuggestRowDy(MainWindow* win) {
+    if (len(win->touchSuggestions) == 0 || !win->hwndTocBox) {
+        return 0;
+    }
+    HWND hwnd = win->hwndTocBox;
+    HDC hdc = GetDC(hwnd);
+    Vec<Rect> chips;
+    int rows = TouchSuggestChipRects(win, hdc, chips);
+    ReleaseDC(hwnd, hdc);
+    if (rows == 0) {
+        return 0;
+    }
+    return DpiScale(hwnd, kSuggestRowDy + (rows - 1) * (kSuggestChipDy + kSuggestChipGap));
 }
 
 // the chosen word takes the place of the part typed; the search runs as for
@@ -2791,19 +2831,38 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             int visibleRows = (rc.dy / rowStride) + 3;
             last = std::min(count, first + visibleRows * 2);
         }
+        int cardRadius = DpiScale(win->hwndTocBox, 6);
+        // The whole panel repaints as each thumbnail arrives, and the cards were
+        // most of that: a GDI+ surface set up per card, then every image scaled
+        // down by a few pixels on its way in. All the cards are filled on one
+        // surface first, before any plain GDI drawing on the same DC.
+        {
+            Gdiplus::Graphics gfx(hdc);
+            SetSmoothPixelAligned(gfx);
+            // the card is the page's paper around its image, so it warms with it
+            COLORREF paper = WarmColor(RGB(255, 255, 255), gRenderCache->nightLight);
+            for (int i = first; i < last; i++) {
+                FillRoundRectAA(gfx, TouchThumbnailRect(win, i), cardRadius, paper);
+            }
+        }
         for (int i = first; i < last; i++) {
             Rect card = TouchThumbnailRect(win, i);
             bool isCurrent = i + 1 == current;
-            int cardRadius = DpiScale(win->hwndTocBox, 6);
-            // the card is the page's paper around its image, so it warms with it
-            FillTocPill(hdc, card, cardRadius, WarmColor(RGB(255, 255, 255), gRenderCache->nightLight));
             if (dm) {
                 Pixmap* bmp = FindTouchThumbnail(win, i + 1);
                 if (bmp) {
-                    int inset = DpiScale(win->hwndTocBox, 2);
+                    int inset = DpiScale(win->hwndTocBox, kTouchThumbInset);
                     Rect imageRc = card;
                     imageRc.Inflate(-inset, -inset);
-                    BlitPixmap(bmp, hdc, imageRc);
+                    if (bmp->width <= imageRc.dx && bmp->height <= imageRc.dy) {
+                        // made at this size (see PumpTouchThumbnails): copied
+                        // as it is, centred, rather than scaled
+                        Rect dst{imageRc.x + (imageRc.dx - bmp->width) / 2, imageRc.y + (imageRc.dy - bmp->height) / 2,
+                                 bmp->width, bmp->height};
+                        BlitPixmapRegion(bmp, hdc, dst, Rect{0, 0, bmp->width, bmp->height});
+                    } else {
+                        BlitPixmap(bmp, hdc, imageRc);
+                    }
                 } else {
                     RequestTouchThumbnailPage(win, i + 1);
                 }
@@ -3577,11 +3636,49 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     // frame, which reads as flicker while scrolling the search results. Build
     // the frame off-screen and put it up in one blit; the erase is swallowed
     // for the same reason.
-    if (msg == WM_ERASEBKGND && IsTouchChrome(win) && win->touchPanelMode != TouchPanelMode::Bookmarks) {
+    // Bookmarks too: its header and tree are child windows, and what the panel
+    // paints itself - its background, the filter pill, the "x of y" chip - went
+    // up as three separate passes, which flashed on every switch to it.
+    if (msg == WM_ERASEBKGND && IsTouchChrome(win)) {
         return TRUE;
     }
     if (msg == WM_PAINT && IsTouchChrome(win)) {
-        if (win->touchPanelMode != TouchPanelMode::Bookmarks) {
+        if (win->touchPanelMode == TouchPanelMode::Bookmarks) {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            Rect rc = HwndClientRect(hwnd);
+            HDC memDc = CreateCompatibleDC(hdc);
+            HBITMAP bmp = memDc ? CreateCompatibleBitmap(hdc, std::max(1, rc.dx), std::max(1, rc.dy)) : nullptr;
+            HDC target = bmp ? memDc : hdc;
+            HGDIOBJ prev = bmp ? SelectObject(memDc, bmp) : nullptr;
+            HdcFillRect(target, rc, ThemeHotBackgroundColor());
+            PaintTouchFilterChrome(win, true, target);
+            if (HasTocFilter(win)) {
+                WindowTab* tab = win->CurrentTab();
+                int total = tab && tab->currToc ? CountTocLeaves(tab->currToc->root) : 0;
+                int found = win->tocFilteredTree ? CountTocLeaves(win->tocFilteredTree->root) : 0;
+                int dy = DpiScale(hwnd, 32);
+                Rect chip{rc.dx - DpiScale(hwnd, 20) - DpiScale(hwnd, 92), DpiScale(hwnd, 16), DpiScale(hwnd, 92), dy};
+                FillTocPill(target, chip, dy / 2, RGB(234, 229, 222), RGB(234, 229, 222));
+                SetBkMode(target, TRANSPARENT);
+                SetTextColor(target, ThemeWindowDarkerTextColor());
+                HdcDrawText(target, fmt("%d of %d", found, total), chip,
+                            DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+                            HdcGetUiFont(target, kFontSizeMeta, FW_MEDIUM));
+            }
+            if (bmp) {
+                Rect clip = ToRect(ps.rcPaint);
+                BitBlt(hdc, clip.x, clip.y, clip.dx, clip.dy, memDc, clip.x, clip.y, SRCCOPY);
+                SelectObject(memDc, prev);
+                DeleteObject(bmp);
+            }
+            if (memDc) {
+                DeleteDC(memDc);
+            }
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
             Rect rc = HwndClientRect(hwnd);
@@ -3608,27 +3705,6 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             EndPaint(hwnd, &ps);
             return 0;
         }
-        LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
-        PaintTouchFilterChrome(win, true);
-        if (HasTocFilter(win)) {
-            HDC hdc = GetDC(hwnd);
-            if (hdc) {
-                WindowTab* tab = win->CurrentTab();
-                int total = tab && tab->currToc ? CountTocLeaves(tab->currToc->root) : 0;
-                int found = win->tocFilteredTree ? CountTocLeaves(win->tocFilteredTree->root) : 0;
-                int dy = DpiScale(hwnd, 32);
-                Rect chip{HwndClientRect(hwnd).dx - DpiScale(hwnd, 20) - DpiScale(hwnd, 92), DpiScale(hwnd, 16),
-                          DpiScale(hwnd, 92), dy};
-                FillTocPill(hdc, chip, dy / 2, RGB(234, 229, 222), RGB(234, 229, 222));
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, ThemeWindowDarkerTextColor());
-                HdcDrawText(hdc, fmt("%d of %d", found, total), chip,
-                            DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
-                            HdcGetUiFont(hdc, kFontSizeMeta, FW_MEDIUM));
-                ReleaseDC(hwnd, hdc);
-            }
-        }
-        return r;
     }
 
     LRESULT res = 0;

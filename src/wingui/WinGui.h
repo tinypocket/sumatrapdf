@@ -1026,4 +1026,5 @@ void DrawCloseButton(const DrawCloseButtonArgs& args);
 // cue text in the caller's color over an empty, unfocused edit; call after the
 // edit's own WM_PAINT handling, with the native cue banner left unset
 void EditPaintThemedCue(HWND hwnd, Str cue, COLORREF col);
+void EditPaintThemedCueHdc(HWND hwnd, HDC hdc, Str cue, COLORREF col);
 void DrawCloseButton2(const DrawCloseButtonArgs&);

@@ -92,6 +92,19 @@ void EditSelectAll(HWND hwnd) {
     Edit_SetSel(hwnd, 0, -1);
 }
 
+// an EDIT or RichEdit control, i.e. a box the user types text into
+bool HwndIsTextBox(HWND hwnd) {
+    if (!hwnd) {
+        return false;
+    }
+    WCHAR cls[64];
+    int n = GetClassNameW(hwnd, cls, dimof(cls));
+    if (n <= 0) {
+        return false;
+    }
+    return wstr::EqI(cls, WC_EDITW) || wstr::StartsWithI(cls, L"RichEdit");
+}
+
 int EditIdealDy(HWND hwnd, bool hasBorder, int lines) {
     ReportIf(lines < 1);
     ReportIf(lines > 256);

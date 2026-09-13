@@ -3962,15 +3962,30 @@ void LoadModelIntoTab(WindowTab* tab) {
     win->ctrl = tab->ctrl;
 
     if (IsTouchChrome(win)) {
+        TouchView oldView = win->touchView;
         if (tab->IsAboutTab()) {
-            // the about tab shows the Library now; Recent is one of its sidebar
-            // rows instead of a view of its own
-            win->touchView = TouchView::Library;
-            logf("tab switch: the Library tab is current, view -> Library\n");
+            // The about tab is the Library or the browser, whichever was used
+            // last - it is labelled so (SetTouchHomeTabLabel). Recent is one of
+            // the Library's sidebar rows instead of a view of its own.
+            // (the browser may not exist yet when it is the one being opened)
+            bool toWeb = win->lastNonDocView == TouchView::Web && (win->touchBrowser || oldView == TouchView::Web);
+            win->touchView = toWeb ? TouchView::Web : TouchView::Library;
+            logf("tab switch: the home tab is current, view -> %s\n", toWeb ? StrL("Web") : StrL("Library"));
             win->uiState.tocVisible = false;
             win->uiState.favVisible = false;
         } else if (!tab->IsNonDocumentTab()) {
             win->touchView = TouchView::Doc;
+        }
+        // A tab picked in the tab strip changes the view as the rail does, so it
+        // takes the browser down (or back up) the same way. Left up, the page
+        // and its toolbar stayed over the document the tab switched to.
+        if (oldView == TouchView::Web && win->touchView != TouchView::Web) {
+            ShowTouchWebView(win, false);
+        } else if (oldView != TouchView::Web && win->touchView == TouchView::Web) {
+            ShowTouchWebView(win, true);
+        }
+        if (oldView == TouchView::Library && win->touchView != TouchView::Library) {
+            HomePageDestroySearch(win);
         }
         UpdateRailForWindow(win);
     }
@@ -6746,6 +6761,32 @@ static void UpdateOverlayScrollbarPositions(MainWindow* win) {
 
 // handle WM_UPDATE_UI: perform all UI work requested via ScheduleUiUpdate
 // since the last update in one pass
+static BOOL CALLBACK PaintChildExceptCanvas(HWND hwnd, LPARAM lp) {
+    auto* win = (MainWindow*)lp;
+    // only our own windows: painting WebView2's is a call into its process
+    bool ours = GetWindowThreadProcessId(hwnd, nullptr) == GetCurrentThreadId();
+    if (ours && hwnd != win->hwndCanvas && IsWindowVisible(hwnd)) {
+        // this window alone: UpdateWindow would paint its children too, and
+        // the canvas is a child of the frame
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_UPDATENOW | RDW_NOCHILDREN);
+    }
+    return TRUE;
+}
+
+// A big document's canvas can take a few hundred milliseconds to paint, and
+// Windows paints windows one at a time. A pane or a text box that came up in
+// the same relayout waited behind it, showing whatever had been on screen
+// there before - the page, the browser's tab strip - until the canvas was
+// done. Everything else is quick to paint, so it is painted straight away and
+// comes up at once; the canvas follows in its own turn.
+static void PaintChromeBeforeCanvas(MainWindow* win) {
+    if (!win->hwndFrame) {
+        return;
+    }
+    RedrawWindow(win->hwndFrame, nullptr, nullptr, RDW_UPDATENOW | RDW_NOCHILDREN);
+    EnumChildWindows(win->hwndFrame, PaintChildExceptCanvas, (LPARAM)win);
+}
+
 static void FrameUpdateUi(MainWindow* win) {
     MainWindow::UIState& ui = win->uiState;
     ui.updatePending = false;
@@ -6792,6 +6833,7 @@ static void FrameUpdateUi(MainWindow* win) {
             RedrawWindow(win->tabsCtrl->hwnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE);
         }
     }
+    bool sidebarDirty = ui.sidebarDirty;
     if (ui.sidebarDirty) {
         ui.sidebarDirty = false;
         bool tocVisible = ui.tocVisible;
@@ -6808,6 +6850,9 @@ static void FrameUpdateUi(MainWindow* win) {
         if (tocVisible && favVisible) {
             HwndInvalidate(win->favSplitter->hwnd, true);
         }
+    }
+    if (IsTouchChrome(win) && (didLayout || sidebarDirty)) {
+        PaintChromeBeforeCanvas(win);
     }
 }
 

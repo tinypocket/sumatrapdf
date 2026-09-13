@@ -118,6 +118,7 @@ void HwndPostCommand(HWND hwnd, int cmdId, LPARAM lp = 0);
 //--- edit control
 
 void EditSelectAll(HWND);
+bool HwndIsTextBox(HWND);
 int EditIdealDy(HWND, bool hasBorder, int lines = 1);
 void EditImplementCtrlBack(HWND hwnd);
 

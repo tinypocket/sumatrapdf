@@ -357,6 +357,11 @@ void SetTouchView(MainWindow* win, TouchView view) {
         }
     } else {
         win->touchView = view;
+        // before the home tab is selected: selecting it shows whichever of the
+        // Library and the browser was used last (see LoadModelIntoTab)
+        if (view == TouchView::Library || view == TouchView::Web) {
+            win->lastNonDocView = view;
+        }
         if (!SelectTouchHomeTab(win)) {
             return;
         }
@@ -407,9 +412,9 @@ void SetTouchPanelMode(MainWindow* win, TouchPanelMode mode) {
         win->touchView = TouchView::Doc;
     } else {
         win->touchView = TouchView::Library;
+        win->lastNonDocView = TouchView::Library;
         SelectTouchHomeTab(win);
         SetTouchHomeTabLabel(win, TouchView::Library);
-        win->lastNonDocView = TouchView::Library;
     }
     SetTouchPanelModeAndRestoreSearch(win, mode);
     EnsureTouchPaneLoaded(win);

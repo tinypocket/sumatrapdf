@@ -398,6 +398,14 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
                 logf("redraw: WM_PAINT hwnd=0x%p (canvas-about)\n", hwnd);
             }
             OnPaintAbout(win);
+            // The search box is a child window, so the page's paint leaves a
+            // hole for it, and its own paint would wait its turn behind every
+            // message queued meanwhile (thumbnails arriving, timers) - showing
+            // whatever was there before, the browser's tabs say, until then.
+            // It comes up with the page instead.
+            if (win->hwndHomeSearch && IsWindowVisible(win->hwndHomeSearch)) {
+                RedrawWindow(win->hwndHomeSearch, nullptr, nullptr, RDW_UPDATENOW);
+            }
             return 0;
 
         case WM_VSCROLL:

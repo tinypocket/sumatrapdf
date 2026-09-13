@@ -732,6 +732,19 @@ static bool MaybeTranslateAccelerator(MSG& msg) {
         }
     }
 
+    // A text box's own editing keys are its own: Copy, Cut, Undo and Redo.
+    // Ctrl+C is the document's Copy and Ctrl+Y opens the zoom dialog, and they
+    // fired from inside every text box the user typed in. (Ctrl+A is handled
+    // for every text box in PreTranslateMessage; Ctrl+V and the Insert/Delete
+    // combinations are already kept out of the text box shortcut table.)
+    if (msg.message == WM_KEYDOWN && IsCtrlPressed() && !IsAltPressed() && !IsShiftPressed() &&
+        HwndIsTextBox(msg.hwnd)) {
+        WPARAM key = msg.wParam;
+        if (key == 'C' || key == 'X' || key == 'Z' || key == 'Y') {
+            return false;
+        }
+    }
+
     // Arrows, Home/End and PageUp/PageDown normally accelerate to scroll /
     // go-to-page commands. While the keyboard selection caret is up they move
     // the caret instead, so skip the accelerator and let FrameOnKeydown see the

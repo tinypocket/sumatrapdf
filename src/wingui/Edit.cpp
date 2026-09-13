@@ -49,6 +49,15 @@ void EditPaintThemedCue(HWND hwnd, Str cue, COLORREF col) {
     if (!hdc) {
         return;
     }
+    EditPaintThemedCueHdc(hwnd, hdc, cue, col);
+    ReleaseDC(hwnd, hdc);
+}
+
+// the same, drawn into hdc: for an edit that paints through a buffer
+void EditPaintThemedCueHdc(HWND hwnd, HDC hdc, Str cue, COLORREF col) {
+    if (!hwnd || !hdc || len(cue) == 0 || GetWindowTextLengthW(hwnd) > 0 || GetFocus() == hwnd) {
+        return;
+    }
     RECT fmt{};
     SendMessageW(hwnd, EM_GETRECT, 0, (LPARAM)&fmt);
     DWORD margins = (DWORD)SendMessageW(hwnd, EM_GETMARGINS, 0, 0);
@@ -59,7 +68,6 @@ void EditPaintThemedCue(HWND hwnd, Str cue, COLORREF col) {
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, col);
     HdcDrawText(hdc, cue, r, DT_SINGLELINE | DT_LEFT | DT_TOP | DT_END_ELLIPSIS | DT_NOPREFIX, font);
-    ReleaseDC(hwnd, hdc);
 }
 
 // average character width for sizing edits by character count

@@ -870,12 +870,39 @@ static void HomePageShowSelectionTooltip(MainWindow* win);
 
 static LRESULT CALLBACK WndProcHomeSearch(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_PAINT) {
-        LRESULT res = CallWindowProcW(DefWndProcHomeSearch, hwnd, msg, wp, lp);
         MainWindow* win = FindMainWindowByHwnd(GetParent(hwnd));
-        if (win && IsTouchChrome(win)) {
-            EditPaintThemedCue(hwnd, StrL(kTouchHomeSearchCue), ThemeWindowDarkerTextColor());
+        if (!win || !IsTouchChrome(win)) {
+            return CallWindowProcW(DefWndProcHomeSearch, hwnd, msg, wp, lp);
         }
-        return res;
+        // The control's own paint (its background, the text) and the cue drawn
+        // over it went to the screen one after the other, and the empty box
+        // showed first: the "Search library" hint flickered in on every paint.
+        // Both go into a buffer and reach the screen together.
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        Rect rc = HwndClientRect(hwnd);
+        HDC memDc = CreateCompatibleDC(hdc);
+        HBITMAP bmp = memDc ? CreateCompatibleBitmap(hdc, std::max(1, rc.dx), std::max(1, rc.dy)) : nullptr;
+        if (bmp) {
+            HGDIOBJ prev = SelectObject(memDc, bmp);
+            CallWindowProcW(DefWndProcHomeSearch, hwnd, WM_PRINTCLIENT, (WPARAM)memDc, PRF_CLIENT | PRF_ERASEBKGND);
+            EditPaintThemedCueHdc(hwnd, memDc, StrL(kTouchHomeSearchCue), ThemeWindowDarkerTextColor());
+            BitBlt(hdc, 0, 0, rc.dx, rc.dy, memDc, 0, 0, SRCCOPY);
+            SelectObject(memDc, prev);
+            DeleteObject(bmp);
+        }
+        if (memDc) {
+            DeleteDC(memDc);
+        }
+        EndPaint(hwnd, &ps);
+        if (!bmp) {
+            // no buffer: paint the way it always did
+            InvalidateRect(hwnd, nullptr, TRUE);
+            LRESULT res = CallWindowProcW(DefWndProcHomeSearch, hwnd, msg, wp, lp);
+            EditPaintThemedCue(hwnd, StrL(kTouchHomeSearchCue), ThemeWindowDarkerTextColor());
+            return res;
+        }
+        return 0;
     }
     if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS) {
         // the cue shows only while unfocused
@@ -944,10 +971,16 @@ static void EnsureHomeSearchCreated(MainWindow* win) {
         return;
     }
     HMODULE hmod = GetModuleHandleW(nullptr);
-    DWORD style = WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL;
+    // WS_CLIPSIBLINGS and the bottom of the z-order: notifications ("Checking
+    // for updates") are its siblings and appear over it; without these the box
+    // was recreated on top of them, and painted over them in any case
+    DWORD style = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | ES_AUTOHSCROLL;
     DWORD exStyle = 0;
     win->hwndHomeSearch = CreateWindowExW(exStyle, WC_EDITW, L"", style, 0, 0, 100, kSearchEditDy, win->hwndCanvas,
                                           nullptr, hmod, nullptr);
+    if (win->hwndHomeSearch) {
+        SetWindowPos(win->hwndHomeSearch, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
     HDC hdc = GetDC(win->hwndCanvas);
     HFONT font = HdcGetUiFont(hdc, kFontSizeLabel);
     ReleaseDC(win->hwndCanvas, hdc);
@@ -4516,8 +4549,14 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         // the font and centered in the pill rather than filling it
         int editX = search.x + DpiScale(hdc, 38);
         int editDy = HdcMeasureText(hdc, StrL("Xg"), HdcGetUiFont(hdc, kFontSizeLabel)).dy + DpiScale(hdc, 2);
-        MoveWindow(win->hwndHomeSearch, editX, search.y + (search.dy - editDy) / 2,
-                   std::max(0, clearBtn.x - DpiScale(hdc, 2) - editX), editDy, TRUE);
+        Rect editRc{editX, search.y + (search.dy - editDy) / 2, std::max(0, clearBtn.x - DpiScale(hdc, 2) - editX),
+                    editDy};
+        // Only when it has actually moved: this runs on every repaint of the
+        // Library - each thumbnail that arrives is one - and moving the box,
+        // even onto the same spot, made it erase and redraw each time.
+        if (ChildPosWithinParent(win->hwndHomeSearch) != editRc) {
+            MoveWindow(win->hwndHomeSearch, editRc.x, editRc.y, editRc.dx, editRc.dy, TRUE);
+        }
         HwndShow(win->hwndHomeSearch);
     } // hasSidebar
     TempStr query = HwndGetTextTemp(win->hwndHomeSearch);
