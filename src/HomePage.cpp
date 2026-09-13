@@ -28,6 +28,9 @@
 #include "FileHistory.h"
 #include "GlobalPrefs.h"
 #include "SumatraPDF.h"
+#include "base/Pixmap.h"
+#include "DisplayModel.h"
+#include "RenderCache.h"
 #include "MainWindow.h"
 #include "Canvas.h"
 #include "wingui/Anim.h"
@@ -2076,6 +2079,35 @@ static void FillHomeRoundRectAlpha(HDC hdc, const Rect& r, int radius, COLORREF 
     gfx.FillPath(&br, &path);
 }
 
+// The Library's thumbnails are cached on disk as they were rendered, so the
+// night light cannot be baked into them: it is applied as they are drawn -
+// scaled into a small bitmap of the size shown, warmed, and copied out. A card
+// is a few tens of thousands of pixels; with the night light off, nothing
+// changes.
+static void BlitHomeThumbnail(RenderedBitmap* thumb, HDC hdc, Rect dst) {
+    int strength = gRenderCache ? gRenderCache->nightLight : 0;
+    if (strength <= 0 || dst.dx <= 0 || dst.dy <= 0) {
+        thumb->Blit(hdc, dst);
+        return;
+    }
+    Pixmap* px = AllocPixmapDIB(dst.dx, dst.dy);
+    HDC mem = px ? CreateCompatibleDC(hdc) : nullptr;
+    if (!mem) {
+        FreePixmap(px);
+        thumb->Blit(hdc, dst);
+        return;
+    }
+    HGDIOBJ prev = SelectObject(mem, px->hbmp);
+    thumb->Blit(mem, Rect{0, 0, dst.dx, dst.dy});
+    // GDI may still be writing the DIB; its pixels are touched directly next
+    GdiFlush();
+    WarmPixmap(px, strength);
+    BitBlt(hdc, dst.x, dst.y, dst.dx, dst.dy, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, prev);
+    DeleteDC(mem);
+    FreePixmap(px);
+}
+
 // The round badge behind a card's pin. GDI's RoundRect stair-steps a circle
 // this small, which made the badge - and the pin in it - look low resolution.
 static void FillPinBadgeDisc(HDC hdc, const Rect& r, COLORREF col) {
@@ -2186,7 +2218,7 @@ static void DrawHomeListRow(HomePageLayout& l, ThumbnailLayout& thumb, HFONT fon
     Rect thumbBox = thumb.rcListThumb;
     if (thumbImg) {
         Rect thumbDst = FitRectInRect(thumbImg->GetSize(), thumbBox);
-        thumbImg->Blit(hdc, thumbDst);
+        BlitHomeThumbnail(thumbImg, hdc, thumbDst);
         thumb.szThumb = thumbImg->GetSize();
     }
     Str path = fs->filePath;
@@ -2346,7 +2378,7 @@ static void DrawHomePageLayout(HomePageLayout& l) {
             Rect innerBox = page;
             innerBox.Inflate(-inset, -inset);
             Rect inner = FitRectInRect(thumb.szThumb, innerBox);
-            thumbImg->Blit(hdc, inner);
+            BlitHomeThumbnail(thumbImg, hdc, inner);
         }
         if (!thumbImg) {
             // no thumbnail yet: the card is still a surface, not a hole
@@ -2551,7 +2583,7 @@ static void DrawTouchFileCardPath(MainWindow* win, HDC hdc, Str filePath, FileSt
     RenderedBitmap* thumb = explicitThumbnail ? explicitThumbnail : (fs ? LoadThumbnail(fs) : nullptr);
     if (thumb) {
         Rect dst = FitRectInRect(thumb->GetSize(), thumbRc);
-        thumb->Blit(hdc, dst);
+        BlitHomeThumbnail(thumb, hdc, dst);
     } else {
         FillHomeRoundRect(hdc, thumbRc, DpiScale(hdc, 6), RGB(234, 229, 222));
         SetBkMode(hdc, TRANSPARENT);

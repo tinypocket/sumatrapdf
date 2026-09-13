@@ -1062,3 +1062,37 @@ void MoveTab(MainWindow* win, int dir) {
     win->tabsCtrl->SetSelected(newIdx);
     win->tabsCtrl->LayoutTabs();
 }
+
+// Moves the tab at `from` to `to`, sliding the ones in between over by one.
+// Whichever tab was current stays current. Pinned tabs keep their places.
+void MoveTabTo(MainWindow* win, int from, int to) {
+    if (!win || !win->tabsCtrl) {
+        return;
+    }
+    TabsCtrl* tabs = win->tabsCtrl;
+    int nTabs = win->TabCount();
+    if (from == to || from < 0 || to < 0 || from >= nTabs || to >= nTabs) {
+        return;
+    }
+    int step = from < to ? 1 : -1;
+    for (int i = from;; i += step) {
+        TabInfo* ti = tabs->GetTab(i);
+        if (!ti || ti->isPinned) {
+            return;
+        }
+        if (i == to) {
+            break;
+        }
+    }
+    TabInfo* selected = tabs->GetTab(tabs->GetSelected());
+    for (int i = from; i != to; i += step) {
+        tabs->SwapTabs(i, i + step);
+    }
+    for (int i = 0; i < nTabs; i++) {
+        if (tabs->GetTab(i) == selected) {
+            tabs->SetSelected(i);
+            break;
+        }
+    }
+    tabs->LayoutTabs();
+}

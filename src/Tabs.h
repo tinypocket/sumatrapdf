@@ -30,3 +30,4 @@ void CollectTabsToClose(MainWindow* win, WindowTab* currTab, Vec<WindowTab*>& to
                         Vec<WindowTab*>& toCloseRight, Vec<WindowTab*>& toCloseLeft);
 void CloseAllTabs(MainWindow*);
 void MoveTab(MainWindow* win, int dir);
+void MoveTabTo(MainWindow* win, int from, int to);

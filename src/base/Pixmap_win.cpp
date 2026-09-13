@@ -240,6 +240,89 @@ void RecolorPixmap(Pixmap* px, COLORREF textColor, COLORREF bgColor, COLORREF li
     }
 }
 
+// the night light's multipliers, in 1/256ths: at full strength white becomes
+// (255, 205, 115), a candle-like warm; halfway it is a soft cream
+static void WarmFactors(int strength, int* g, int* b) {
+    strength = std::clamp(strength, 0, 100);
+    *g = 256 - strength * 51 / 100;
+    *b = 256 - strength * 140 / 100;
+}
+
+// A page with no colour renders into an 8-bit DIB whose pixels index a grey
+// palette: warming the palette warms the page, 256 entries instead of millions
+// of pixels (UpdateBitmapColors recolours those the same way).
+static void WarmDibPalette(HBITMAP hbmp, int g, int b) {
+    HDC hdc = CreateCompatibleDC(nullptr);
+    if (!hdc) {
+        return;
+    }
+    HGDIOBJ prev = SelectObject(hdc, hbmp);
+    RGBQUAD palette[256];
+    uint n = GetDIBColorTable(hdc, 0, dimof(palette), palette);
+    for (uint i = 0; i < n; i++) {
+        palette[i].rgbGreen = (u8)((palette[i].rgbGreen * g) >> 8);
+        palette[i].rgbBlue = (u8)((palette[i].rgbBlue * b) >> 8);
+    }
+    if (n > 0) {
+        SetDIBColorTable(hdc, 0, n, palette);
+    }
+    SelectObject(hdc, prev);
+    DeleteDC(hdc);
+}
+
+void WarmPixmap(Pixmap* px, int strength) {
+    if (!px || !px->data || strength <= 0) {
+        return;
+    }
+    int g, b;
+    WarmFactors(strength, &g, &b);
+    int dx = px->width;
+    int dy = px->height;
+    int stride = px->stride;
+    int bpp = PixmapBytesPerPixel(px->format);
+    if (px->hbmp) {
+        // A rendered tile is a DIB, and its pixel layout is the DIB's, not
+        // what the Pixmap's format says: a page with no colour is 8-bit and
+        // paletted, one byte a pixel, and read as four it ran off the end.
+        DIBSECTION ds{};
+        if (GetObject(px->hbmp, sizeof(ds), &ds) != sizeof(ds) || !ds.dsBm.bmBits) {
+            return;
+        }
+        if (ds.dsBm.bmBitsPixel <= 8) {
+            WarmDibPalette(px->hbmp, g, b);
+            return;
+        }
+        if (ds.dsBm.bmBitsPixel != 24 && ds.dsBm.bmBitsPixel != 32) {
+            return;
+        }
+        dx = ds.dsBm.bmWidth;
+        dy = std::abs(ds.dsBm.bmHeight);
+        stride = ds.dsBm.bmWidthBytes;
+        bpp = ds.dsBm.bmBitsPixel / 8;
+    } else if (px->format != PixmapFormat::BGR8 && px->format != PixmapFormat::BGRA8) {
+        return;
+    }
+    if (dx <= 0 || dy <= 0) {
+        return;
+    }
+    for (int y = 0; y < dy; y++) {
+        u8* pixel = px->data + ((size_t)y * stride);
+        for (int x = 0; x < dx; x++, pixel += bpp) {
+            pixel[0] = (u8)((pixel[0] * b) >> 8);
+            pixel[1] = (u8)((pixel[1] * g) >> 8);
+        }
+    }
+}
+
+COLORREF WarmColor(COLORREF c, int strength) {
+    if (strength <= 0) {
+        return c;
+    }
+    int g, b;
+    WarmFactors(strength, &g, &b);
+    return RGB(GetRValue(c), (GetGValue(c) * g) >> 8, (GetBValue(c) * b) >> 8);
+}
+
 // Returns a copy of the clipboard bitmap as a platform-independent Pixmap.
 Pixmap* GetClipboardImageAsPixmap() {
     if (!IsClipboardFormatAvailable(CF_BITMAP) || !OpenClipboard(nullptr)) {

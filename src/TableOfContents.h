@@ -22,6 +22,7 @@ void CollapseTouchSearchPanelToBar(MainWindow*);
 void InvalidateTouchAnnotations(MainWindow*);
 // frees the Pages panel's own thumbnails (window teardown, document change)
 void FreeTouchThumbnails(MainWindow*);
+void FreeTouchWordIndex(MainWindow*);
 // the touch Search panel's current query, or {} when that panel isn't the one
 // driving the find (then win->hwndFindEdit is the source, as it always was)
 TempStr TouchSearchPanelQueryTemp(MainWindow*);

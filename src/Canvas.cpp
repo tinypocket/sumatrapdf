@@ -9,6 +9,7 @@
 #include "base/Timer.h"
 #include "base/UITask.h"
 #include "base/Win.h"
+#include "base/Pixmap.h"
 #include "base/ScopedWin.h"
 #include "base/Http.h"
 #include "base/GdiPlusUtil.h"
@@ -2655,6 +2656,8 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
     // different color
     COLORREF colPlaceholder;
     ThemeDocumentColors(colPlaceholder);
+    // the page before its tiles arrive is as warm as they will be
+    colPlaceholder = WarmColor(colPlaceholder, gRenderCache->nightLight);
     // until the first page of this tab has been painted, use the theme's
     // window background instead: e.g. restoring a session into a maximized
     // window can take a while to render the first page and a white

@@ -961,6 +961,13 @@ struct GlobalPrefs {
     // if true, the document tabs in the title bar are taller and wider
     // with larger text; easier to read and to hit with a finger
     bool largerTabs;
+    // if true, pages are shown in warmer colors - less blue - so white
+    // paper is easier on the eyes at night, like Windows' night light but
+    // for the page only
+    bool nightLight;
+    // how warm the night light makes the page, from 0 (barely) to 100
+    // (warmest)
+    int nightLightStrength;
     // if true, check at startup whether an update is available
     bool checkForUpdates;
 };
@@ -1593,7 +1600,7 @@ static const StructInfo gPointInfo = {
 
 static const FieldInfo gGlobalPrefsFields[] = {
     {(size_t)-1, SettingType::Comment,
-     (intptr_t)"For documentation, see https://www.sumatrapdfreader.org/settings/settings3-7-20.html"},
+     (intptr_t)"For documentation, see https://www.sumatrapdfreader.org/settings/settings3-7-27.html"},
     {(size_t)-1, SettingType::Comment, 0},
     {offsetof(GlobalPrefs, defaultDisplayMode), SettingType::String, (intptr_t)"automatic"},
     {offsetof(GlobalPrefs, defaultZoom), SettingType::String, (intptr_t)"fit page"},
@@ -1740,13 +1747,15 @@ static const FieldInfo gGlobalPrefsFields[] = {
     {offsetof(GlobalPrefs, smartHeaderFooter), SettingType::Bool, false, true},
     {offsetof(GlobalPrefs, twoRowTabs), SettingType::Bool, false, true},
     {offsetof(GlobalPrefs, largerTabs), SettingType::Bool, false, true},
+    {offsetof(GlobalPrefs, nightLight), SettingType::Bool, false, true},
+    {offsetof(GlobalPrefs, nightLightStrength), SettingType::Int, 50, true},
     {offsetof(GlobalPrefs, checkForUpdates), SettingType::Bool, true, true},
     {(size_t)-1, SettingType::Comment, 0, true},
     {(size_t)-1, SettingType::Comment, (intptr_t)"Settings below are not recognized by the current version", true},
 };
 static const StructInfo gGlobalPrefsInfo = {
     sizeof(GlobalPrefs),
-    149,
+    151,
     gGlobalPrefsFields,
     "\0\0DefaultDisplayMode\0DefaultZoom\0DisableJavaScript\0AllowExternalImages\0EnableTeXEnhancements\0EscToExit\0Ful"
     "lPathInTitle\0InverseSearchCmdLine\0LazyLoading\0MainWindowBackground\0NoHomeTab\0HomePageSortByFrequentlyRead\0Ho"
@@ -1765,7 +1774,8 @@ static const StructInfo gGlobalPrefsInfo = {
     "s\0\0CustomScreenDPI\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0WindowState\0WindowPos\0SearchUIWindowPos\0"
     "FileStates\0SessionData\0ReopenOnce\0TimeOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0UpdateFeedURL\0BrowserHomeP"
     "age\0BrowserBookmarks\0BrowserFavoriteTitles\0BrowserDownloads\0AnimateUI\0ElaborateAnimations\0FavoritesInToolbar"
-    "\0FavoritesManualOrder\0SmartMargins\0SmartHeaderFooter\0TwoRowTabs\0LargerTabs\0CheckForUpdates\0\0",
+    "\0FavoritesManualOrder\0SmartMargins\0SmartHeaderFooter\0TwoRowTabs\0LargerTabs\0NightLight\0NightLightStrength\0C"
+    "heckForUpdates\0\0",
     "\0\0default layout of pages. valid values: automatic, single page, facing, book view, continuous, continuous "
     "facing, continuous book view\0default zoom. valid values: fit page, fit width, fit height, fit content or percent "
     "like 100%\0if true, JavaScript in PDF documents is disabled (e.g. form-field calculations won't run)\0if true, a "
@@ -1884,7 +1894,9 @@ static const StructInfo gGlobalPrefsInfo = {
     "number or a title repeated in the same place on most pages), trimming more of each page. Has no effect unless "
     "SmartMargins is true\0if true, a tab's label wraps onto a second line instead of being cut short with an "
     "ellipsis, so more of a long filename is readable. Makes the tab strip taller\0if true, the document tabs in the "
-    "title bar are taller and wider with larger text; easier to read and to hit with a finger\0if true, check at "
+    "title bar are taller and wider with larger text; easier to read and to hit with a finger\0if true, pages are "
+    "shown in warmer colors - less blue - so white paper is easier on the eyes at night, like Windows' night light but "
+    "for the page only\0how warm the night light makes the page, from 0 (barely) to 100 (warmest)\0if true, check at "
     "startup whether an update is available\0\0Settings below are not recognized by the current version",
     false};
 static const FieldInfo gTheme_1_Fields[] = {

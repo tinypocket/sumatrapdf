@@ -130,6 +130,7 @@ MainWindow::~MainWindow() {
     str::Free(libraryRowMenuPath);
     str::Free(tocStickyText);
     FreeTouchThumbnails(this);
+    FreeTouchWordIndex(this);
     str::Free(touchBookmarkSearchQuery);
     str::Free(touchDocumentSearchQuery);
 

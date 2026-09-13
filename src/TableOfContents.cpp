@@ -35,6 +35,7 @@
 #include "DisplayModel.h"
 #include "RenderCache.h"
 #include "base/Pixmap.h"
+#include "base/Dict.h"
 #include "Favorites.h"
 #include "WindowTab.h"
 #include "resource.h"
@@ -79,8 +80,16 @@ static int TouchSearchResultRowDy() {
     return std::max(TouchSidebarRowDy() + 18, 68);
 }
 
+// the row of suggested words under the search field, while there are any
+constexpr int kSuggestRowDy = 44;
+
+static int TouchSuggestRowDy(MainWindow* win) {
+    return len(win->touchSuggestions) > 0 ? DpiScale(win->hwndTocBox, kSuggestRowDy) : 0;
+}
+
 static int TouchSearchResultsY(MainWindow* win) {
-    return DpiScale(win->hwndTocBox, kPanelHeaderDy + kPanelFilterDy + 64) - win->touchPanelScrollY;
+    return DpiScale(win->hwndTocBox, kPanelHeaderDy + kPanelFilterDy + 64) + TouchSuggestRowDy(win) -
+           win->touchPanelScrollY;
 }
 
 static Rect TouchSearchResultRect(MainWindow* win, int idx) {
@@ -2087,6 +2096,9 @@ struct TouchThumbRender {
     int pageNo = 0;
     int cardDx = 0;
     int cardDy = 0;
+    // the night light the thumbnail is made with; one that finishes after it
+    // changed would be the wrong colour, and is dropped
+    int nightLight = 0;
     Pixmap* bmp = nullptr;
 };
 
@@ -2094,7 +2106,8 @@ static void PumpTouchThumbnails(MainWindow* win);
 
 static void TouchThumbRenderFinishedUi(TouchThumbRender* r) {
     MainWindow* win = r->win;
-    bool keep = IsMainWindowValid(win) && win->touchThumbnailDm == r->dm && r->bmp != nullptr;
+    bool keep = IsMainWindowValid(win) && win->touchThumbnailDm == r->dm && r->bmp != nullptr &&
+                r->nightLight == gRenderCache->nightLight;
     if (keep) {
         // the newest are the ones being looked at; drop from the front
         while (len(win->touchThumbs) >= kMaxTouchThumbs) {
@@ -2127,6 +2140,8 @@ static void TouchThumbRenderThread(TouchThumbRender* r) {
         RectF box = r->engine->Transform(fitted, r->pageNo, 1.0f, 0, true);
         RenderPageArgs args(r->pageNo, zoom, 0, &box);
         r->bmp = r->engine->RenderPage(args);
+        // the same warmth as the page beside it
+        WarmPixmap(r->bmp, r->nightLight);
     }
     uitask::Post(MkFunc0<TouchThumbRender>(TouchThumbRenderFinishedUi, r), "TouchThumbRenderFinished");
 }
@@ -2165,6 +2180,7 @@ static void PumpTouchThumbnails(MainWindow* win) {
     r->pageNo = pageNo;
     r->cardDx = card.dx;
     r->cardDy = card.dy;
+    r->nightLight = gRenderCache->nightLight;
     win->touchThumbRendering = true;
     RunAsync(MkFunc0<TouchThumbRender>(TouchThumbRenderThread, r), "TouchThumbRender");
 }
@@ -2424,7 +2440,7 @@ static int TouchPanelMaxScroll(MainWindow* win) {
             contentBottom = last.y + win->touchPanelScrollY + last.dy + DpiScale(win->hwndTocBox, 40);
         }
     } else if (win->touchPanelMode == TouchPanelMode::Search) {
-        contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + kPanelFilterDy + 64) +
+        contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + kPanelFilterDy + 64) + TouchSuggestRowDy(win) +
                         len(win->findMatches) * DpiScale(win->hwndTocBox, TouchSearchResultRowDy()) +
                         DpiScale(win->hwndTocBox, 12);
     } else if (win->touchPanelMode == TouchPanelMode::Annotations && win->AsFixed()) {
@@ -2458,8 +2474,245 @@ static void PaintTouchPanelPress(MainWindow* win, HDC hdc);
 static Rect TouchSearchControlsRect(MainWindow* win) {
     HWND hwnd = win->hwndTocBox;
     Rect rc = HwndClientRect(hwnd);
-    return Rect{DpiScale(hwnd, 16), DpiScale(hwnd, kPanelHeaderDy + kPanelFilterDy + 12), rc.dx - DpiScale(hwnd, 32),
-                DpiScale(hwnd, 40)};
+    return Rect{DpiScale(hwnd, 16), DpiScale(hwnd, kPanelHeaderDy + kPanelFilterDy + 12) + TouchSuggestRowDy(win),
+                rc.dx - DpiScale(hwnd, 32), DpiScale(hwnd, 40)};
+}
+
+// --- search suggestions ------------------------------------------------------------
+// Typing "Aug" offers "August": the words of the document that start with the
+// word being typed, the most frequent first, as chips under the search field.
+// A tap puts the whole word in place of the part typed. The words come from an
+// index of the document built in the background the first time it is searched
+// (from the same page text the search reads, so it also warms the engine's
+// text cache for the search).
+
+struct DocWord {
+    Str lower;   // what the typed word is matched against
+    Str display; // as offered: in lower case if the word ever appears so, else as first seen
+    int count = 0;
+};
+
+struct DocWordIndex {
+    Vec<DocWord> words;
+    ~DocWordIndex() {
+        for (DocWord& w : words) {
+            str::Free(w.lower);
+            str::Free(w.display);
+        }
+    }
+};
+
+constexpr int kMinSuggestWordLen = 3;
+constexpr int kMinSuggestPrefixLen = 2;
+constexpr int kMaxSuggestions = 6;
+
+struct TouchWordIndexBuild {
+    MainWindow* win = nullptr;
+    EngineBase* engine = nullptr; // AddRef'd for the build
+    DocWordIndex* index = nullptr;
+};
+
+static void AddDocWord(DocWordIndex* index, dict::MapStrToInt& seen, WCHAR* buf, int n) {
+    // an apostrophe belongs inside a word, not at its end
+    while (n > 0 && (buf[n - 1] == L'\'' || buf[n - 1] == 0x2019)) {
+        n--;
+    }
+    if (n < kMinSuggestWordLen) {
+        return;
+    }
+    TempStr display = ToUtf8Temp(WStr(buf, n));
+    CharLowerBuffW(buf, (DWORD)n);
+    TempStr lower = ToUtf8Temp(WStr(buf, n));
+    int idx = -1;
+    if (seen.Get(lower, &idx)) {
+        DocWord& w = index->words[idx];
+        w.count++;
+        // written in lower case even once: it is an ordinary word, and only
+        // capitalized where a sentence started
+        if (str::Eq(display, lower) && !str::Eq(w.display, w.lower)) {
+            str::ReplaceWithCopy(&w.display, lower);
+        }
+        return;
+    }
+    seen.Insert(lower, len(index->words));
+    DocWord w;
+    w.lower = str::Dup(lower);
+    w.display = str::Dup(display);
+    w.count = 1;
+    index->words.Append(w);
+}
+
+static void TouchWordIndexFinishedUi(TouchWordIndexBuild* b);
+
+static void TouchWordIndexThread(TouchWordIndexBuild* b) {
+    dict::MapStrToInt seen(4096);
+    int nPages = b->engine->PageCount();
+    constexpr int kMaxWordDx = 64;
+    WCHAR buf[kMaxWordDx];
+    for (int pageNo = 1; pageNo <= nPages; pageNo++) {
+        int textLen = 0;
+        Str text = b->engine->GetTextForPage(pageNo, &textLen);
+        int n = 0;
+        bool tooLong = false;
+        int i = 0;
+        while (i < text.len) {
+            int c = Utf8CodepointNext(text, i);
+            if (c == 0) {
+                break;
+            }
+            bool letter = c < 0x10000 && IsCharAlphaNumericW((WCHAR)c);
+            bool apostrophe = n > 0 && (c == '\'' || c == 0x2019);
+            if (letter || apostrophe) {
+                if (n < kMaxWordDx) {
+                    buf[n++] = (WCHAR)c;
+                } else {
+                    tooLong = true; // a run of characters no one types as a word
+                }
+                continue;
+            }
+            if (!tooLong) {
+                AddDocWord(b->index, seen, buf, n);
+            }
+            n = 0;
+            tooLong = false;
+        }
+        if (!tooLong) {
+            AddDocWord(b->index, seen, buf, n);
+        }
+        ResetTempArena();
+    }
+    uitask::Post(MkFunc0<TouchWordIndexBuild>(TouchWordIndexFinishedUi, b), "TouchWordIndexFinished");
+}
+
+void FreeTouchWordIndex(MainWindow* win) {
+    delete win->touchWordIndex;
+    win->touchWordIndex = nullptr;
+    win->touchWordIndexEngine = nullptr;
+    win->touchSuggestions.Reset();
+}
+
+static EngineBase* TouchSearchEngine(MainWindow* win) {
+    DisplayModel* dm = win->AsFixed();
+    return dm ? dm->GetEngine() : nullptr;
+}
+
+static void UpdateTouchSuggestions(MainWindow* win);
+
+// builds the current document's index unless it has one or one is on its way
+static void EnsureTouchWordIndex(MainWindow* win) {
+    EngineBase* engine = TouchSearchEngine(win);
+    if (!engine || win->touchWordIndexBuilding) {
+        return;
+    }
+    if (win->touchWordIndex && win->touchWordIndexEngine == engine) {
+        return;
+    }
+    FreeTouchWordIndex(win);
+    win->touchWordIndexEngine = engine;
+    win->touchWordIndexBuilding = true;
+    auto* b = new TouchWordIndexBuild();
+    b->win = win;
+    b->engine = engine;
+    engine->AddRef();
+    b->index = new DocWordIndex();
+    RunAsync(MkFunc0<TouchWordIndexBuild>(TouchWordIndexThread, b), "TouchWordIndex");
+}
+
+static void TouchWordIndexFinishedUi(TouchWordIndexBuild* b) {
+    MainWindow* win = b->win;
+    if (IsMainWindowValid(win)) {
+        win->touchWordIndexBuilding = false;
+        // kept only if the window still shows the document it was built for
+        if (win->touchWordIndexEngine == b->engine && TouchSearchEngine(win) == b->engine) {
+            win->touchWordIndex = b->index;
+            b->index = nullptr;
+            UpdateTouchSuggestions(win);
+            if (win->hwndTocBox) {
+                HwndInvalidate(win->hwndTocBox, false);
+            }
+        } else {
+            // a different document now: index that one instead
+            EnsureTouchWordIndex(win);
+        }
+    }
+    delete b->index;
+    b->engine->Release();
+    delete b;
+}
+
+// the word being typed: what follows the query's last space
+static Str LastQueryWord(Str query) {
+    int sp = str::LastIndexOfChar(query, ' ');
+    return sp >= 0 ? Str(query.s + sp + 1, query.len - sp - 1) : query;
+}
+
+static void UpdateTouchSuggestions(MainWindow* win) {
+    win->touchSuggestions.Reset();
+    DocWordIndex* index = win->touchWordIndex;
+    if (!index || win->touchWordIndexEngine != TouchSearchEngine(win) || !win->tocFilterEdit) {
+        return;
+    }
+    Str typed = LastQueryWord(win->tocFilterEdit->GetTextTemp());
+    WStr typedW = ToWStrTemp(typed);
+    if (typedW.len < kMinSuggestPrefixLen) {
+        return;
+    }
+    CharLowerBuffW(typedW.s, (DWORD)typedW.len);
+    TempStr prefix = ToUtf8Temp(typedW);
+    Vec<DocWord*> found;
+    for (DocWord& w : index->words) {
+        if (w.lower.len > prefix.len && str::StartsWith(w.lower, prefix)) {
+            found.Append(&w);
+        }
+    }
+    std::sort(found.begin(), found.end(), [](DocWord* a, DocWord* b) {
+        if (a->count != b->count) {
+            return a->count > b->count;
+        }
+        return strcmp(a->lower.s, b->lower.s) < 0;
+    });
+    for (int i = 0; i < len(found) && i < kMaxSuggestions; i++) {
+        win->touchSuggestions.Append(found[i]->display);
+    }
+}
+
+// Chips laid out left to right under the field, as many as fit. The paint and
+// the hit test both read these.
+static void TouchSuggestChipRects(MainWindow* win, HDC hdc, Vec<Rect>& out) {
+    HWND hwnd = win->hwndTocBox;
+    Rect rc = HwndClientRect(hwnd);
+    int y = DpiScale(hwnd, kPanelHeaderDy + kPanelFilterDy + 8);
+    int dy = DpiScale(hwnd, 34);
+    int pad = DpiScale(hwnd, 14);
+    int gap = DpiScale(hwnd, 8);
+    int x = DpiScale(hwnd, 16);
+    int right = rc.dx - DpiScale(hwnd, 16);
+    HFONT font = HdcGetUiFont(hdc, kFontSizeLabel);
+    for (int i = 0; i < len(win->touchSuggestions); i++) {
+        Size sz = HdcMeasureText(hdc, win->touchSuggestions.At(i), DT_SINGLELINE | DT_NOPREFIX, font);
+        int dx = sz.dx + 2 * pad;
+        if (x + dx > right) {
+            break;
+        }
+        out.Append(Rect{x, y, dx, dy});
+        x += dx + gap;
+    }
+}
+
+// the chosen word takes the place of the part typed; the search runs as for
+// any change to the field
+static void AcceptTouchSuggestion(MainWindow* win, int i) {
+    if (!win->tocFilterEdit || i < 0 || i >= len(win->touchSuggestions)) {
+        return;
+    }
+    Str query = win->tocFilterEdit->GetTextTemp();
+    Str typed = LastQueryWord(query);
+    TempStr head = str::DupTemp(Str(query.s, query.len - typed.len));
+    TempStr next = str::JoinTemp(head, win->touchSuggestions.At(i));
+    win->tocFilterEdit->SetText(next);
+    HWND edit = win->tocFilterEdit->hwnd;
+    int end = GetWindowTextLengthW(edit);
+    SendMessageW(edit, EM_SETSEL, end, end);
 }
 
 // [Aa] [ab]  "3 of 12"        [collapse] [prev] [next]
@@ -2542,7 +2795,8 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             Rect card = TouchThumbnailRect(win, i);
             bool isCurrent = i + 1 == current;
             int cardRadius = DpiScale(win->hwndTocBox, 6);
-            FillTocPill(hdc, card, cardRadius, RGB(255, 255, 255));
+            // the card is the page's paper around its image, so it warms with it
+            FillTocPill(hdc, card, cardRadius, WarmColor(RGB(255, 255, 255), gRenderCache->nightLight));
             if (dm) {
                 Pixmap* bmp = FindTouchThumbnail(win, i + 1);
                 if (bmp) {
@@ -2587,6 +2841,19 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
         COLORREF onBg = 0;
         COLORREF onFg = 0;
         ThemeAccentSurfaceColors(&onBg, &onFg);
+        // suggested words, under the field
+        {
+            Vec<Rect> chipRects;
+            TouchSuggestChipRects(win, hdc, chipRects);
+            HFONT font = HdcGetUiFont(hdc, kFontSizeLabel);
+            for (int i = 0; i < len(chipRects); i++) {
+                Rect r = chipRects[i];
+                FillTocPill(hdc, r, r.dy / 2, navBg, ThemeEdgeColor());
+                SetTextColor(hdc, ThemeWindowTextColor());
+                HdcDrawText(hdc, win->touchSuggestions.At(i), r, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
+                            font);
+            }
+        }
         // the find bar's own options, as toggle chips: on = the accent surface
         struct Chip {
             Rect r;
@@ -3186,6 +3453,18 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
         TouchSearchControls c = TouchSearchControlsLayout(win);
         bool hasQuery =
             win->tocFilterEdit && win->tocFilterEdit->hwnd && GetWindowTextLengthW(win->tocFilterEdit->hwnd) > 0;
+        if (hasQuery && len(win->touchSuggestions) > 0) {
+            Vec<Rect> chipRects;
+            HDC dc = GetDC(hwnd);
+            TouchSuggestChipRects(win, dc, chipRects);
+            ReleaseDC(hwnd, dc);
+            for (int i = 0; i < len(chipRects); i++) {
+                if (chipRects[i].Contains(pt)) {
+                    AcceptTouchSuggestion(win, i);
+                    return true;
+                }
+            }
+        }
         if (hasQuery && c.prev.Contains(pt)) {
             TouchSearchGoTo(win, win->touchFindCurrent < 0 ? len(win->findMatches) - 1 : win->touchFindCurrent - 1);
             return true;
@@ -3706,6 +3985,8 @@ static void OnTocFilterTextChanged(MainWindow* win) {
     if (IsTouchChrome(win) && win->touchPanelMode == TouchPanelMode::Search) {
         TempStr text = win->tocFilterEdit->GetTextTemp();
         win->touchFindCurrent = -1; // a new query, a new list
+        EnsureTouchWordIndex(win);
+        UpdateTouchSuggestions(win);
         if (text) {
             SearchDocumentFromTouchPanel(win, text);
         } else {

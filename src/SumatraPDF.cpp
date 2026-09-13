@@ -4226,9 +4226,11 @@ void UpdateDocumentColors() {
     bool preservePdfImages = pagesDark && GetPreservePdfImagesInDarkMode();
     int documentColorsFollowTheme = (int)GetDocumentColorsFollowTheme();
 
+    int nightLight = gGlobalPrefs->nightLight ? std::clamp(gGlobalPrefs->nightLightStrength, 0, 100) : 0;
+
     if ((text == gRenderCache->textColor) && (bg == gRenderCache->backgroundColor) &&
         (link == gRenderCache->linkColor) && preservePdfImages == s_lastPreservePdfImages &&
-        documentColorsFollowTheme == s_lastDocumentColorsFollowTheme) {
+        documentColorsFollowTheme == s_lastDocumentColorsFollowTheme && nightLight == gRenderCache->nightLight) {
         return; // colors didn't change
     }
     s_lastPreservePdfImages = preservePdfImages;
@@ -4237,7 +4239,21 @@ void UpdateDocumentColors() {
     gRenderCache->textColor = text;
     gRenderCache->backgroundColor = bg;
     gRenderCache->linkColor = link;
+    bool nightLightChanged = nightLight != gRenderCache->nightLight;
+    gRenderCache->nightLight = nightLight;
     gRenderCache->darkModeEpoch++;
+
+    // the Pages pane keeps its own thumbnails, rendered with the night light
+    // of the time; the Library's are warmed as they are drawn and repaint with
+    // the canvas below
+    if (nightLightChanged) {
+        for (MainWindow* win : gWindows) {
+            FreeTouchThumbnails(win);
+            if (win->hwndTocBox) {
+                HwndInvalidate(win->hwndTocBox, false);
+            }
+        }
+    }
 
     // also drop the engines' cached dark-mode analyses / processed images
     // and regenerate markdown previews (their colors are baked into the html)

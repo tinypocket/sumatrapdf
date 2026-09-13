@@ -47,6 +47,9 @@ struct WebViewEvents {
     // page has loaded, WebView2's built-in Edge PDF viewer is already showing
     // it. Fires before the document renders, so the host can take over.
     void (*mainDocumentResponse)(void* ctx, Str url, Str contentType) = nullptr;
+    // the top-level document has been parsed (DOMContentLoaded), so its first
+    // paint is at most a frame or two away
+    void (*domContentLoaded)(void* ctx) = nullptr;
     // maps an accelerator key press inside the webview to an app command id to
     // post (WM_COMMAND) to the top-level window, or 0 to leave it to the
     // webview, or kWebViewForwardKey to re-post the key itself. Lets the host

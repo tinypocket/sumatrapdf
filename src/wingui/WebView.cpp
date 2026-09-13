@@ -637,6 +637,41 @@ class webview2_document_title_changed_handler : public ICoreWebView2DocumentTitl
     ULONG m_refCount = 1;
 };
 
+class webview2_dom_content_loaded_handler : public ICoreWebView2DOMContentLoadedEventHandler {
+  public:
+    explicit webview2_dom_content_loaded_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
+    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    ULONG STDMETHODCALLTYPE Release() {
+        ULONG n = --m_refCount;
+        if (n == 0) {
+            delete this;
+        }
+        return n;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, LPVOID* ppv) {
+        if (!ppv) {
+            return E_POINTER;
+        }
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == __uuidof(ICoreWebView2DOMContentLoadedEventHandler)) {
+            *ppv = static_cast<ICoreWebView2DOMContentLoadedEventHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* /*sender*/, ICoreWebView2DOMContentLoadedEventArgs* /*args*/) {
+        if (m_wnd && m_wnd->events.domContentLoaded) {
+            m_wnd->events.domContentLoaded(m_wnd->events.ctx);
+        }
+        return S_OK;
+    }
+
+  private:
+    WebviewWnd* m_wnd = nullptr;
+    ULONG m_refCount = 1;
+};
+
 class webview2_new_window_handler : public ICoreWebView2NewWindowRequestedEventHandler {
   public:
     explicit webview2_new_window_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
@@ -1361,6 +1396,17 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
     // WebResourceResponseReceived is on ICoreWebView2_2 (a later interface than
     // the one we hold), so it has to be queried for; an older runtime simply
     // doesn't deliver the event and the host falls back to URL-based detection.
+    if (events.domContentLoaded) {
+        ICoreWebView2_2* wv2 = nullptr;
+        if (SUCCEEDED(webview->QueryInterface(IID_PPV_ARGS(&wv2))) && wv2) {
+            auto* handler = new webview2_dom_content_loaded_handler(this);
+            ::EventRegistrationToken token = {};
+            wv2->add_DOMContentLoaded(handler, &token);
+            handler->Release();
+            wv2->Release();
+        }
+    }
+
     if (events.mainDocumentResponse) {
         ICoreWebView2_2* wv2 = nullptr;
         if (SUCCEEDED(webview->QueryInterface(IID_PPV_ARGS(&wv2))) && wv2) {

@@ -614,6 +614,13 @@ struct MainWindow {
     // the touch Search panel's current match (index into findMatches, -1:
     // none); it walks the list itself, see TouchSearchGoTo
     int touchFindCurrent = -1;
+    // search suggestions: the document's words, indexed in the background the
+    // first time it is searched, and the completions offered for the word
+    // being typed (see UpdateTouchSuggestions)
+    struct DocWordIndex* touchWordIndex = nullptr;
+    EngineBase* touchWordIndexEngine = nullptr; // identity only, never dereferenced
+    bool touchWordIndexBuilding = false;
+    StrVec touchSuggestions;
     int browserFindTotal = -1; // total matches across all pages (-1: sweep not done)
     Str browserFindTerm;       // owned; the term the current md find ran with
 

@@ -1056,6 +1056,15 @@ TwoRowTabs = false
 ; text; easier to read and to hit with a finger (introduced in version 3.8)
 LargerTabs = false
 
+; if true, pages are shown in warmer colors - less blue - so white paper is
+; easier on the eyes at night, like Windows' night light but for the page only
+; (introduced in version 3.8)
+NightLight = false
+
+; how warm the night light makes the page, from 0 (barely) to 100 (warmest)
+; (introduced in version 3.8)
+NightLightStrength = 50
+
 ; if true, check at startup whether an update is available
 CheckForUpdates = true
 ```

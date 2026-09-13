@@ -1033,6 +1033,10 @@ static DWORD WINAPI RenderCacheThread(LPVOID data) {
                 COLORREF linkCol = profile ? profile->linkColor : cache->linkColor;
                 RecolorPixmap(bmp, textCol, bgCol, linkCol, skipRectsPtr);
             }
+            // after the recolor, and for every engine: the night light warms
+            // the whole page, pictures and scans included, as the display's own
+            // night mode would
+            WarmPixmap(bmp, cache->nightLight);
             if (req.abort || req.darkModeEpoch != cache->darkModeEpoch) {
                 // colors changed while recoloring - discard result
                 FreePixmap(bmp);

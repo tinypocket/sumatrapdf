@@ -1423,6 +1423,18 @@ const globalPrefs: Field[] = [
     false,
     "if true, the document tabs in the title bar are taller and wider with larger text; easier to read and to hit with a finger",
   ).ver("3.8"),
+  field(
+    "NightLight",
+    Bool,
+    false,
+    "if true, pages are shown in warmer colors - less blue - so white paper is easier on the eyes at night, like Windows' night light but for the page only",
+  ).ver("3.8"),
+  field(
+    "NightLightStrength",
+    Int,
+    50,
+    "how warm the night light makes the page, from 0 (barely) to 100 (warmest)",
+  ).ver("3.8"),
   field("CheckForUpdates", Bool, true, "if true, check at startup whether an update is available").internal(),
   emptyLine(),
   comment("Settings below are not recognized by the current version"),

@@ -2435,7 +2435,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     }
 
     if (flags.appdataDir) {
-        SetAppDataDir(flags.appdataDir);
+        SetAppDataDir(flags.appdataDir, true);
     }
 
 #if defined(DEBUG)
@@ -2517,6 +2517,8 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     gCrashOnOpen = flags.crashOnOpen;
 
     gRenderCache->textColor = ThemePageRenderColors(gRenderCache->backgroundColor);
+    // and the night light, so the first pages already render warm
+    gRenderCache->nightLight = gGlobalPrefs->nightLight ? std::clamp(gGlobalPrefs->nightLightStrength, 0, 100) : 0;
     // logfa("retrieved doc colors in WinMain: 0x%x 0x%x\n", gRenderCache->textColor, gRenderCache->backgroundColor);
 
     gIsStartup = true;

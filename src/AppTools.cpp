@@ -116,13 +116,17 @@ bool IsInstallerOrUninstallerExe() {
 }
 
 static Str gAppDataDir;
+static bool gAppDataDirFromCmdLine = false;
 
 void DeleteAppTools() {
     // gAppDataDir is allocated from gPermArena (freed wholesale on exit)
     gAppDataDir = {};
 }
 
-void SetAppDataDir(Str dir) {
+void SetAppDataDir(Str dir, bool fromCmdLine) {
+    if (fromCmdLine) {
+        gAppDataDirFromCmdLine = true;
+    }
     dir = path::NormalizeTemp(dir);
     // don't try to create root directories like d:\ (CreateAll would fail)
     bool isRootDir = len(dir) == 3 && dir.s[1] == ':' && dir.s[2] == '\\';
@@ -561,19 +565,90 @@ Str Sha1OfAppExe() {
     return Str(gAppSha1);
 }
 
-TempStr GetWebViewDataDirTemp() {
-    TempStr dir = GetSpecialFolderTemp(CSIDL_LOCAL_APPDATA, false);
-    if (!dir) {
+// Profiles used to live in SumatraPDF-data\<first 6 hex digits of the exe's
+// SHA1>\webview. The newest of them - by when its cookies last changed - is the
+// one the user was signed in with.
+static TempStr NewestHashedWebViewProfileTemp(Str base) {
+    TempStr pattern = path::JoinTemp(base, StrL("*"));
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(CWStrTemp(pattern), &fd);
+    if (h == INVALID_HANDLE_VALUE) {
         return {};
     }
-    dir = path::JoinTemp(dir, StrL("SumatraPDF-data"));
-    char id[7] = "000000";
-    Str sha1 = Sha1OfAppExe();
-    if (sha1) {
-        str::BufSet(Str(id, dimof(id)), sha1);
+    TempStr best = {};
+    FILETIME bestTime{};
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            continue;
+        }
+        TempStr name = ToUtf8Temp(fd.cFileName);
+        bool isHash = len(name) == 6;
+        for (int i = 0; isHash && i < 6; i++) {
+            isHash = isxdigit((u8)name.s[i]) != 0;
+        }
+        if (!isHash) {
+            continue;
+        }
+        TempStr profile = path::JoinTemp(path::JoinTemp(base, name), StrL("webview"));
+        TempStr cookies = path::JoinTemp(profile, StrL("EBWebView\\Default\\Network\\Cookies"));
+        if (!file::Exists(cookies)) {
+            continue;
+        }
+        FILETIME t = file::GetModificationTime(cookies);
+        if (!best || CompareFileTime(&t, &bestTime) > 0) {
+            best = profile;
+            bestTime = t;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return best;
+}
+
+// The in-app browser's profile: its cookies - the sites you are signed in to -
+// and its saved passwords. It was named after a hash of the exe, so every new
+// version started an empty one and signed you out of everything; now it is one
+// folder that every version uses, and the first run of this version moves the
+// newest of the old ones into it, so the sign-ins made before the update stay.
+TempStr GetWebViewDataDirTemp() {
+    if (gAppDataDirFromCmdLine) {
+        // -appdata (the tests): the browser stays inside it, away from the
+        // user's own profile
+        return path::JoinTemp(GetAppDataDirTemp(), StrL("browser"));
     }
-    dir = path::JoinTemp(dir, id);
-    return path::JoinTemp(dir, StrL("webview"));
+    TempStr base = GetSpecialFolderTemp(CSIDL_LOCAL_APPDATA, false);
+    if (!base) {
+        return {};
+    }
+    base = path::JoinTemp(base, StrL("SumatraPDF-data"));
+#if defined(DEBUG)
+    // a debug build starts WebView2 with a DevTools port, and a profile can
+    // only be shared by processes that start WebView2 the same way
+    TempStr dir = path::JoinTemp(base, StrL("browser-dbg"));
+#else
+    TempStr dir = path::JoinTemp(base, StrL("browser"));
+#endif
+    // decided once per run: every webview of this run must use the same one
+    static Str chosen;
+    if (chosen) {
+        return str::DupTemp(chosen);
+    }
+    TempStr use = dir;
+    if (!dir::Exists(dir)) {
+        TempStr old = NewestHashedWebViewProfileTemp(base);
+        // a rename: the old profile is on the same volume, and the version
+        // that used it is no longer running
+        if (old && !MoveFileExW(CWStrTemp(old), CWStrTemp(dir), 0)) {
+            // Something still holds it - a WebView2 process of the old version
+            // that has not exited yet. Use it where it is this time, rather
+            // than let WebView2 start the new folder empty, and move it on the
+            // next run.
+            logf("GetWebViewDataDirTemp: couldn't move '%s' to '%s', using it in place\n", old, dir);
+            LogLastError();
+            use = old;
+        }
+    }
+    chosen = str::Dup(GetPermArena(), use);
+    return str::DupTemp(chosen);
 }
 
 // Format the file size in a short form that rounds to the largest size unit

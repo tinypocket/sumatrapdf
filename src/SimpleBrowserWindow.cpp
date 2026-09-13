@@ -436,6 +436,13 @@ constexpr UINT_PTR kTbHoverTimerId = 72;
 constexpr UINT_PTR kTbSpinTimerId = 73;
 constexpr int kTbSpinnerDx = 14;
 constexpr double kTbSpinnerTurnMs = 900.0;
+// A new tab's webview is blank (white) until its page paints, which on a real
+// site takes a good fraction of a second - the whole page area flashed white.
+// The page the user came from stays up instead, until the new one has parsed
+// its document (plus a moment to paint it) or finished, or kTbHoldMaxMs passed.
+constexpr UINT_PTR kTbHoldTimerId = 74;
+constexpr int kTbHoldAfterDomMs = 120;
+constexpr int kTbHoldMaxMs = 2000;
 // how deep a pressed chrome button sinks, matching the top bar
 constexpr int kTbPressInset = 2;
 
@@ -506,6 +513,12 @@ struct TouchBrowser {
     // that dies again straight away from being rebuilt in a loop.
     bool rebuildPending = false;
     double lastRebuildMs = 0.0;
+    // the tab kept on screen (and inert) above a new tab that has nothing to
+    // show yet; see kTbHoldTimerId. Only meaningful while TbHeldTab says so.
+    TbTab* holdTab = nullptr;
+    // where the page area was last laid out, so a new webview starts there
+    // rather than over the whole window
+    Rect webRc;
 };
 
 // Keys the page must not swallow. Ctrl+L belongs to the address bar, so it is
@@ -1028,7 +1041,9 @@ static void TbStartDocDownload(MainWindow* win, Str url, Str ext) {
 }
 
 static void TbSetChildrenVisible(TouchBrowser* tb, bool show);
-static void TbActivateTab(TouchBrowser* tb, int idx);
+// `hold`: a tab to keep on screen above the newly active one until that has
+// something to show (see kTbHoldTimerId)
+static void TbActivateTab(TouchBrowser* tb, int idx, TbTab* hold = nullptr);
 // opens `url` in a new browser tab, from the message loop rather than inline
 static void TbRequestNewTab(MainWindow* win, Str url);
 // repaint the chrome (a tab title changed, history changed, ...)
@@ -1065,6 +1080,22 @@ static WebviewWnd* TbActiveWebView(TouchBrowser* tb) {
 static bool TbIsActiveTab(TbTab* t) {
     return t == TbActiveTab(t->tb);
 }
+
+// the tab still covering the active one while that loads, or nullptr
+static TbTab* TbHeldTab(TouchBrowser* tb) {
+    TbTab* held = tb->holdTab;
+    if (!held || held == TbActiveTab(tb) || tb->tabs.Find(held) < 0) {
+        return nullptr;
+    }
+    if (!held->webView || !held->webView->hwnd) {
+        return nullptr;
+    }
+    return held;
+}
+
+static void TbSetHold(TouchBrowser* tb, TbTab* held);
+static void TbEndHold(TouchBrowser* tb);
+static void TbDomContentLoaded(void* ctx);
 
 // navigationStarting: intercept links to documents so they open as tabs in
 // SumatraPDF+ instead of navigating the webview; everything else proceeds.
@@ -1129,6 +1160,8 @@ static void TbNavigationCompleted(void* ctx, Str url, bool /*success*/) {
     if (TbIsActiveTab(tab)) {
         TbSyncUrlBar(tab->tb);
         TbUpdateNavButtons(tab->tb);
+        // loaded (or failed with an error page): nothing left to wait for
+        TbEndHold(tab->tb);
     }
 }
 
@@ -2672,6 +2705,21 @@ struct TbChromeWnd : Wnd {
     TbHit hot;
     TbHit pressed;
 
+    // Press a tab and drag it sideways to move it: it follows the finger (or
+    // mouse) and the tabs it passes slide over to show where it will land.
+    int dragTab = -1;
+    int dragStartX = 0;
+    bool tabDragging = false;
+    int dragDx = 0;
+    // the touch contact pressing a tab, 0 for the mouse
+    UINT32 dragPointerId = 0;
+    void TabPressStart(int tabIdx, Point pt);
+    void TabPressMove(Point pt);
+    bool TabPressEnd(); // true when it was a drag, not a tap
+    void TabPressCancel();
+    int TabDragTarget() const;
+    int TabDrawOffset(int i) const;
+
     AnimTimer progTimer;
     AnimTimer spinTimer;
     AnimVal progVal;  // 0..1 of the bar's width
@@ -3280,10 +3328,13 @@ void TbChromeWnd::Draw(HDC hdc) {
         int innerGap = DpiScale(hwnd, kTbTabInnerGap);
         HFONT fontActive = HdcGetUiFont(hdc, kTbFontTab, FW_SEMIBOLD);
         HFONT fontIdle = HdcGetUiFont(hdc, kTbFontTab);
-        for (int i = 0; i < len(tabRects); i++) {
+        auto drawTab = [&](int i) {
+            int off = TabDrawOffset(i);
             Rect r = tabRects[i];
+            r.x += off;
             bool isActive = (i == tb->activeTab);
-            bool isHot = (hot.part == TbPart::Tab && hot.idx == i);
+            bool isHot = !tabDragging && (hot.part == TbPart::Tab && hot.idx == i);
+            bool isLifted = tabDragging && i == dragTab;
             Rect fillR = r;
             if (isActive) {
                 // one pixel taller, so its body covers the row's bottom border
@@ -3291,9 +3342,11 @@ void TbChromeWnd::Draw(HDC hdc) {
                 fillR.dy += 1;
             }
             COLORREF bg = isActive ? panel : (isHot ? ThemeTouchSurfaceColor() : hotBg);
-            TbFillTab(hdc, fillR, radius, bg, edge);
+            // the tab in hand is outlined, so it reads as picked up
+            TbFillTab(hdc, fillR, radius, bg, isLifted ? accent : edge);
 
             Rect close = tabCloseRects[i];
+            close.x += off;
             int labelX = r.x + padLeft;
             if (tb->tabs[i]->loading) {
                 int sd = DpiScale(hwnd, kTbSpinnerDx);
@@ -3305,8 +3358,17 @@ void TbChromeWnd::Draw(HDC hdc) {
             HdcDrawText(hdc, TbTabLabel(tb->tabs[i]), label,
                         DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
                         isActive ? fontActive : fontIdle);
-            bool closeHot = (hot.part == TbPart::TabClose && hot.idx == i);
+            bool closeHot = !tabDragging && (hot.part == TbPart::TabClose && hot.idx == i);
             TbDrawCloseGlyph(hdc, hwnd, close, muted, closeHot ? ThemeEdgeColor() : kColorUnset);
+        };
+        for (int i = 0; i < len(tabRects); i++) {
+            if (!tabDragging || i != dragTab) {
+                drawTab(i);
+            }
+        }
+        if (tabDragging && dragTab >= 0 && dragTab < len(tabRects)) {
+            // last, so it passes over the tabs it is dragged across
+            drawTab(dragTab);
         }
         bool newHot = (hot.part == TbPart::NewTab);
         if (newHot) {
@@ -3530,6 +3592,113 @@ void TbChromeWnd::UpdateTooltip(const TbHit& h) {
     tooltip->SetSingle(StrL("Page info"), infoRect, false);
 }
 
+// Moves a tab to another place in the strip. The active tab stays active.
+static void TbMoveTab(TouchBrowser* tb, int from, int to) {
+    int n = len(tb->tabs);
+    if (from == to || from < 0 || to < 0 || from >= n || to >= n) {
+        return;
+    }
+    TbTab* active = TbActiveTab(tb);
+    TbTab* moved = tb->tabs[from];
+    tb->tabs.RemoveAt(from);
+    tb->tabs.InsertAt(to, moved);
+    tb->activeTab = std::max(0, tb->tabs.Find(active));
+    TbRelayoutChrome(tb);
+}
+
+void TbChromeWnd::TabPressStart(int tabIdx, Point pt) {
+    TabPressCancel();
+    dragTab = tabIdx;
+    dragStartX = pt.x;
+}
+
+void TbChromeWnd::TabPressMove(Point pt) {
+    if (dragTab < 0 || dragTab >= len(tabRects) || len(tabRects) < 2) {
+        return;
+    }
+    int dx = pt.x - dragStartX;
+    if (!tabDragging) {
+        // past a finger's wobble, so a tap stays a tap
+        if (abs(dx) < DpiScale(hwnd, 12)) {
+            return;
+        }
+        tabDragging = true;
+        // it is being carried now, not pressed
+        SetPressedAnimated({});
+    }
+    // it can go as far as the first and the last tab's places
+    Rect r = tabRects[dragTab];
+    dragDx = std::clamp(dx, tabRects[0].x - r.x, tabRects.Last().x - r.x);
+    HwndInvalidate(hwnd, false);
+}
+
+// the place the dragged tab would land in: the one its centre is nearest to
+int TbChromeWnd::TabDragTarget() const {
+    if (!tabDragging || dragTab < 0 || dragTab >= len(tabRects)) {
+        return dragTab;
+    }
+    int cx = tabRects[dragTab].x + tabRects[dragTab].dx / 2 + dragDx;
+    int best = dragTab;
+    int bestDist = INT_MAX;
+    for (int i = 0; i < len(tabRects); i++) {
+        int d = abs(tabRects[i].x + tabRects[i].dx / 2 - cx);
+        if (d < bestDist) {
+            bestDist = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+// how far tab i is drawn from its own place while a tab is dragged
+int TbChromeWnd::TabDrawOffset(int i) const {
+    if (!tabDragging || dragTab < 0 || dragTab >= len(tabRects) || i < 0 || i >= len(tabRects)) {
+        return 0;
+    }
+    if (i == dragTab) {
+        return dragDx;
+    }
+    int to = TabDragTarget();
+    // the tabs between where it was and where it would go move over one place
+    if (dragTab < to && i > dragTab && i <= to) {
+        return tabRects[i - 1].x - tabRects[i].x;
+    }
+    if (to < dragTab && i >= to && i < dragTab) {
+        return tabRects[i + 1].x - tabRects[i].x;
+    }
+    return 0;
+}
+
+bool TbChromeWnd::TabPressEnd() {
+    int from = dragTab;
+    int to = TabDragTarget();
+    bool wasDrag = tabDragging;
+    TabPressCancel();
+    if (wasDrag) {
+        TbMoveTab(tb, from, to);
+    }
+    return wasDrag;
+}
+
+void TbChromeWnd::TabPressCancel() {
+    bool wasDrag = tabDragging;
+    dragTab = -1;
+    tabDragging = false;
+    dragDx = 0;
+    if (wasDrag && hwnd) {
+        HwndInvalidate(hwnd, false);
+    }
+}
+
+#ifndef WM_POINTERUPDATE
+#define WM_POINTERUPDATE 0x0245
+#define WM_POINTERDOWN 0x0246
+#define WM_POINTERUP 0x0247
+#endif
+#ifndef WM_POINTERCAPTURECHANGED
+#define WM_POINTERCAPTURECHANGED 0x024C
+#endif
+
 LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_ERASEBKGND) {
         return TRUE;
@@ -3544,6 +3713,10 @@ LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_TIMER && wp == kTbSpinTimerId) {
         OnSpinTick();
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == kTbHoldTimerId) {
+        TbEndHold(tb);
         return 0;
     }
     if (msg == WM_SIZE) {
@@ -3567,6 +3740,9 @@ LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_MOUSEMOVE) {
         Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (dragPointerId == 0 && dragTab >= 0 && (wp & MK_LBUTTON)) {
+            TabPressMove(pt);
+        }
         TbHit h = HitTest(pt);
         SetHotAnimated(h);
         TRACKMOUSEEVENT tme{};
@@ -3613,6 +3789,9 @@ LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         TbHit down = HitTest(pt);
         SetPressedAnimated(down);
+        if (down.part == TbPart::Tab && dragPointerId == 0) {
+            TabPressStart(down.idx, pt);
+        }
         if (down.part != TbPart::None) {
             SetCapture(hw);
         }
@@ -3621,11 +3800,13 @@ LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_LBUTTONUP) {
         Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         TbHit was = pressed;
+        // before letting go of the capture, whose loss cancels the drag
+        bool wasDrag = dragPointerId == 0 && TabPressEnd();
         SetPressedAnimated({});
         if (GetCapture() == hw) {
             ReleaseCapture();
         }
-        if (was.part == TbPart::None) {
+        if (wasDrag || was.part == TbPart::None) {
             return 0;
         }
         TbHit now = HitTest(pt);
@@ -3638,6 +3819,44 @@ LRESULT TbChromeWnd::WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         if (pressed.part != TbPart::None) {
             SetPressedAnimated({});
         }
+        if (dragPointerId == 0 && (HWND)lp != hw) {
+            TabPressCancel();
+        }
+        return 0;
+    }
+    // A finger on a tab is handled as the whole contact: left to the system, a
+    // finger drag becomes a pan gesture and never arrives as a mouse drag. A
+    // touch anywhere else in the chrome is left to arrive as mouse input, as
+    // it always has.
+    if (msg == WM_POINTERDOWN) {
+        Point pt = HwndScreenToClient(hw, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+        TbHit down = HitTest(pt);
+        if (dragPointerId == 0 && down.part == TbPart::Tab) {
+            dragPointerId = LOWORD(wp);
+            SetPressedAnimated(down);
+            TabPressStart(down.idx, pt);
+            return 0;
+        }
+    }
+    if (msg == WM_POINTERUPDATE && dragPointerId != 0 && LOWORD(wp) == dragPointerId) {
+        TabPressMove(HwndScreenToClient(hw, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}));
+        return 0;
+    }
+    if (msg == WM_POINTERUP && dragPointerId != 0 && LOWORD(wp) == dragPointerId) {
+        Point pt = HwndScreenToClient(hw, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+        TbHit was = pressed;
+        bool wasDrag = TabPressEnd();
+        dragPointerId = 0;
+        SetPressedAnimated({});
+        if (!wasDrag && was.part == TbPart::Tab && TbSameHit(was, HitTest(pt))) {
+            Invoke(was);
+        }
+        return 0;
+    }
+    if (msg == WM_POINTERCAPTURECHANGED && dragPointerId != 0 && LOWORD(wp) == dragPointerId) {
+        TabPressCancel();
+        dragPointerId = 0;
+        SetPressedAnimated({});
         return 0;
     }
     return WndProcDefault(hw, msg, wp, lp);
@@ -3707,6 +3926,37 @@ static Rect TbMenuAnchorScreenRect(TouchBrowser* tb) {
 }
 
 // --- tabs ------------------------------------------------------------------
+
+static void TbSetHold(TouchBrowser* tb, TbTab* held) {
+    tb->holdTab = held;
+    HWND hwndChrome = tb->chrome ? tb->chrome->hwnd : nullptr;
+    if (!hwndChrome) {
+        return;
+    }
+    if (held) {
+        SetTimer(hwndChrome, kTbHoldTimerId, kTbHoldMaxMs, nullptr);
+    } else {
+        KillTimer(hwndChrome, kTbHoldTimerId);
+    }
+}
+
+// the new tab has something to show: take the page it was covered by away
+static void TbEndHold(TouchBrowser* tb) {
+    bool wasHeld = TbHeldTab(tb) != nullptr;
+    TbSetHold(tb, nullptr);
+    if (wasHeld && tb->win->touchView == TouchView::Web) {
+        TbSetChildrenVisible(tb, true);
+    }
+}
+
+static void TbDomContentLoaded(void* ctx) {
+    auto* tab = (TbTab*)ctx;
+    TouchBrowser* tb = tab->tb;
+    if (TbIsActiveTab(tab) && TbHeldTab(tb) && tb->chrome && tb->chrome->hwnd) {
+        // parsed, not yet painted: give it a moment before it goes on screen
+        SetTimer(tb->chrome->hwnd, kTbHoldTimerId, kTbHoldAfterDomMs, nullptr);
+    }
+}
 
 static void TbDestroyTab(TbTab* t) {
     delete t->webView;
@@ -3784,12 +4034,16 @@ static WebviewWnd* TbCreateWebView(TbTab* t) {
     wv->events.historyChanged = TbHistoryChanged;
     wv->events.documentTitleChanged = TbDocumentTitleChanged;
     wv->events.mainDocumentResponse = TbMainDocumentResponse;
+    wv->events.domContentLoaded = TbDomContentLoaded;
     wv->events.resolveAccelCmd = TbResolveAccelCmd;
     wv->events.processFailed = TbProcessFailed;
     wv->forwardAppAccelerators = true;
     CreateWebViewArgs cargs;
     cargs.parent = frame;
-    cargs.pos = HwndClientRect(frame);
+    // Where the page area already is: the control is shown before the next
+    // layout moves it, and at the size of the whole window it would cover the
+    // rail until then.
+    cargs.pos = t->tb->webRc.IsEmpty() ? HwndClientRect(frame) : t->tb->webRc;
     if (!wv->Create(cargs)) {
         delete wv;
         return nullptr;
@@ -3837,6 +4091,7 @@ static void TbRebuildNow(TbRebuildReq* req) {
     TouchBrowser* tb = win->touchBrowser;
     tb->rebuildPending = false;
     tb->lastRebuildMs = AnimNowMs();
+    TbSetHold(tb, nullptr);
     for (TbTab* t : tb->tabs) {
         // the page it was on, or the one it was about to open
         Str reopen = t->url ? t->url : t->pendingUrl;
@@ -3878,13 +4133,15 @@ static bool TbProcessFailed(void* ctx, WebViewProcessFailure kind) {
     return false;
 }
 
-static void TbActivateTab(TouchBrowser* tb, int idx) {
+static void TbActivateTab(TouchBrowser* tb, int idx, TbTab* hold) {
     int n = len(tb->tabs);
     if (n == 0) {
         tb->activeTab = 0;
         return;
     }
     tb->activeTab = limitValue(idx, 0, n - 1);
+    // any other switch shows the tab it switches to straight away
+    TbSetHold(tb, hold);
     TbSyncUrlBar(tb);
     TbUpdateNavButtons(tb);
     if (tb->chrome) {
@@ -3908,10 +4165,13 @@ static void TbActivateTab(TouchBrowser* tb, int idx) {
 }
 
 static void TbOpenNewTab(TouchBrowser* tb, Str url) {
+    TbTab* from = TbActiveTab(tb);
     if (!TbCreateTab(tb, url)) {
         return;
     }
-    TbActivateTab(tb, len(tb->tabs) - 1);
+    // only a tab that has a page to show can stand in while the new one loads
+    bool canHold = from && from->webView && from->webView->hwnd && from->url;
+    TbActivateTab(tb, len(tb->tabs) - 1, canHold ? from : nullptr);
 }
 
 static void TbOnNewTab(TouchBrowser* tb) {
@@ -3983,21 +4243,33 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
     if (hwndChrome) {
         ShowWindow(hwndChrome, show ? SW_SHOW : SW_HIDE);
     }
+    TbTab* held = show ? TbHeldTab(tb) : nullptr;
     for (int i = 0; i < len(tb->tabs); i++) {
-        WebviewWnd* wv = tb->tabs[i]->webView;
+        TbTab* t = tb->tabs[i];
+        WebviewWnd* wv = t->webView;
         if (!wv) {
             continue;
         }
-        // only the active tab is on screen; the others keep running hidden
-        bool isVisible = show && (i == tb->activeTab);
+        // only the active tab is on screen (with the tab it came from over it
+        // while it loads); the others keep running hidden
+        bool isVisible = show && (i == tb->activeTab || t == held);
         wv->SetIsVisible(isVisible);
         wv->SetControllerVisible(isVisible);
+        if (wv->hwnd) {
+            // the page left standing is only a picture of where the user was:
+            // a tap on it must not act on a tab that is no longer the current one
+            EnableWindow(wv->hwnd, t != held);
+        }
         // The canvas is a sibling that covers the same content area and sits
         // above us in z-order, so it would paint the Home page over the page
         // content. Raise the webview (both have WS_CLIPSIBLINGS) when shown.
-        if (isVisible && wv->hwnd) {
+        if (isVisible && wv->hwnd && t != held) {
             SetWindowPos(wv->hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
+    }
+    if (held) {
+        // above the new tab, which loads (and paints) underneath it
+        SetWindowPos(held->webView->hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
     if (show && hwndChrome) {
         // ...but then the chrome must go above the webview, or WebView2 (which
@@ -4040,6 +4312,7 @@ void LayoutTouchWebView(MainWindow* win, Rect rc) {
 
     int webTop = rc.y + chromeDy;
     Rect webRc{rc.x, webTop, rc.dx, std::max(0, rc.y + rc.dy - webTop)};
+    tb->webRc = webRc;
     // every tab gets the bounds, so switching to one doesn't show a stale size
     for (TbTab* t : tb->tabs) {
         if (t->webView) {

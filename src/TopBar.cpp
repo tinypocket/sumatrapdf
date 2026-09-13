@@ -42,6 +42,7 @@
 
 static Kind kindTopBar = "topBar";
 static Kind kindTouchPreview = "touchPreview";
+static Kind kindTouchNightLight = "touchNightLight";
 
 struct TopBarWnd;
 
@@ -69,11 +70,29 @@ struct TouchPreviewWnd : Wnd {
     void Hide();
     void BuildLayout();
     void FreeCards();
+    void DrawCard(HDC hdc, const PreviewCard& card, int offsetX, bool lifted);
+    void Tap(Point pt);
+    // Press and drag a card sideways to put the document somewhere else among
+    // its window's tabs: the card follows the finger (or mouse) and the other
+    // cards slide aside to show where it will land.
+    void PressStart(Point pt);
+    void PressMove(Point pt);
+    void PressEnd();
+    void PressCancel();
+    int DragTarget() const;
+    int DrawOffset(int i) const;
+    void DragRange(int& lo, int& hi) const;
 
     TopBarWnd* owner = nullptr;
     Vec<PreviewCard> cards;
     u64 generation = 0;
     bool trackingMouse = false;
+    int pressCard = -1;
+    Point pressPt;
+    bool dragging = false;
+    int dragDx = 0;
+    // the touch contact driving the press, 0 for the mouse
+    UINT32 pointerId = 0;
 };
 
 struct TouchBookmarkConfirmWnd : Wnd {
@@ -88,6 +107,31 @@ struct TouchBookmarkConfirmWnd : Wnd {
     int pageNo = 0;
     Rect cancelRect;
     Rect removeRect;
+};
+
+// The night light panel, opened from the overflow menu: an on/off switch and a
+// strength slider, as in Windows' own night light settings. Changes show as
+// they are made; while the slider is being dragged the pages re-render a
+// little behind the finger rather than once per pixel moved.
+struct TouchNightLightWnd : Wnd {
+    TouchNightLightWnd();
+    ~TouchNightLightWnd() override;
+    void OnPaint(HDC hdc, PAINTSTRUCT* ps) override;
+    LRESULT WndProc(HWND, UINT, WPARAM, LPARAM) override;
+    bool Create(TopBarWnd*);
+    void Show(Rect anchorRect);
+    void Hide();
+    void SetStrength(int strength);
+    void SetStrengthFromX(int x);
+    void ScheduleApply();
+    void ApplyNow();
+
+    TopBarWnd* owner = nullptr;
+    Rect switchRect;
+    // the slider's track; the thumb's centre travels its whole width
+    Rect trackRect;
+    bool dragging = false;
+    bool applyPending = false;
 };
 
 // What a slot draws. This is the "scaled" direction's toolbar (2a in the
@@ -223,6 +267,7 @@ struct TopBarWnd : Wnd {
     TouchPreviewWnd* previewWnd = nullptr;
     bool previewPinned = false;
     TouchBookmarkConfirmWnd* bookmarkConfirmWnd = nullptr;
+    TouchNightLightWnd* nightLightWnd = nullptr;
     int savedHoldingIdx = -1;
     u64 savedHoldStarted = 0;
     bool savedHoldCompleted = false;
@@ -238,6 +283,7 @@ struct TopBarWnd : Wnd {
     void CancelEdit();
     void AddCurrentPageBookmark();
     void ShowOverflowMenu(const Rect& anchor);
+    void ShowNightLight(const Rect& anchor);
     // rebuilds savedPages/savedPageNames from the document's stored favorites
     void RefreshSavedPages();
     Rect PreviewAnchorRect(const Rect& slotRect);
@@ -267,6 +313,7 @@ TopBarWnd::~TopBarWnd() {
     animTimer.Stop();
     delete previewWnd;
     delete bookmarkConfirmWnd;
+    delete nightLightWnd;
     if (iml) {
         ImageList_Destroy(iml);
     }
@@ -561,6 +608,9 @@ void TopBarWnd::CloseOverlays(bool commitEdits) {
     }
     if (bookmarkConfirmWnd) {
         bookmarkConfirmWnd->Hide();
+    }
+    if (nightLightWnd) {
+        nightLightWnd->Hide();
     }
     if (pageEditing || zoomEditing) {
         if (commitEdits) {
@@ -981,6 +1031,9 @@ TouchPreviewWnd::~TouchPreviewWnd() {
 
 void TouchPreviewWnd::FreeCards() {
     generation++;
+    pressCard = -1;
+    dragging = false;
+    dragDx = 0;
     for (PreviewCard& card : cards) {
         str::Free(card.filePath);
         delete card.thumbnail;
@@ -1001,13 +1054,22 @@ static void TouchPreviewThumbnailFinished(TouchPreviewThumbnailRequest* request,
     Wnd* wnd = WndListFindByHwnd(request->hwnd);
     if (wnd && wnd->kind == kindTouchPreview) {
         auto* preview = (TouchPreviewWnd*)wnd;
-        if (preview->generation == request->generation && preview->cards.isValidIndex(request->cardIdx)) {
-            PreviewCard& card = preview->cards[request->cardIdx];
-            if (card.pageNo == request->pageNo && str::EqI(card.filePath, request->filePath)) {
+        if (preview->generation == request->generation) {
+            // a card dragged elsewhere since the request took its thumbnail
+            // request along, so look for it where it is now
+            for (int i = 0; i < len(preview->cards); i++) {
+                PreviewCard& card = preview->cards[i];
+                if (card.pageNo != request->pageNo || !str::EqI(card.filePath, request->filePath)) {
+                    continue;
+                }
+                if (card.thumbnail && i != request->cardIdx) {
+                    continue;
+                }
                 delete card.thumbnail;
                 card.thumbnail = thumbnail;
                 thumbnail = nullptr;
                 HwndInvalidate(preview->hwnd, false);
+                break;
             }
         }
     }
@@ -1029,6 +1091,25 @@ bool TouchPreviewWnd::Create(TopBarWnd* bar) {
     }
     SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, (LONG_PTR)owner->win->hwndFrame);
     return true;
+}
+
+// With documents in their own windows (UseTabs off) each card is a window, so
+// dragging a card rearranges windows. That order is the strip's own: gWindows
+// stays as it is, because a lot of code takes its first window as the default.
+// Windows opened since the last drag follow in the order they were opened.
+static Vec<MainWindow*> gStripWindowOrder;
+
+static void StripWindowOrder(Vec<MainWindow*>& out) {
+    for (MainWindow* w : gStripWindowOrder) {
+        if (gWindows.Contains(w) && !out.Contains(w)) {
+            out.Append(w);
+        }
+    }
+    for (MainWindow* w : gWindows) {
+        if (!out.Contains(w)) {
+            out.Append(w);
+        }
+    }
 }
 
 void TouchPreviewWnd::BuildLayout() {
@@ -1077,7 +1158,9 @@ void TouchPreviewWnd::BuildLayout() {
         hwndTabs = nullptr;
         layoutTabs = nullptr;
     }
-    for (MainWindow* win : gWindows) {
+    Vec<MainWindow*> windows;
+    StripWindowOrder(windows);
+    for (MainWindow* win : windows) {
         for (int i = 0; i < win->TabCount(); i++) {
             WindowTab* tab = win->GetTab(i);
             if (!tab || tab->IsNonDocumentTab()) {
@@ -1182,6 +1265,7 @@ void TouchPreviewWnd::Show(HWND anchorHwnd, Rect anchorRect) {
 }
 
 void TouchPreviewWnd::Hide() {
+    PressCancel();
     if (owner) {
         owner->previewPinned = false;
     }
@@ -1190,36 +1274,37 @@ void TouchPreviewWnd::Hide() {
     }
 }
 
-void TouchPreviewWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
-    HdcFillRect(hdc, ToRect(ps->rcPaint), ThemeHotBackgroundColor());
-    SetBkMode(hdc, TRANSPARENT);
+void TouchPreviewWnd::DrawCard(HDC hdc, const PreviewCard& c, int offsetX, bool lifted) {
+    PreviewCard card = c;
+    card.rect.x += offsetX;
+    card.closeRect.x += offsetX;
     int titleDy = DpiScale(hwnd, 32);
     int radius = DpiScale(hwnd, 12);
-    for (const PreviewCard& card : cards) {
-        FillTrack(hdc, card.rect, radius, RGB(0x2b, 0x2b, 0x2b), ThemeEdgeColor());
+    FillTrack(hdc, card.rect, radius, RGB(0x2b, 0x2b, 0x2b), ThemeEdgeColor());
 
-        Rect body = card.rect;
-        body.y += titleDy;
-        body.dy -= titleDy;
-        FillTrack(hdc, body, radius, RGB(0xea, 0xe5, 0xde));
-        HdcFillRect(hdc, Rect{body.x, body.y, body.dx, radius}, RGB(0xea, 0xe5, 0xde));
+    Rect body = card.rect;
+    body.y += titleDy;
+    body.dy -= titleDy;
+    FillTrack(hdc, body, radius, RGB(0xea, 0xe5, 0xde));
+    HdcFillRect(hdc, Rect{body.x, body.y, body.dx, radius}, RGB(0xea, 0xe5, 0xde));
 
-        WindowTab* tab = card.win->GetTab(card.tabIdx);
-        if (!tab) {
-            continue;
-        }
-        int iconDy = DpiScale(hwnd, 13);
-        Rect fileIcon{card.rect.x + DpiScale(hwnd, 8), card.rect.y + (titleDy - iconDy) / 2, iconDy, iconDy};
-        FillTrack(hdc, fileIcon, DpiScale(hwnd, 2), RgbToCOLORREF(0xe8927c));
+    WindowTab* tab = card.win->GetTab(card.tabIdx);
+    if (!tab) {
+        return;
+    }
+    int iconDy = DpiScale(hwnd, 13);
+    Rect fileIcon{card.rect.x + DpiScale(hwnd, 8), card.rect.y + (titleDy - iconDy) / 2, iconDy, iconDy};
+    FillTrack(hdc, fileIcon, DpiScale(hwnd, 2), RgbToCOLORREF(0xe8927c));
 
-        Rect title = card.rect;
-        title.x = fileIcon.x + fileIcon.dx + DpiScale(hwnd, 7);
-        title.dx = card.closeRect.x - title.x - DpiScale(hwnd, 4);
-        title.dy = titleDy;
-        SetTextColor(hdc, RGB(255, 255, 255));
-        HdcDrawText(hdc, tab->GetTabTitle(), title,
-                    DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX, HdcGetUiFont(hdc, 12));
+    Rect title = card.rect;
+    title.x = fileIcon.x + fileIcon.dx + DpiScale(hwnd, 7);
+    title.dx = card.closeRect.x - title.x - DpiScale(hwnd, 4);
+    title.dy = titleDy;
+    SetTextColor(hdc, RGB(255, 255, 255));
+    HdcDrawText(hdc, tab->GetTabTitle(), title, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
+                HdcGetUiFont(hdc, 12));
 
+    {
         Gdiplus::Graphics gfx(hdc);
         gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         Gdiplus::Pen closePen(Gdiplus::Color(235, 255, 255, 255), 1.5f);
@@ -1228,27 +1313,284 @@ void TouchPreviewWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
         int cy = card.closeRect.y + card.closeRect.dy / 2;
         gfx.DrawLine(&closePen, cx - arm, cy - arm, cx + arm, cy + arm);
         gfx.DrawLine(&closePen, cx + arm, cy - arm, cx - arm, cy + arm);
+    }
 
-        RenderedBitmap* thumbnail = card.thumbnail;
-        Rect thumbArea = body;
-        thumbArea.Inflate(-DpiScale(hwnd, 12), -DpiScale(hwnd, 10));
-        if (thumbnail) {
-            Size src = thumbnail->GetSize();
-            int dstDx = thumbArea.dx;
-            int dstDy = src.dy * dstDx / src.dx;
-            if (dstDy > thumbArea.dy) {
-                dstDy = thumbArea.dy;
-                dstDx = src.dx * dstDy / src.dy;
+    RenderedBitmap* thumbnail = card.thumbnail;
+    Rect thumbArea = body;
+    thumbArea.Inflate(-DpiScale(hwnd, 12), -DpiScale(hwnd, 10));
+    if (thumbnail) {
+        Size src = thumbnail->GetSize();
+        int dstDx = thumbArea.dx;
+        int dstDy = src.dy * dstDx / src.dx;
+        if (dstDy > thumbArea.dy) {
+            dstDy = thumbArea.dy;
+            dstDx = src.dx * dstDy / src.dy;
+        }
+        Rect dst{thumbArea.x + (thumbArea.dx - dstDx) / 2, thumbArea.y + (thumbArea.dy - dstDy) / 2, dstDx, dstDy};
+        thumbnail->Blit(hdc, dst);
+    } else {
+        SetTextColor(hdc, ThemeWindowDarkerTextColor());
+        HdcDrawText(hdc, StrL("page"), thumbArea, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, 12));
+    }
+    if (lifted) {
+        // the card in hand is outlined, so it reads as picked up
+        StrokeRoundRectAA(hdc, card.rect, radius, ThemeWindowLinkColor(), DpiScale(hwnd, 2));
+    }
+}
+
+void TouchPreviewWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
+    // off-screen, then one blit: a dragged card repaints the strip on every move
+    Rect rc = HwndClientRect(hwnd);
+    HDC memDc = CreateCompatibleDC(hdc);
+    HBITMAP bmp = memDc ? CreateCompatibleBitmap(hdc, std::max(1, rc.dx), std::max(1, rc.dy)) : nullptr;
+    HDC target = bmp ? memDc : hdc;
+    HGDIOBJ prev = bmp ? SelectObject(memDc, bmp) : nullptr;
+    HdcFillRect(target, bmp ? rc : ToRect(ps->rcPaint), ThemeHotBackgroundColor());
+    SetBkMode(target, TRANSPARENT);
+    for (int i = 0; i < len(cards); i++) {
+        if (dragging && i == pressCard) {
+            continue;
+        }
+        DrawCard(target, cards[i], DrawOffset(i), false);
+    }
+    if (dragging && cards.isValidIndex(pressCard)) {
+        // drawn last: it passes over the cards it is dragged across
+        DrawCard(target, cards[pressCard], DrawOffset(pressCard), true);
+    }
+    if (bmp) {
+        Rect clip = ToRect(ps->rcPaint);
+        BitBlt(hdc, clip.x, clip.y, clip.dx, clip.dy, memDc, clip.x, clip.y, SRCCOPY);
+        SelectObject(memDc, prev);
+        DeleteObject(bmp);
+    }
+    if (memDc) {
+        DeleteDC(memDc);
+    }
+}
+
+// a tap: open the document, or close it with its X
+void TouchPreviewWnd::Tap(Point pt) {
+    for (const PreviewCard& card : cards) {
+        bool hitClose = card.closeRect.Contains(pt);
+        bool hitCard = card.rect.Contains(pt);
+        if (!hitClose && !hitCard) {
+            continue;
+        }
+        // The card holds a raw MainWindow*/index captured when the popup
+        // was built. A window can close (or its tabs shift) while the popup
+        // lingers, so revalidate before touching either.
+        if (!IsMainWindowValid(card.win) || card.tabIdx < 0 || card.tabIdx >= card.win->TabCount()) {
+            Hide();
+            return;
+        }
+        if (hitClose) {
+            if (len(cards) > 1) {
+                WindowTab* tab = card.win->GetTab(card.tabIdx);
+                Hide();
+                if (tab) {
+                    CloseTab(tab, false);
+                }
             }
-            Rect dst{thumbArea.x + (thumbArea.dx - dstDx) / 2, thumbArea.y + (thumbArea.dy - dstDy) / 2, dstDx, dstDy};
-            thumbnail->Blit(hdc, dst);
-        } else {
-            SetTextColor(hdc, ThemeWindowDarkerTextColor());
-            HdcDrawText(hdc, StrL("page"), thumbArea, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
-                        HdcGetUiFont(hdc, 12));
+            return;
+        }
+        MainWindow* win = card.win;
+        int tabIdx = card.tabIdx;
+        Hide();
+        TabsSelect(win, tabIdx);
+        SetForegroundWindow(win->hwndFrame);
+        return;
+    }
+}
+
+void TouchPreviewWnd::PressStart(Point pt) {
+    PressCancel();
+    for (int i = 0; i < len(cards); i++) {
+        if (cards[i].rect.Contains(pt) && !cards[i].closeRect.Contains(pt)) {
+            pressCard = i;
+            pressPt = pt;
+            return;
         }
     }
 }
+
+// The cards the pressed one can trade places with. Among a window's tabs, its
+// window's other documents; a window showing a single document (documents in
+// their own windows) moves among the other windows' cards.
+void TouchPreviewWnd::DragRange(int& lo, int& hi) const {
+    lo = hi = pressCard;
+    if (!cards.isValidIndex(pressCard)) {
+        return;
+    }
+    MainWindow* win = cards[pressCard].win;
+    while (lo > 0 && cards[lo - 1].win == win) {
+        lo--;
+    }
+    while (hi + 1 < len(cards) && cards[hi + 1].win == win) {
+        hi++;
+    }
+    if (lo == hi) {
+        lo = 0;
+        hi = len(cards) - 1;
+    }
+}
+
+void TouchPreviewWnd::PressMove(Point pt) {
+    if (!cards.isValidIndex(pressCard)) {
+        return;
+    }
+    int lo, hi;
+    DragRange(lo, hi);
+    if (lo == hi) {
+        return;
+    }
+    int dx = pt.x - pressPt.x;
+    if (!dragging) {
+        // past a finger's wobble, so a tap stays a tap
+        if (abs(dx) < DpiScale(hwnd, 12)) {
+            return;
+        }
+        dragging = true;
+    }
+    // the card stays within the run of cards it can move among
+    Rect r = cards[pressCard].rect;
+    dragDx = std::clamp(dx, cards[lo].rect.x - r.x, cards[hi].rect.x - r.x);
+    HwndInvalidate(hwnd, false);
+}
+
+// the slot the dragged card would land in: the one its centre is nearest to
+int TouchPreviewWnd::DragTarget() const {
+    if (!dragging || !cards.isValidIndex(pressCard)) {
+        return pressCard;
+    }
+    int lo, hi;
+    DragRange(lo, hi);
+    const PreviewCard& card = cards[pressCard];
+    int cx = card.rect.x + card.rect.dx / 2 + dragDx;
+    int best = pressCard;
+    int bestDist = INT_MAX;
+    for (int i = lo; i <= hi; i++) {
+        int d = abs(cards[i].rect.x + cards[i].rect.dx / 2 - cx);
+        if (d < bestDist) {
+            bestDist = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+// how far card i is drawn from its own place while a card is dragged
+int TouchPreviewWnd::DrawOffset(int i) const {
+    if (!dragging || !cards.isValidIndex(pressCard) || !cards.isValidIndex(i)) {
+        return 0;
+    }
+    if (i == pressCard) {
+        return dragDx;
+    }
+    int from = pressCard;
+    int to = DragTarget();
+    // the cards between where it was and where it would go move over one slot
+    if (from < to && i > from && i <= to) {
+        return cards[i - 1].rect.x - cards[i].rect.x;
+    }
+    if (to < from && i >= to && i < from) {
+        return cards[i + 1].rect.x - cards[i].rect.x;
+    }
+    return 0;
+}
+
+void TouchPreviewWnd::PressEnd() {
+    int from = pressCard;
+    int to = DragTarget();
+    bool wasDrag = dragging;
+    PressCancel();
+    if (!wasDrag || from == to || !cards.isValidIndex(from) || !cards.isValidIndex(to)) {
+        return;
+    }
+    MainWindow* win = cards[from].win;
+    if (!IsMainWindowValid(win)) {
+        Hide();
+        return;
+    }
+    // the slots stay where they are; the cards trade places in them, thumbnails
+    // and all, rather than the strip being rebuilt around them
+    Vec<Rect> slotRects;
+    Vec<Rect> slotCloseRects;
+    for (PreviewCard& card : cards) {
+        slotRects.Append(card.rect);
+        slotCloseRects.Append(card.closeRect);
+    }
+    if (cards[to].win == win) {
+        // one of the window's tabs: the window's tabs are reordered. Each card
+        // is remembered by its tab, as MoveTabTo renumbers them.
+        Vec<WindowTab*> cardTabs;
+        for (PreviewCard& card : cards) {
+            cardTabs.Append(card.win == win ? win->GetTab(card.tabIdx) : nullptr);
+        }
+        MoveTabTo(win, cards[from].tabIdx, cards[to].tabIdx);
+        PreviewCard moved = cards[from];
+        cards.RemoveAt(from);
+        cards.InsertAt(to, moved);
+        WindowTab* movedTab = cardTabs[from];
+        cardTabs.RemoveAt(from);
+        cardTabs.InsertAt(to, movedTab);
+        for (int i = 0; i < len(cards); i++) {
+            if (cardTabs[i]) {
+                cards[i].tabIdx = win->GetTabIdx(cardTabs[i]);
+            }
+        }
+    } else {
+        // a window of its own: the windows are reordered in the strip
+        PreviewCard moved = cards[from];
+        cards.RemoveAt(from);
+        cards.InsertAt(to, moved);
+        gStripWindowOrder.Reset();
+        for (PreviewCard& card : cards) {
+            if (!gStripWindowOrder.Contains(card.win)) {
+                gStripWindowOrder.Append(card.win);
+            }
+        }
+        // dropped inside another window's run of tabs, it goes after (or
+        // before) that run rather than splitting it: keep each window's cards
+        // together, in the new window order
+        Vec<PreviewCard> sorted;
+        for (MainWindow* w : gStripWindowOrder) {
+            for (PreviewCard& card : cards) {
+                if (card.win == w) {
+                    sorted.Append(card);
+                }
+            }
+        }
+        cards.Reset();
+        for (PreviewCard& card : sorted) {
+            cards.Append(card);
+        }
+    }
+    for (int i = 0; i < len(cards); i++) {
+        cards[i].rect = slotRects[i];
+        cards[i].closeRect = slotCloseRects[i];
+    }
+    HwndInvalidate(hwnd, false);
+}
+
+void TouchPreviewWnd::PressCancel() {
+    bool wasDrag = dragging;
+    pressCard = -1;
+    dragging = false;
+    dragDx = 0;
+    if (wasDrag && hwnd) {
+        HwndInvalidate(hwnd, false);
+    }
+}
+
+#ifndef WM_POINTERUPDATE
+#define WM_POINTERUPDATE 0x0245
+#define WM_POINTERDOWN 0x0246
+#define WM_POINTERUP 0x0247
+#endif
+#ifndef WM_POINTERCAPTURECHANGED
+#define WM_POINTERCAPTURECHANGED 0x024C
+#endif
 
 LRESULT TouchPreviewWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_ERASEBKGND) {
@@ -1264,6 +1606,9 @@ LRESULT TouchPreviewWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             TrackMouseEvent(&tme);
             trackingMouse = true;
         }
+        if (pointerId == 0 && (wparam & MK_LBUTTON)) {
+            PressMove(Point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)});
+        }
         return 0;
     }
     if (msg == WM_MOUSELEAVE) {
@@ -1271,36 +1616,57 @@ LRESULT TouchPreviewWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         owner->SchedulePreviewClose();
         return 0;
     }
+    if (msg == WM_LBUTTONDOWN) {
+        PressStart(Point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)});
+        SetCapture(hwnd);
+        return 0;
+    }
     if (msg == WM_LBUTTONUP) {
         Point pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-        for (const PreviewCard& card : cards) {
-            bool hitClose = card.closeRect.Contains(pt);
-            bool hitCard = card.rect.Contains(pt);
-            if (!hitClose && !hitCard) {
-                continue;
-            }
-            // The card holds a raw MainWindow*/index captured when the popup
-            // was built. A window can close (or its tabs shift) while the popup
-            // lingers, so revalidate before touching either.
-            if (!IsMainWindowValid(card.win) || card.tabIdx < 0 || card.tabIdx >= card.win->TabCount()) {
-                Hide();
-                return 0;
-            }
-            if (hitClose) {
-                if (len(cards) > 1) {
-                    WindowTab* tab = card.win->GetTab(card.tabIdx);
-                    Hide();
-                    if (tab) {
-                        CloseTab(tab, false);
-                    }
-                }
-                return 0;
-            }
-            Hide();
-            TabsSelect(card.win, card.tabIdx);
-            SetForegroundWindow(card.win->hwndFrame);
-            return 0;
+        bool wasDrag = dragging;
+        // before letting go of the capture, whose loss cancels the drag
+        PressEnd();
+        if (GetCapture() == hwnd) {
+            ReleaseCapture();
         }
+        if (!wasDrag) {
+            Tap(pt);
+        }
+        return 0;
+    }
+    if (msg == WM_CAPTURECHANGED) {
+        if (pointerId == 0 && (HWND)lparam != hwnd) {
+            PressCancel();
+        }
+        return 0;
+    }
+    // Touch comes as pointer messages. Left to the system, a finger drag turns
+    // into a pan gesture and never arrives as a mouse drag, so the whole contact
+    // is handled here - which means its tap is, too.
+    if (msg == WM_POINTERDOWN) {
+        if (pointerId == 0) {
+            pointerId = LOWORD(wparam);
+            PressStart(HwndScreenToClient(hwnd, Point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}));
+        }
+        return 0;
+    }
+    if (msg == WM_POINTERUPDATE && pointerId != 0 && LOWORD(wparam) == pointerId) {
+        PressMove(HwndScreenToClient(hwnd, Point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}));
+        return 0;
+    }
+    if (msg == WM_POINTERUP && pointerId != 0 && LOWORD(wparam) == pointerId) {
+        Point pt = HwndScreenToClient(hwnd, Point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)});
+        bool wasDrag = dragging;
+        PressEnd();
+        pointerId = 0;
+        if (!wasDrag) {
+            Tap(pt);
+        }
+        return 0;
+    }
+    if (msg == WM_POINTERCAPTURECHANGED && pointerId != 0 && LOWORD(wparam) == pointerId) {
+        PressCancel();
+        pointerId = 0;
         return 0;
     }
     if (msg == WM_KEYDOWN && wparam == VK_ESCAPE) {
@@ -1408,6 +1774,236 @@ LRESULT TouchBookmarkConfirmWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPA
     if (msg == WM_KEYDOWN && wparam == VK_ESCAPE) {
         Hide();
         return 0;
+    }
+    if (msg == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) {
+        Hide();
+        return 0;
+    }
+    return WndProcDefault(hwnd, msg, wparam, lparam);
+}
+
+void TopBarWnd::ShowNightLight(const Rect& anchor) {
+    if (!nightLightWnd) {
+        nightLightWnd = new TouchNightLightWnd();
+        if (!nightLightWnd->Create(this)) {
+            delete nightLightWnd;
+            nightLightWnd = nullptr;
+            return;
+        }
+    }
+    nightLightWnd->Show(anchor);
+}
+
+constexpr UINT_PTR kNightLightApplyTimerId = 1;
+constexpr UINT kNightLightApplyDelayMs = 120;
+
+TouchNightLightWnd::TouchNightLightWnd() {
+    kind = kindTouchNightLight;
+}
+
+TouchNightLightWnd::~TouchNightLightWnd() {
+    if (hwnd) {
+        KillTimer(hwnd, kNightLightApplyTimerId);
+    }
+}
+
+bool TouchNightLightWnd::Create(TopBarWnd* bar) {
+    owner = bar;
+    CreateCustomArgs args;
+    args.visible = false;
+    args.style = WS_POPUP;
+    args.exStyle = WS_EX_TOOLWINDOW;
+    args.pos = {0, 0, 10, 10};
+    args.bgColor = ThemeControlBackgroundColor();
+    CreateCustom(args);
+    if (!hwnd) {
+        return false;
+    }
+    SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, (LONG_PTR)owner->win->hwndFrame);
+    return true;
+}
+
+// right-aligned under the overflow button it was opened from, and kept on the
+// monitor's work area
+void TouchNightLightWnd::Show(Rect anchorRect) {
+    int dx = DpiScale(hwnd, 340);
+    int dy = DpiScale(hwnd, 136);
+    Point anchor =
+        HwndMapWindowPoint(owner->hwnd, nullptr, {anchorRect.x + anchorRect.dx, anchorRect.y + anchorRect.dy});
+    int x = anchor.x - dx;
+    int y = anchor.y + DpiScale(hwnd, 6);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromPoint(POINT{anchor.x, anchor.y}, MONITOR_DEFAULTTONEAREST), &mi);
+    Rect work = ToRect(mi.rcWork);
+    x = std::clamp(x, work.x, std::max(work.x, work.x + work.dx - dx));
+    y = std::min(y, std::max(work.y, work.y + work.dy - dy));
+
+    int pad = DpiScale(hwnd, 18);
+    int switchDx = DpiScale(hwnd, 48);
+    int switchDy = DpiScale(hwnd, 26);
+    switchRect = {dx - pad - switchDx, DpiScale(hwnd, 18), switchDx, switchDy};
+    int labelDx = DpiScale(hwnd, 86);
+    trackRect = {pad + labelDx, DpiScale(hwnd, 100), dx - 2 * pad - labelDx, DpiScale(hwnd, 4)};
+
+    SetWindowPos(hwnd, HWND_TOP, x, y, dx, dy, SWP_SHOWWINDOW);
+    HwndInvalidate(hwnd, true);
+}
+
+void TouchNightLightWnd::Hide() {
+    if (!hwnd || !IsWindowVisible(hwnd)) {
+        return;
+    }
+    if (applyPending) {
+        ApplyNow();
+    }
+    ShowWindow(hwnd, SW_HIDE);
+    SaveSettings();
+}
+
+void TouchNightLightWnd::ApplyNow() {
+    KillTimer(hwnd, kNightLightApplyTimerId);
+    applyPending = false;
+    // compares against what the pages were rendered with and re-renders them
+    // only when that changed
+    UpdateDocumentColors();
+}
+
+void TouchNightLightWnd::ScheduleApply() {
+    if (applyPending) {
+        return;
+    }
+    applyPending = true;
+    SetTimer(hwnd, kNightLightApplyTimerId, kNightLightApplyDelayMs, nullptr);
+}
+
+void TouchNightLightWnd::SetStrength(int strength) {
+    strength = std::clamp(strength, 0, 100);
+    if (strength == gGlobalPrefs->nightLightStrength) {
+        return;
+    }
+    gGlobalPrefs->nightLightStrength = strength;
+    HwndInvalidate(hwnd, false);
+    if (gGlobalPrefs->nightLight) {
+        ScheduleApply();
+    }
+}
+
+void TouchNightLightWnd::SetStrengthFromX(int x) {
+    if (trackRect.dx <= 0) {
+        return;
+    }
+    SetStrength(((x - trackRect.x) * 100 + trackRect.dx / 2) / trackRect.dx);
+}
+
+void TouchNightLightWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
+    COLORREF panel = ThemeControlBackgroundColor();
+    HdcFillRect(hdc, ToRect(ps->rcPaint), panel);
+    Rect rc = HwndClientRect(hwnd);
+    StrokeRoundRectAA(hdc, Rect{0, 0, rc.dx, rc.dy}, DpiScale(hwnd, 10), ThemeEdgeColor(), 1);
+    SetBkMode(hdc, TRANSPARENT);
+    bool on = gGlobalPrefs->nightLight;
+    COLORREF accent = ThemeWindowLinkColor();
+    int pad = DpiScale(hwnd, 18);
+
+    Rect title{pad, switchRect.y - DpiScale(hwnd, 4), switchRect.x - 2 * pad, DpiScale(hwnd, 34)};
+    SetTextColor(hdc, ThemeWindowTextColor());
+    HdcDrawText(hdc, StrL("Night light"), title, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX,
+                HdcGetUiFont(hdc, 15, FW_SEMIBOLD));
+    Rect sub{pad, title.y + title.dy - DpiScale(hwnd, 2), rc.dx - 2 * pad, DpiScale(hwnd, 20)};
+    SetTextColor(hdc, ThemeWindowDarkerTextColor());
+    HdcDrawText(hdc, StrL("Warmer page colors, easier on the eyes at night"), sub,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX, HdcGetUiFont(hdc, 12));
+
+    // the switch: an accent pill with the knob at the right when on
+    COLORREF switchBg = on ? accent : AccentColor(panel, 40);
+    FillRoundRectAA(hdc, switchRect, switchRect.dy / 2, switchBg);
+    int knobInset = DpiScale(hwnd, 3);
+    int knobD = switchRect.dy - 2 * knobInset;
+    int knobX = on ? switchRect.x + switchRect.dx - knobInset - knobD : switchRect.x + knobInset;
+    FillEllipseAA(hdc, Rect{knobX, switchRect.y + knobInset, knobD, knobD}, RGB(255, 255, 255));
+
+    // the slider: greyed while the light is off, but still movable, so the
+    // strength can be set before it is switched on - as Windows does
+    Rect label{pad, trackRect.y - DpiScale(hwnd, 14), trackRect.x - pad, DpiScale(hwnd, 30)};
+    SetTextColor(hdc, on ? ThemeWindowTextColor() : ThemeWindowDarkerTextColor());
+    HdcDrawText(hdc, StrL("Strength"), label, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX,
+                HdcGetUiFont(hdc, 14));
+    COLORREF fillCol = on ? accent : ThemeWindowDarkerTextColor();
+    FillRoundRectAA(hdc, trackRect, trackRect.dy / 2, AccentColor(panel, 45));
+    int strength = std::clamp(gGlobalPrefs->nightLightStrength, 0, 100);
+    int thumbX = trackRect.x + trackRect.dx * strength / 100;
+    Rect filled = trackRect;
+    filled.dx = thumbX - trackRect.x;
+    if (filled.dx > 0) {
+        FillRoundRectAA(hdc, filled, trackRect.dy / 2, fillCol);
+    }
+    int thumbD = DpiScale(hwnd, 22);
+    int ringD = DpiScale(hwnd, 12);
+    int cy = trackRect.y + trackRect.dy / 2;
+    FillEllipseAA(hdc, Rect{thumbX - thumbD / 2, cy - thumbD / 2, thumbD, thumbD}, AccentColor(panel, 20));
+    FillEllipseAA(hdc, Rect{thumbX - ringD / 2, cy - ringD / 2, ringD, ringD}, fillCol);
+}
+
+LRESULT TouchNightLightWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_ERASEBKGND) {
+        return TRUE;
+    }
+    // the slider is a finger's height tall, not the 4px its track is drawn
+    auto onSlider = [&](Point pt) {
+        Rect hit = trackRect;
+        hit.Inflate(DpiScale(hwnd, 14), DpiScale(hwnd, 18));
+        return hit.Contains(pt);
+    };
+    if (msg == WM_LBUTTONDOWN) {
+        Point pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        Rect switchHit = switchRect;
+        switchHit.Inflate(DpiScale(hwnd, 8), DpiScale(hwnd, 8));
+        if (switchHit.Contains(pt)) {
+            gGlobalPrefs->nightLight = !gGlobalPrefs->nightLight;
+            HwndInvalidate(hwnd, false);
+            ApplyNow();
+            SaveSettings();
+        } else if (onSlider(pt)) {
+            dragging = true;
+            SetCapture(hwnd);
+            SetStrengthFromX(pt.x);
+        }
+        return 0;
+    }
+    if (msg == WM_MOUSEMOVE && dragging) {
+        SetStrengthFromX(GET_X_LPARAM(lparam));
+        return 0;
+    }
+    if (msg == WM_LBUTTONUP && dragging) {
+        // where the finger lifted counts too: a quick flick to the end
+        // can end past the last move
+        SetStrengthFromX(GET_X_LPARAM(lparam));
+        dragging = false;
+        ReleaseCapture();
+        if (applyPending) {
+            ApplyNow();
+        }
+        SaveSettings();
+        return 0;
+    }
+    if (msg == WM_CAPTURECHANGED) {
+        dragging = false;
+        return 0;
+    }
+    if (msg == WM_TIMER && wparam == kNightLightApplyTimerId) {
+        ApplyNow();
+        return 0;
+    }
+    if (msg == WM_KEYDOWN) {
+        if (wparam == VK_ESCAPE) {
+            Hide();
+            return 0;
+        }
+        if (wparam == VK_LEFT || wparam == VK_RIGHT) {
+            SetStrength(gGlobalPrefs->nightLightStrength + (wparam == VK_RIGHT ? 5 : -5));
+            return 0;
+        }
     }
     if (msg == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) {
         Hide();
@@ -1801,6 +2397,7 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
     constexpr int kOverflowSmartMargins = 1;
     constexpr int kOverflowSmartHeaderFooter = 2;
     constexpr int kOverflowTrimDialog = 3;
+    constexpr int kOverflowNightLight = 4;
 
     HMENU popup = CreatePopupMenu();
     bool on = gGlobalPrefs->smartMargins;
@@ -1817,6 +2414,10 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
     // the manual fallback, for documents nothing can be read from
     AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(popup, MF_STRING | enabled, kOverflowTrimDialog, L"Trim headers && footers…");
+    // ticked while it is on; opens its panel either way (a switch and a slider)
+    AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
+    uint nlFlags = MF_STRING | (gGlobalPrefs->nightLight ? MF_CHECKED : MF_UNCHECKED);
+    AppendMenuW(popup, nlFlags, kOverflowNightLight, L"Night light…");
     MarkMenuOwnerDraw(popup);
 
     Point pt = HwndClientToScreen(hwnd, Point{anchor.x, anchor.y + anchor.dy});
@@ -1827,6 +2428,10 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
     if (cmd == kOverflowTrimDialog) {
         ShowTrimHeaderFooterDialog(win);
         HwndInvalidate(hwnd, false);
+        return;
+    }
+    if (cmd == kOverflowNightLight) {
+        ShowNightLight(anchor);
         return;
     }
     if (cmd == kOverflowSmartMargins) {
