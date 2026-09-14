@@ -26,6 +26,18 @@ void AddFavoriteWithLabelAndName(MainWindow* win, int pageNo, Str pageLabel, Str
 void AddFavoriteForPage(MainWindow* win, int pageNo);
 void AddFavoriteForCurrentPage(MainWindow* win);
 void DelFavorite(Str filePath, int pageNo);
+
+// --- "PDF favorites": the touch chrome's one-tap bookmark tray ---------------
+// Same store as the Favorites pane/menu (per-file Favorite records in prefs),
+// just without the add dialog. Named to distinguish from the in-product
+// browser's "browser favorites", which are a separate list of web pages.
+TempStr FavoriteDefaultNameTemp(MainWindow* win, int pageNo);
+void AddFavoriteQuiet(MainWindow* win, int pageNo, Str name);
+void RenameFavorite(Str filePath, int pageNo, Str newName);
+Vec<Favorite*>* GetFileFavorites(Str filePath);
+void GetFilesWithFavorites(Vec<FileState*>& out);
+// drag-to-reorder within one document; switches to manual ordering
+bool MoveFavorite(Str filePath, int fromIdx, int toIdx);
 void RebuildFavMenu(MainWindow* win, HMENU menu);
 void CreateFavorites(MainWindow* win);
 void ToggleFavorites(MainWindow* win); // sidebar

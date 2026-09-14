@@ -5896,21 +5896,42 @@ EngineBase* CreateEngineMupdfFromData(Str data, Str nameHint, PasswordUI* pwdUI)
 }
 
 // it's fast because we only collect pointers from FzPageInfo
+void EngineMupdfGetAnnotationsInRange(EngineBase* engine, int fromPage, int toPage, Vec<Annotation*>& annotsOut);
+
 void EngineMupdfGetAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut) {
     annotsOut.Clear();
-
     EngineMupdf* e = AsEngineMupdf(engine);
     if (!e->pdfdoc) {
         return;
     }
+    EngineMupdfGetAnnotationsInRange(engine, 1, e->pageCount, annotsOut);
+}
+
+// Annotations on pages [fromPage, toPage], appended to annotsOut. Gathering
+// them loads every page in the range, so a caller sweeping a long document
+// from a worker thread asks for it a chunk at a time: the pages lock is taken
+// per call, and holding it across the whole document would stall every page
+// the UI thread wants to render meanwhile.
+void EngineMupdfGetAnnotationsInRange(EngineBase* engine, int fromPage, int toPage, Vec<Annotation*>& annotsOut) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        return;
+    }
+    fromPage = std::max(fromPage, 1);
+    toPage = std::min(toPage, e->pageCount);
     ScopedRecursiveMutex scope(&e->pagesLock);
-    for (int i = 1; i <= e->pageCount; i++) {
+    for (int i = fromPage; i <= toPage; i++) {
         FzPageInfo* pi = e->GetFzPageInfo(i, false);
         if (!pi) {
             continue;
         }
         annotsOut.Append(pi->annotations);
     }
+}
+
+int EngineMupdfPageCount(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    return e && e->pdfdoc ? e->pageCount : 0;
 }
 
 bool EngineMupdfHasUnsavedAnnotations(EngineBase* engine) {

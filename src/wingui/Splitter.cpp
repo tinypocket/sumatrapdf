@@ -18,11 +18,38 @@ static Kind kindSplitter = "splitter";
 
 static const WCHAR* kResizeOverlayClass = L"SplitterResizeOverlayWnd";
 
-static void OnSplitterPaint(HWND hwnd, COLORREF bgCol) {
+#ifndef WM_POINTERUPDATE
+#define WM_POINTERUPDATE 0x0245
+#define WM_POINTERDOWN 0x0246
+#define WM_POINTERUP 0x0247
+#endif
+
+#ifndef WM_POINTERCAPTURECHANGED
+#define WM_POINTERCAPTURECHANGED 0x024C
+#endif
+
+static void OnSplitterPaint(Splitter* splitter) {
+    HWND hwnd = splitter->hwnd;
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd, &ps);
-    AutoDeleteBrush br = CreateSolidBrush(bgCol);
-    HdcFillRect(hdc, ToRect(ps.rcPaint), br);
+    Rect rc = HwndClientRect(hwnd);
+    if (!splitter->transparentBackground) {
+        AutoDeleteBrush bg = CreateSolidBrush(splitter->bgColor);
+        HdcFillRect(hdc, rc, bg);
+    }
+    Rect line = rc;
+    int thickness = splitter->paintThickness;
+    if (thickness > 0) {
+        if (splitter->type == SplitterType::Vert) {
+            line.x = (rc.dx - thickness) / 2;
+            line.dx = thickness;
+        } else {
+            line.y = (rc.dy - thickness) / 2;
+            line.dy = thickness;
+        }
+    }
+    AutoDeleteBrush accent = CreateSolidBrush(AccentColor(splitter->bgColor, 30));
+    HdcFillRect(hdc, line, accent);
     EndPaint(hwnd, &ps);
 }
 
@@ -131,6 +158,9 @@ HWND Splitter::Create(const CreateArgs& args) {
 
     isLive = args.isLive;
     type = args.type;
+    paintThickness = args.paintThickness;
+    transparentBackground = args.transparentBackground;
+    dragThreshold = args.dragThreshold;
     auto bgCol = args.backgroundColor;
     if (bgCol == kColorUnset) {
         bgCol = GetSysColor(COLOR_BTNFACE);
@@ -150,10 +180,83 @@ HWND Splitter::Create(const CreateArgs& args) {
     // cargs.className = L"SplitterWndClass";
     cargs.parent = args.parent;
     cargs.style = WS_CHILDWINDOW;
-    cargs.exStyle = 0;
+    cargs.exStyle = transparentBackground ? WS_EX_TRANSPARENT : 0;
     CreateCustom(cargs);
 
     return hwnd;
+}
+
+static int SplitterAxisPos(Splitter* splitter, Point pos) {
+    return splitter->type == SplitterType::Vert ? pos.x : pos.y;
+}
+
+static Splitter::MoveEvent SplitterMoveEvent(Splitter* splitter, bool finishedDragging, Point pos) {
+    int delta = SplitterAxisPos(splitter, pos) - SplitterAxisPos(splitter, splitter->dragStartPos);
+    Splitter::MoveEvent arg;
+    arg.w = splitter;
+    arg.finishedDragging = finishedDragging;
+    arg.splitterPos = splitter->dragStartSplitterPos + delta;
+    return arg;
+}
+
+static void BeginSplitterDrag(Splitter* splitter, Point parentPos) {
+    HWND hwnd = splitter->hwnd;
+    HWND parent = GetParent(hwnd);
+    splitter->dragStartPos = parentPos;
+    Point parentOrigin = HwndClientToScreen(parent, Point());
+    Rect splitterRc = HwndWindowRect(hwnd);
+    int size = splitter->type == SplitterType::Vert ? splitterRc.dx : splitterRc.dy;
+    int thickness = splitter->paintThickness > 0 ? splitter->paintThickness : size;
+    int windowPos =
+        splitter->type == SplitterType::Vert ? splitterRc.x - parentOrigin.x : splitterRc.y - parentOrigin.y;
+    splitter->dragStartSplitterPos = windowPos + (size - thickness) / 2;
+    splitter->isDragging = splitter->dragThreshold <= 0;
+    if (!splitter->isLive && splitter->isDragging) {
+        UpdateResizeOverlay(splitter, parentPos);
+    }
+}
+
+static bool UpdateSplitterDrag(Splitter* splitter, Point parentPos) {
+    int delta = SplitterAxisPos(splitter, parentPos) - SplitterAxisPos(splitter, splitter->dragStartPos);
+    if (!splitter->isDragging && abs(delta) >= splitter->dragThreshold) {
+        splitter->isDragging = true;
+    }
+    if (!splitter->isDragging) {
+        return true;
+    }
+    Splitter::MoveEvent arg = SplitterMoveEvent(splitter, false, parentPos);
+    splitter->onMove.Call(&arg);
+    if (arg.resizeAllowed && !splitter->isLive) {
+        UpdateResizeOverlay(splitter, parentPos);
+    }
+    return arg.resizeAllowed;
+}
+
+static void EndSplitterDrag(Splitter* splitter, Point parentPos) {
+    bool wasDragging = splitter->isDragging;
+    if (!splitter->isLive) {
+        HideResizeOverlay(splitter);
+    }
+    if (wasDragging) {
+        Splitter::MoveEvent arg = SplitterMoveEvent(splitter, true, parentPos);
+        splitter->onMove.Call(&arg);
+    }
+    splitter->isDragging = false;
+    HwndScheduleRepaint(splitter->hwnd);
+}
+
+static void CancelSplitterDrag(Splitter* splitter) {
+    if (!splitter->isLive) {
+        HideResizeOverlay(splitter);
+    }
+    splitter->isDragging = false;
+    splitter->activePointerId = 0;
+    HwndScheduleRepaint(splitter->hwnd);
+}
+
+static Point PointerParentPos(Splitter* splitter, LPARAM lparam) {
+    Point screenPos{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+    return HwndScreenToClient(GetParent(splitter->hwnd), screenPos);
 }
 
 LRESULT Splitter::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -164,30 +267,73 @@ LRESULT Splitter::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
     if (WM_LBUTTONDOWN == msg) {
         SetCapture(hwnd);
-        if (!isLive) {
-            Point pos = HwndGetCursorPos(GetParent(hwnd));
-            UpdateResizeOverlay(this, pos);
-        }
+        Point mousePos{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        mousePos = HwndMapWindowPoint(hwnd, GetParent(hwnd), mousePos);
+        BeginSplitterDrag(this, mousePos);
         return 1;
     }
 
     if (WM_LBUTTONUP == msg) {
-        if (!isLive) {
-            HideResizeOverlay(this);
+        Point mousePos{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        mousePos = HwndMapWindowPoint(hwnd, GetParent(hwnd), mousePos);
+        EndSplitterDrag(this, mousePos);
+        if (GetCapture() == hwnd) {
+            ReleaseCapture();
         }
-        ReleaseCapture();
-        Splitter::MoveEvent arg;
-        arg.w = this;
-        arg.finishedDragging = true;
-        onMove.Call(&arg);
-        HwndScheduleRepaint(hwnd);
         return 0;
     }
 
     if (WM_CAPTURECHANGED == msg) {
-        if ((HWND)lparam != hwnd && !isLive) {
-            HideResizeOverlay(this);
+        if ((HWND)lparam != hwnd) {
+            CancelSplitterDrag(this);
         }
+        return 0;
+    }
+
+    // Touch contacts use WM_POINTER messages. Relying on their optional mouse
+    // promotion is fragile: a gesture that begins just outside the splitter can
+    // suppress the later promoted button-up and leave a sibling with capture.
+    // Consume the complete pointer sequence and use its implicit pointer capture.
+    UINT32 pointerId = LOWORD(wparam);
+    if (WM_POINTERDOWN == msg) {
+        if (activePointerId == 0) {
+            // A touch promoted to a mouse-down in an adjacent document/tree can
+            // retain mouse capture when gesture recognition suppresses its
+            // matching mouse-up. A new direct pointer contact on the splitter
+            // supersedes that stale interaction.
+            if (GetCapture() && GetCapture() != hwnd) {
+                ReleaseCapture();
+            }
+            activePointerId = pointerId;
+            BeginSplitterDrag(this, PointerParentPos(this, lparam));
+        }
+        return 0;
+    }
+    if (WM_POINTERUPDATE == msg) {
+        if (pointerId == activePointerId) {
+            UpdateSplitterDrag(this, PointerParentPos(this, lparam));
+        }
+        return 0;
+    }
+    if (WM_POINTERUP == msg) {
+        if (pointerId == activePointerId) {
+            EndSplitterDrag(this, PointerParentPos(this, lparam));
+            activePointerId = 0;
+        }
+        return 0;
+    }
+    if (WM_POINTERCAPTURECHANGED == msg) {
+        if (pointerId == activePointerId) {
+            CancelSplitterDrag(this);
+        }
+        return 0;
+    }
+
+    if (WM_CANCELMODE == msg) {
+        if (GetCapture() == hwnd) {
+            ReleaseCapture();
+        }
+        CancelSplitterDrag(this);
         return 0;
     }
 
@@ -209,15 +355,10 @@ LRESULT Splitter::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             HwndScheduleRepaint(hwnd);
         }
         if (hwnd == GetCapture()) {
-            Splitter::MoveEvent arg;
-            arg.w = this;
-            arg.finishedDragging = false;
-            onMove.Call(&arg);
-            if (!arg.resizeAllowed) {
+            Point mousePos{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            mousePos = HwndMapWindowPoint(hwnd, GetParent(hwnd), mousePos);
+            if (!UpdateSplitterDrag(this, mousePos)) {
                 curId = IDC_NO;
-            } else if (!isLive) {
-                Point pos = HwndGetCursorPos(GetParent(hwnd));
-                UpdateResizeOverlay(this, pos);
             }
         }
         SetCursorCached(curId);
@@ -234,7 +375,7 @@ LRESULT Splitter::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     }
 
     if (WM_PAINT == msg) {
-        OnSplitterPaint(hwnd, AccentColor(bgColor, 30));
+        OnSplitterPaint(this);
         return 0;
     }
 

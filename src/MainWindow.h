@@ -1,6 +1,9 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
+// by value below (Library scroll momentum); self-contained, no dependencies
+#include "KineticScroll.h"
+
 struct DoubleBuffer;
 struct Edit;
 struct WebviewWnd;
@@ -14,6 +17,9 @@ struct Splitter;
 struct Tooltip;
 struct TreeView;
 struct SelectionToolbar;
+struct RailWnd;
+struct TouchBrowser;
+struct TopBarWnd;
 struct ILayout;
 struct Spacer;
 struct DropDown;
@@ -24,6 +30,7 @@ struct TocTree;
 struct TocItem;
 struct FindBarWnd;
 struct FindWindowWnd;
+struct DisplayModel;
 
 // one link numbered by keyboard link following (CmdToggleKeyboardLinkFollowing).
 // stored in page coordinates so the badges stay glued to their links while
@@ -55,6 +62,7 @@ enum CaptionButtons {
     CB_RESTORE,
     CB_CLOSE,
     CB_MENU,
+    CB_UPDATE,
     CB_SYSTEM_MENU,
     CB_BTN_COUNT
 };
@@ -80,6 +88,8 @@ struct DisplayModel;
 struct WindowTab;
 
 struct Annotation;
+class EngineBase;
+struct Pixmap;
 struct ILinkHandler;
 struct RefHoverState;
 
@@ -120,6 +130,25 @@ struct TouchState {
     POINTS panPos{};
     int panScrollOrigX = 0;
     float zoomIntermediate = 0;
+};
+
+enum class TouchPanelMode {
+    Bookmarks = 0,
+    Thumbnails,
+    Search,
+    Annotations,
+    Attachments,
+    // "PDF favorites": saved pages across every document, grouped by file
+    Favorites,
+};
+
+enum class TouchView {
+    Doc = 0,
+    // deprecated: the Recent surface is now the Library's first sidebar row.
+    // Nothing navigates here any more (SetTouchView maps it to Library)
+    Home,
+    Library,
+    Web,
 };
 
 /* Describes position, the target (URL or file path) and infotip of a "hyperlink" */
@@ -179,13 +208,35 @@ struct MainWindow {
     HWND hwndPageBg = nullptr;
     HWND hwndPageTotal = nullptr;
 
+    // the icon rail along the left edge, left of the sidebar (see Rail.cpp)
+    RailWnd* railWnd = nullptr;
+    HWND hwndRail = nullptr;
+    TouchView touchView = TouchView::Doc;
+    TouchPanelMode touchPanelMode = TouchPanelMode::Bookmarks;
+    bool touchSidebarCollapsed = false;
+    HWND hwndTouchSidebarCollapse = nullptr;
+
+    // the in-product web browser shown for TouchView::Web (see SimpleBrowserWindow.cpp)
+    TouchBrowser* touchBrowser = nullptr;
+    // the last non-document view the user was in (Library / Web), so
+    // closing the last document returns to where they came from
+    TouchView lastNonDocView = TouchView::Library;
+
+    // custom-drawn top bar; replaces the rebar toolbar with the rail chrome
+    TopBarWnd* topBarWnd = nullptr;
+    HWND hwndTopBar = nullptr;
+
     // state related to table of contents (PDF bookmarks etc.)
     HWND hwndTocBox = nullptr;
+    HWND hwndTocSticky = nullptr;
+    Str tocStickyText;
     UINT_PTR tocBoxSubclassId = 0;
 
     LabelWithCloseWnd* tocLabelWithClose = nullptr;
     Edit* tocFilterEdit = nullptr;
     TreeView* tocTreeView = nullptr;
+    Str touchBookmarkSearchQuery;
+    Str touchDocumentSearchQuery;
     TocTree* tocFilteredTree = nullptr;
     // VBox(label, filter edit, tree); owns those three controls and lays them
     // out in hwndTocBox
@@ -193,6 +244,9 @@ struct MainWindow {
 
     // whether the current tab's ToC has been loaded into the tree
     bool tocLoaded = false;
+    // the bookmarks tree is in its smaller font (the pane is narrow, see
+    // TouchSidebarCompactDx)
+    bool tocCompact = false;
     // whether the ToC sidebar is currently visible
     // set to temporarily disable UpdateTocSelection
     bool tocKeepSelection = false;
@@ -264,6 +318,8 @@ struct MainWindow {
     ButtonInfo captionBtn[CB_BTN_COUNT];
     bool isMenuOpen = false;
     Rect captionRect{};
+    // where the document name is drawn in the slim caption (empty otherwise)
+    Rect titleRect{};
 
     Tooltip* infotip = nullptr;
 
@@ -326,6 +382,9 @@ struct MainWindow {
 
     // home page thumbnail scrolling
     int homePageScrollY = 0;
+    int homeOpenScrollX = 0;
+    int homeOpenScrollMaxX = 0;
+    Rect homeOpenCarouselRect;
     // keyboard-selected home page entry (index into the filtered list),
     // -1 when there's nothing to select. Enter opens it (issue #1136)
     int homePageSelIdx = 0;
@@ -338,6 +397,75 @@ struct MainWindow {
     // remembers the search query while the edit control is destroyed
     // (e.g. when a document tab is active)
     Str homeSearchQuery;
+    int librarySelectedFolder = 0;
+    Str librarySelectedFolderPath;
+    // the Library sidebar's "Recent" row is selected: the content pane shows
+    // the recently opened / pinned / currently open files instead of a folder.
+    // It's the default so opening the Library lands on something useful.
+    bool libraryRecentSelected = true;
+    // the sidebar's search-results "N Files" row is selected: the content
+    // pane shows every file the current query matches instead of a folder.
+    // Cleared whenever a folder or Recent is chosen, or the query changes.
+    bool librarySearchFilesSelected = false;
+    // "Show in Library folder" from a search result: the file's card is
+    // outlined in its folder and scrolled into view once (the pending flag)
+    Str libraryHighlightFilePath;
+    bool libraryHighlightScrollPending = false;
+    StrVec libraryExpandedFolderPaths;
+    Str librarySearchQuery;
+    // Folders search is restricted to, chosen from the picker opened off the
+    // search box's filter button. Empty means unrestricted (search
+    // everywhere), which is the default and how most searches are meant to
+    // work - this exists for the rare case of a broad query inside a library
+    // with folders the reader knows are irrelevant to it.
+    StrVec librarySearchFolderScope;
+    bool librarySearchScopePickerOpen = false;
+    // the picker's tree starts collapsed to the roots; these are opened
+    StrVec librarySearchScopeExpanded;
+    int librarySearchScopeScrollY = 0;
+    int librarySearchScopeScrollMaxY = 0;
+    Str libraryRowMenuPath;
+    // Which of a folder's two possible rows opened the menu: pinned
+    // folders are drawn once in PINNED and again at their ordinary place in
+    // the tree, both sharing the same path, so the path alone can't say
+    // which row's "..." to anchor the popup to.
+    bool libraryRowMenuFromPinned = false;
+    bool libraryManageFoldersOpen = false;
+    bool libraryListView = false;
+    int libraryTreeScrollY = 0;
+    int libraryTreeScrollMaxY = 0;
+    int libraryFilesScrollY = 0;
+    int libraryFilesScrollMaxY = 0;
+    // Momentum for the two Library columns. The ScrollY fields above stay the
+    // value everything paints from; these drive them (see HomePageKineticTick).
+    KineticScroll libraryTreeKs;
+    KineticScroll libraryFilesKs;
+    // Library back/forward history. Each entry is a folder path, or
+    // kLibraryNavRecent for the Recent surface. libraryNavPos indexes the
+    // current spot; going back moves it down rather than truncating, so
+    // forward stays available until a new destination is chosen.
+    StrVec libraryNavStack;
+    int libraryNavPos = -1;
+    // Library hover/press feedback lives in HomePage.cpp rather than here: the
+    // AnimVal/AnimTimer types would drag wingui/Anim.h into this header, and
+    // these headers have no include guards (they rely on a fixed include
+    // order), so anything including both would double-define its constants.
+    // set while replaying an entry, so applying it doesn't push it again
+    bool libraryNavReplaying = false;
+    int librarySidebarDx = 0;
+    bool librarySidebarResizing = false;
+    int librarySidebarResizeStartX = 0;
+    int librarySidebarResizeStartDx = 0;
+
+    // Direct-pointer panning for the touch Home/Library surfaces.
+    UINT32 touchAboutPointerId = 0;
+    int touchAboutPanArea = 0;
+    int touchAboutPanAxis = 0;
+    Point touchAboutPanStart;
+    int touchAboutPanStartX = 0;
+    int touchAboutPanStartY = 0;
+    bool touchAboutPanMoved = false;
+    bool touchAboutSuppressMouseUp = false;
 
     bool isToolbarVisible = false;
     // overlay toolbar mode: the toolbar floats over the page (doesn't reserve
@@ -367,7 +495,9 @@ struct MainWindow {
     struct UIState {
         struct Layout {
             Rect rc;
+            int dpi = 0;
             int presentation = 0;
+            int touchView = 0;
             bool tabsInTitlebar = false;
             bool isFullScreen = false;
             bool tabsVisible = false;
@@ -377,6 +507,8 @@ struct MainWindow {
             // full-window Favorites tab vs. sidebar panel: different geometry
             bool favoritesAsTab = false;
             bool showMenuBarRebar = false;
+            bool railVisible = false;
+            bool touchSidebarCollapsed = false;
             bool aiChatVisible = false;
             int aiChatDx = 0;
         };
@@ -450,14 +582,66 @@ struct MainWindow {
     Vec<FindMatch> findMatches;
     bool findCountHasSnippets = false;
 
+    // Render state for the touch thumbnail panel. The bitset is reset when
+    // the active display model changes, so each visible page is queued once.
+    DisplayModel* touchThumbnailDm = nullptr;
+    // The Pages panel's own thumbnails. They used to live in the shared render
+    // cache, which the document view evicts as soon as it renders anything
+    // else - so after a few taps every card went blank. These are rendered
+    // once and owned here until the document changes.
+    struct TouchThumb {
+        int pageNo = 0;
+        Pixmap* bmp = nullptr; // owned; freed with FreePixmap
+    };
+    Vec<TouchThumb> touchThumbs;
+    Vec<int> touchThumbQueue; // pages waiting to be rendered, in request order
+    bool touchThumbRendering = false;
+    int touchPanelScrollY = 0;
+    // momentum for the panel list (thumbnails, search results, annotations);
+    // drives touchPanelScrollY, which is what the paint code reads
+    KineticScroll touchPanelKs;
+    UINT32 touchPanelPointerId = 0;
+    Point touchPanelPointerStart;
+    int touchPanelPointerStartScrollY = 0;
+    bool touchPanelPointerMoved = false;
+    // the finger landed on a list that was still coasting from a flick, so
+    // this touch is catching the list rather than tapping a row
+    bool touchPanelCaughtCoast = false;
+
     // state of in-page find in a browser-hosted (chm / markdown) webview (see
     // SearchAndDDE.cpp BrowserFind* functions); findMatches then holds (page,
     // in-page match index, snippet) built from the webview's all-pages sweep
     int browserFindGen = 0;         // generation; JS echoes it so stale async results are dropped
     int browserFindPageCurrent = 0; // 1-based current match on the current page (0: none)
     int browserFindCurrent = -1;    // index into findMatches of the current match (-1: none)
-    int browserFindTotal = -1;      // total matches across all pages (-1: sweep not done)
-    Str browserFindTerm;            // owned; the term the current md find ran with
+    // the touch Search panel's current match (index into findMatches, -1:
+    // none); it walks the list itself, see TouchSearchGoTo
+    int touchFindCurrent = -1;
+    // search suggestions: the document's words, indexed in the background the
+    // first time it is searched, and the completions offered for the word
+    // being typed (see UpdateTouchSuggestions)
+    struct DocWordIndex* touchWordIndex = nullptr;
+    EngineBase* touchWordIndexEngine = nullptr; // identity only, never dereferenced
+    bool touchWordIndexBuilding = false;
+    StrVec touchSuggestions;
+    int browserFindTotal = -1; // total matches across all pages (-1: sweep not done)
+    Str browserFindTerm;       // owned; the term the current md find ran with
+
+    // The Annotations panel's list. Gathering it loads every page, which on a
+    // long document took seconds on the UI thread - and did it again on every
+    // paint - so it runs on a worker thread and the result is cached here.
+    // The pointers belong to the engine's page info, so the cache is keyed by
+    // the engine it was gathered from and dropped when that changes.
+    enum class TouchAnnotsState {
+        NotLoaded,
+        Loading,
+        Loaded
+    };
+    TouchAnnotsState touchAnnotsState = TouchAnnotsState::NotLoaded;
+    Vec<Annotation*> touchAnnots;
+    EngineBase* touchAnnotsEngine = nullptr; // not owned; identity only, never dereferenced
+    int touchAnnotsGen = 0;                  // a late result from a previous document is dropped
+    u64 touchAnnotsStartedMs = 0;            // drives the waiting spinner's phase
 
     ILinkHandler* linkHandler = nullptr;
     // keyboard link following: when on, visible links are numbered 1..9 and
@@ -486,6 +670,8 @@ struct MainWindow {
     Point contextMenuPt{};
     bool contextMenuPtValid = false;
     HBRUSH brControlBgColor = nullptr;
+    HBRUSH brHomeSearchBg = nullptr;
+    COLORREF homeSearchBgColor = CLR_INVALID;
 
     DocControllerCallback* cbHandler = nullptr;
 

@@ -47,6 +47,9 @@ struct WindowTab {
     LoadArgs* pendingLoadArgs = nullptr;
     // text of win->hwndFrame when the tab is selected
     Str frameTitle;
+    RenderedBitmap* touchHomeThumbnail = nullptr;
+    int touchHomeThumbnailPage = 0;
+    bool touchHomeThumbnailRequested = false;
     // state of the table of contents
     bool showToc = false;
     bool showTocPresentation = false;

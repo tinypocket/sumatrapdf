@@ -165,6 +165,24 @@ static Str themesTxt = StrL(R"(Themes [
         ColorizeControls = true
     ]
     [
+        Name = Touch Paper
+        TextColor = #1c1a17
+        BackgroundColor = #e7e3dd
+        ControlBackgroundColor = #faf8f5
+        LinkColor = #b4530a
+        DisabledTextColor = #bdb5a8
+        DarkerTextColor = #6d6659
+        HotBackgroundColor = #f3f0eb
+        EdgeColor = #ded8d0
+        HotEdgeColor = #b4530a
+        DisabledEdgeColor = #eae5de
+        ErrorBackgroundColor = #f7ddd2
+        NotificationBackgroundColor = #faf8f5
+        NotificationHighlightColor = #fbeee2
+        NotificationHighlightTextColor = #b4530a
+        ColorizeControls = true
+    ]
+    [
         Name = Dark from 3.5
         TextColor = #bac9d0
         BackgroundColor = #263238
@@ -802,7 +820,14 @@ void UpdateThemeAfterSystemColorChange() {
 
 // call after loading settings
 void SetCurrentThemeFromSettings() {
-    SetTheme(gGlobalPrefs->theme);
+    // The touch redesign's spacing and contrast tokens are authored as a
+    // single system. Keep an explicitly chosen theme, but give a fresh
+    // touch-chrome install the exact paper palette from the handoff.
+    if (gGlobalPrefs->touchChrome && !gGlobalPrefs->theme) {
+        SetTheme(StrL("Touch Paper"));
+    } else {
+        SetTheme(gGlobalPrefs->theme);
+    }
     ParsedColor* bgParsed = GetPrefsColor(gGlobalPrefs->mainWindowBackground);
     bool isDefault = IsDefaultMainWinColor(bgParsed);
     if (isDefault) {
@@ -1004,6 +1029,80 @@ COLORREF ThemeNotificationsTextColor() {
 // in both directions: light themes get the classic yellow, dark themes a muted
 // dark amber. Deriving it from the theme's own accent (as we used to) produced
 // saturated, unrelated hues -- Dracula's warnings came out bright purple.
+static COLORREF BlendColors(COLORREF a, COLORREF b, int pctA) {
+    int r = ((int)GetRValue(a) * pctA + (int)GetRValue(b) * (100 - pctA)) / 100;
+    int g = ((int)GetGValue(a) * pctA + (int)GetGValue(b) * (100 - pctA)) / 100;
+    int bl = ((int)GetBValue(a) * pctA + (int)GetBValue(b) * (100 - pctA)) / 100;
+    return RGB(r, g, bl);
+}
+
+// A surface meant to sit *above* the panel / rail background: the search and
+// filter pills and the selected-row fill. On light themes the control
+// background is already a step lighter than the panel, so it's used unchanged.
+// But some dark themes (the built-in Dark) use pure black for the control
+// background while the panel is a lighter grey-blue, so those surfaces came out
+// as harsh black boxes - a step *up* from the panel is what reads as raised.
+COLORREF ThemeTouchSurfaceColor() {
+    COLORREF panel = ThemeHotBackgroundColor();
+    COLORREF ctrl = ThemeWindowControlBackgroundColor();
+    if (GetLightness(ctrl) >= GetLightness(panel) + 6.0f) {
+        return ctrl;
+    }
+    return AdjustLightness2(panel, 14.0f);
+}
+
+// A text-entry surface (the browser's address field). It has to read as a
+// field, i.e. a step ABOVE whatever row it sits on. ThemeTouchSurfaceColor
+// alone is not enough on light themes, where it resolves to the same value as
+// the row and the field ends up defined only by its border. The design uses
+// pure white against a near-white row, so lighten a light surface further;
+// dark themes already get a visibly raised surface.
+// Label of an unselected tab. DarkerTextColor alone is a muted gray that reads
+// as disabled at tab size - the file name in an inactive tab was hard to read -
+// so pull it most of the way back toward the normal text color. The selected
+// tab still stands out through its pill background and heavier weight.
+// Label color for an unselected tab. Muting it at all was the mistake: the
+// filename is the whole point of the tab, and an unselected tab has no pill
+// behind it, so it sits directly on the bar with less to separate it already.
+// Selection is signalled by the pill fill plus the heavier font (fSelected vs
+// fNormal), which is enough - so unselected labels get the full text color and
+// stay just as readable as the selected one.
+COLORREF ThemeTabInactiveTextColor() {
+    return ThemeWindowTextColor();
+}
+
+COLORREF ThemeTextFieldColor() {
+    COLORREF surface = ThemeTouchSurfaceColor();
+    COLORREF row = ThemeWindowControlBackgroundColor();
+    if (GetLightness(surface) >= GetLightness(row) + 6.0f) {
+        return surface;
+    }
+    return AdjustLightness2(surface, 12.0f);
+}
+
+void ThemeAccentSurfaceColors(COLORREF* bgOut, COLORREF* fgOut) {
+    // A tint of the theme's own accent over the control background. It used to
+    // borrow NotificationHighlightColor, which is only an accent tint by
+    // coincidence: on the default Light theme that slot is #ffee70, so every
+    // active button came out notification-yellow.
+    // blend over the raised surface, not the raw control background: on the
+    // Dark theme the latter is pure black, so the tint stayed nearly invisible
+    COLORREF ctrlBg = ThemeTouchSurfaceColor();
+    COLORREF accent = ThemeWindowLinkColor();
+    // a dark background swallows a light blend, so it needs more of the accent
+    int pct = IsLightColor(ctrlBg) ? 12 : 30;
+    COLORREF bg = BlendColors(accent, ctrlBg, pct);
+    COLORREF fg = accent;
+    // e.g. the Dark theme pairs a brown tint with a grey link color, which is
+    // unreadable; fall back to the normal text color there. GetLightness is on
+    // a 0-255 scale, so this asks for a good part of the range between them
+    if (fabsf(GetLightness(fg) - GetLightness(bg)) < 110.0f) {
+        fg = ThemeWindowTextColor();
+    }
+    *bgOut = bg;
+    *fgOut = fg;
+}
+
 COLORREF ThemeNotificationsHighlightColor() {
     COLORREF fallback;
     if (IsLightColor(ThemeNotificationsBackgroundColor())) {

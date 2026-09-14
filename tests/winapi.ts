@@ -19,11 +19,15 @@ const user32 = dlopen("user32.dll", {
   GetWindowThreadProcessId: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.u32 },
   PostMessageW: { args: [FFIType.ptr, FFIType.u32, FFIType.i64, FFIType.i64], returns: FFIType.bool },
   SendMessageW: { args: [FFIType.ptr, FFIType.u32, FFIType.i64, FFIType.i64], returns: FFIType.i64 },
-  MoveWindow: { args: [FFIType.ptr, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.bool], returns: FFIType.bool },
+  MoveWindow: {
+    args: [FFIType.ptr, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.bool],
+    returns: FFIType.bool,
+  },
   ShowWindow: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.bool },
   GetClientRect: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
   GetScrollInfo: { args: [FFIType.ptr, FFIType.i32, FFIType.ptr], returns: FFIType.bool },
   SetCursorPos: { args: [FFIType.i32, FFIType.i32], returns: FFIType.bool },
+  GetCursorPos: { args: [FFIType.ptr], returns: FFIType.bool },
   ClientToScreen: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
   GetWindowTextW: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
   GetWindowRect: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
@@ -51,13 +55,32 @@ const gdi32 = dlopen("gdi32.dll", {
   DeleteObject: { args: [FFIType.u64], returns: FFIType.bool },
   DeleteDC: { args: [FFIType.u64], returns: FFIType.bool },
   BitBlt: {
-    args: [FFIType.u64, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.u64, FFIType.i32, FFIType.i32, FFIType.u32],
+    args: [
+      FFIType.u64,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.u64,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.u32,
+    ],
     returns: FFIType.bool,
   },
   StretchBlt: {
     args: [
-      FFIType.u64, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32,
-      FFIType.u64, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.u32,
+      FFIType.u64,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.u64,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.i32,
+      FFIType.u32,
     ],
     returns: FFIType.bool,
   },
@@ -78,7 +101,18 @@ const gdiplus = dlopen("gdiplus.dll", {
 
 const kernel32 = dlopen("kernel32.dll", {
   CreateProcessW: {
-    args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.bool, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr],
+    args: [
+      FFIType.ptr,
+      FFIType.ptr,
+      FFIType.ptr,
+      FFIType.ptr,
+      FFIType.bool,
+      FFIType.u32,
+      FFIType.ptr,
+      FFIType.ptr,
+      FFIType.ptr,
+      FFIType.ptr,
+    ],
     returns: FFIType.bool,
   },
   CloseHandle: { args: [FFIType.u64], returns: FFIType.bool },
@@ -158,6 +192,7 @@ export const WM_KEYDOWN = 0x0100;
 export const WM_KEYUP = 0x0101;
 export const WM_CHAR = 0x0102;
 export const WM_MOUSEMOVE = 0x0200;
+export const WM_MOUSELEAVE = 0x02a3;
 export const WM_LBUTTONDOWN = 0x0201;
 export const WM_LBUTTONUP = 0x0202;
 export const WM_RBUTTONDOWN = 0x0204;
@@ -433,6 +468,15 @@ export function setCursorPos(x: number, y: number): boolean {
   return user32.symbols.SetCursorPos(x, y);
 }
 
+// Where the physical pointer is, in screen pixels. Read it back after
+// setCursorPos to tell "the cursor really moved" from "the call was ignored"
+// (which is what happens to injected input in some sessions).
+export function getCursorPos(): { x: number; y: number } {
+  const buf = new Int32Array(2);
+  user32.symbols.GetCursorPos(ptr(buf));
+  return { x: buf[0], y: buf[1] };
+}
+
 // a null-terminated UTF-16 (wide) string buffer, for LPCWSTR args
 export function wideZ(s: string): Uint16Array {
   const buf = new Uint16Array(s.length + 1);
@@ -570,6 +614,37 @@ export function readWindowDCColumn(hwnd: number, x: number, y: number, count: nu
       c = gdi32.symbols.GetPixel(dc, x, y + i) >>> 0;
     }
     out.push(c);
+  }
+  user32.symbols.ReleaseDC(hwnd, dc);
+  return out;
+}
+
+// Horizontal counterpart of readWindowDCColumn: one run of pixels across a
+// window's DC. Useful for locating owner-drawn chrome (toolbar tracks, pills)
+// by color rather than re-deriving its layout in the test.
+export function readWindowDCRow(hwnd: number, x: number, y: number, count: number): number[] {
+  const dc = user32.symbols.GetWindowDC(hwnd);
+  const out: number[] = [];
+  for (let i = 0; i < count; i++) {
+    let c = gdi32.symbols.GetPixel(dc, x + i, y) >>> 0;
+    for (let attempt = 0; c === CLR_INVALID && attempt < 4; attempt++) {
+      c = gdi32.symbols.GetPixel(dc, x + i, y) >>> 0;
+    }
+    out.push(c);
+  }
+  user32.symbols.ReleaseDC(hwnd, dc);
+  return out;
+}
+
+// Several scattered pixels of a window's DC in ONE GetWindowDC/ReleaseDC pair.
+// Use it when sampling fast (e.g. tracking an animation): opening the DC per
+// pixel costs more than the reads and slows the sampling rate by an order of
+// magnitude.
+export function readWindowDCPoints(hwnd: number, pts: { x: number; y: number }[]): number[] {
+  const dc = user32.symbols.GetWindowDC(hwnd);
+  const out: number[] = [];
+  for (const p of pts) {
+    out.push(gdi32.symbols.GetPixel(dc, p.x, p.y) >>> 0);
   }
   user32.symbols.ReleaseDC(hwnd, dc);
   return out;
@@ -805,8 +880,7 @@ export function isPeFileSigned(filePath: string): boolean {
 // placed in Bun's job object, so it keeps running after this script exits.
 // Use for launching a long-lived GUI app from a short-lived launcher script.
 export function launchDetached(exePath: string, args: string[] = []): number {
-  const quoted =
-    `"${exePath}"` + (args.length ? " " + args.map((a) => `"${a}"`).join(" ") : "");
+  const quoted = `"${exePath}"` + (args.length ? " " + args.map((a) => `"${a}"`).join(" ") : "");
   const appW = wideZ(exePath);
   const cmdW = wideZ(quoted); // CreateProcessW may modify this buffer in place
 

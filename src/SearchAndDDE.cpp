@@ -27,9 +27,11 @@
 #include "WindowTab.h"
 #include "Commands.h"
 #include "AppTools.h"
+#include "TableOfContents.h"
 #include "SearchAndDDE.h"
 #include "Selection.h"
 #include "Toolbar.h"
+#include "TopBar.h"
 #include "FindBar.h"
 #include "FindWindow.h"
 #include "Favorites.h"
@@ -98,7 +100,7 @@ static DocController* BrowserFindCtrl(MainWindow* win) {
 // the current page and sweep all pages for the match list. Results arrive
 // asynchronously via BrowserFindResultReceived() / BrowserFindAllResultReceived()
 static void BrowserFindStartSearch(MainWindow* win, DocController* md) {
-    TempStr term = HwndGetTextTemp(win->hwndFindEdit);
+    TempStr term = FindCurrentQueryTemp(win);
     if (len(term) == 0) {
         return;
     }
@@ -382,8 +384,21 @@ void FindDebounceTimerFired(MainWindow* win) {
     }
 }
 
+// The find query has two possible owners. The classic find bar / find window
+// puts it in win->hwndFindEdit; the touch chrome's Search panel never opens
+// either of those and drives the search from its own filter edit. Everything
+// that used to read hwndFindEdit as the single source of truth asks this
+// instead, so Find Next / Prev step through matches from either UI. When the
+// find bar has text it wins, so classic behavior is bit-for-bit unchanged.
+TempStr FindCurrentQueryTemp(MainWindow* win) {
+    if (win->hwndFindEdit && HwndGetTextLen(win->hwndFindEdit) > 0) {
+        return HwndGetTextTemp(win->hwndFindEdit);
+    }
+    return TouchSearchPanelQueryTemp(win);
+}
+
 static bool HasFindText(MainWindow* win) {
-    return win->hwndFindEdit && HwndGetTextLen(win->hwndFindEdit) > 0;
+    return len(FindCurrentQueryTemp(win)) > 0;
 }
 
 bool FindFlushPendingSearch(MainWindow* win) {
@@ -763,6 +778,87 @@ void InvalidateFindForDocumentChange(MainWindow* win) {
 }
 
 // build a one-line "...context match context..." snippet (UTF-8) around a match
+// Text a font can produce that is not text at all.
+//
+// A symbolic font with no usable character map - the neume fonts in Byzantine
+// chant books are the case that showed this up - hands its glyphs back as
+// private-use codepoints, and where the extractor falls back to WinAnsi they
+// arrive as stray Latin letters. Both end up glued into the words around them,
+// so a search result read "...ourfffsouls ffbe saved" instead of "...our souls
+// be saved". None of it is readable, and none of it is what was matched: it is
+// dropped from the preview, and what is dropped becomes a single space so the
+// words on either side do not run together.
+static bool IsPrivateUse(int c) {
+    return (c >= 0xe000 && c <= 0xf8ff) || (c >= 0xf0000 && c <= 0xffffd) || (c >= 0x100000 && c <= 0x10fffd);
+}
+
+static bool IsUnreadableInSnippet(int c, bool symbolFontPage) {
+    if (c == 0xfffd) {
+        return true; // replacement character: the extractor had nothing
+    }
+    if (IsPrivateUse(c)) {
+        return true;
+    }
+    if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') {
+        return true;
+    }
+    if (c == 0x200b || c == 0x200c || c == 0x200d || c == 0xfeff) {
+        return true; // zero-width and byte-order marks
+    }
+    // Only where the page has already proved it uses a symbol font (it has
+    // private-use codepoints in it) is the WinAnsi fallback letter treated as
+    // noise; a document that genuinely writes "ƒ" keeps it.
+    if (symbolFontPage && c == 0x192) {
+        return true;
+    }
+    return false;
+}
+
+// Whether this page draws with a symbol font, judged by the whole page rather
+// than by the slice being previewed: the neumes and the stray Latin letters
+// they fall back to are spread across the page, and a snippet can easily sit
+// between them.
+static bool PageUsesSymbolFont(Str pageText) {
+    // Utf8CodepointNext walks by byte index and stops by returning 0 once the
+    // index is past the end - it never returns a negative
+    int idx = 0;
+    while (idx < pageText.len) {
+        int c = Utf8CodepointNext(pageText, idx);
+        if (c == 0) {
+            break;
+        }
+        if (IsPrivateUse(c)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static TempStr CleanSnippetTemp(Str s, bool symbolFontPage) {
+    str::Builder out;
+    bool pendingGap = false;
+    int idx = 0;
+    while (idx < s.len) {
+        int c = Utf8CodepointNext(s, idx);
+        if (c == 0) {
+            break;
+        }
+        if (IsUnreadableInSnippet(c, symbolFontPage)) {
+            pendingGap = true;
+            continue;
+        }
+        if (pendingGap) {
+            out.AppendChar(' ');
+            pendingGap = false;
+        }
+        char buf[8];
+        int off = 0;
+        str::Utf8Encode(buf, off, c);
+        out.Append(Str{buf, off});
+    }
+    return str::DupTemp(Str{out.els, (int)out.len});
+}
+
 static TempStr BuildSnippet(EngineBase* engine, const FindMatch& m) {
     int textLen = 0;
     Str pageText = engine->GetTextForPage(m.startPage, &textLen);
@@ -772,13 +868,19 @@ static TempStr BuildSnippet(EngineBase* engine, const FindMatch& m) {
     int mStart = limitValue(m.startGlyph, 0, textLen);
     int mEnd = (m.endPage == m.startPage) ? m.endGlyph : textLen;
     mEnd = limitValue(mEnd, mStart, textLen);
-    const int kCtx = 40;
-    int from = std::max(0, mStart - kCtx);
-    int to = std::min(textLen, mEnd + kCtx);
+    // the results list draws this on one line: keep the lead-in short so the
+    // match itself is always in view, and let the tail carry the context
+    const int kCtxBefore = 18;
+    const int kCtxAfter = 60;
+    int from = std::max(0, mStart - kCtxBefore);
+    int to = std::min(textLen, mEnd + kCtxAfter);
     Str sub = str::Dup(Utf8SliceByCodepoints(pageText, from, to - from));
-    str::NormalizeWSInPlace(sub);
-    TempStr u = str::DupTemp(sub);
+    TempStr cleaned = CleanSnippetTemp(sub, PageUsesSymbolFont(pageText));
     str::FreePtr(&sub);
+    Str norm = str::Dup(cleaned);
+    str::NormalizeWSInPlace(norm);
+    TempStr u = str::DupTemp(norm);
+    str::FreePtr(&norm);
     return fmt("%s%s%s", Str(from > 0 ? "..." : ""), u, Str(to < textLen ? "..." : ""));
 }
 
@@ -877,6 +979,9 @@ static void CountEndTask(CountEndTaskData* d) {
         }
         InvalidateFindMatchPaintCache();
         ShowMatchCount(win);
+        if (win->hwndTocBox && win->touchPanelMode == TouchPanelMode::Search) {
+            HwndInvalidate(win->hwndTocBox, false);
+        }
         // Enable/disable Find Next/Prev once we know whether any matches exist.
         ToolbarUpdateStateForWindow(win, false);
         ScheduleRepaint(win, 0);
@@ -1004,6 +1109,9 @@ static void CountPartialTask(CountPartialTaskData* d) {
         InvalidateFindMatchPaintCache();
         FindWindowRefreshResults(win, false /* allowNavigation */);
         ScheduleRepaint(win, 0);
+        if (win->hwndTocBox && win->touchPanelMode == TouchPanelMode::Search) {
+            HwndInvalidate(win->hwndTocBox, false);
+        }
     }
 }
 
@@ -1172,7 +1280,8 @@ static void StartFindCount(MainWindow* win, Str text, bool matchCase, bool match
     engine->AddRef(); // released in CountThread
     // always build the match list so PaintAllFindMatches can highlight every hit;
     // snippets only when the floating results list is showing
-    bool wantSnippets = gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win);
+    bool embeddedResults = IsTouchSearchPanelVisible(win);
+    bool wantSnippets = (gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win)) || embeddedResults;
     bool wantMatchList = true;
     int epoch = AtomicIntInc(&win->findCountEpoch);
     int startPage = win->ctrl ? win->ctrl->CurrentPageNo() : 1;
@@ -1189,7 +1298,8 @@ static void StartFindCount(MainWindow* win, Str text, bool matchCase, bool match
 static void UpdateMatchCount(MainWindow* win, Str text) {
     DisplayModel* dm = win->AsFixed();
     void* engine = dm ? (void*)dm->GetEngine() : nullptr;
-    bool wantSnippets = gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win);
+    bool embeddedResults = IsTouchSearchPanelVisible(win);
+    bool wantSnippets = (gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win)) || embeddedResults;
     bool wantMatchList = true;
     bool cacheHit = win->findCountValid && win->findCountText && str::Eq(win->findCountText, text) &&
                     win->findCountMatchCase == win->findMatchCase &&
@@ -1203,6 +1313,20 @@ static void UpdateMatchCount(MainWindow* win, Str text) {
     } else {
         StartFindCount(win, text, win->findMatchCase, win->findMatchWholeWord);
     }
+}
+
+void SearchDocumentFromTouchPanel(MainWindow* win, Str text) {
+    if (!win || !text) {
+        return;
+    }
+    // Only start the interactive find. FindEndTask() kicks the full-document
+    // count -- which is what builds the results list the panel draws -- after
+    // this find thread has exited. Counting from here as well would run the
+    // counting scan *concurrently* with the find thread (mupdf's text
+    // extraction is not safe for that, which is exactly why the count is kicked
+    // from FindEndTask), and would scan the whole document twice per keystroke:
+    // the second scan starts by clearing the list the first one just installed.
+    FindTextOnThread(win, TextSearch::Direction::Forward, text, true, false);
 }
 
 static void CancelPendingFind(MainWindow* win);
@@ -1242,6 +1366,9 @@ void GoToFindMatch(MainWindow* win, int startPage, int startGlyph, int endPage, 
     ts->StartAt(startPage, startGlyph);
     ts->SelectUpTo(endPage, endGlyph);
     if (ts->result.len == 0) {
+        // The saved glyph range can become stale while a long find-all is
+        // running. A result activation must still navigate to its page.
+        win->ctrl->GoToPage(startPage, true);
         return;
     }
     // navigate to the match while ts->result is still populated. SetLastResult()
@@ -1460,10 +1587,12 @@ __unused static TempStr ReverseTextTemp(Str s) {
 }
 
 void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, bool showProgress) {
-    TempStr s = HwndGetTextTemp(win->hwndFindEdit);
+    // not necessarily the find bar: the touch Search panel owns the query when
+    // it is the one showing (see FindCurrentQueryTemp)
+    TempStr s = FindCurrentQueryTemp(win);
     // if document is rtl, need to reverse the text
     // s = ReverseTextTemp(s);
-    bool wasModified = Edit_GetModify(win->hwndFindEdit);
+    bool wasModified = win->hwndFindEdit && Edit_GetModify(win->hwndFindEdit);
     if (!wasModified) {
         // check if the find text differs from the current tab's cached search text
         // this happens when switching tabs: the find edit box shows the current text
@@ -1484,7 +1613,9 @@ void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, bool sho
             }
         }
     }
-    Edit_SetModify(win->hwndFindEdit, FALSE);
+    if (win->hwndFindEdit) {
+        Edit_SetModify(win->hwndFindEdit, FALSE);
+    }
     FindTextOnThread(win, direction, s, wasModified, showProgress);
 }
 
@@ -1609,7 +1740,10 @@ void PaintAllFindMatches(MainWindow* win, HDC hdc) {
     if (!win->IsDocLoaded() || !win->AsFixed()) {
         return;
     }
-    if (!win->hwndFindEdit || HwndGetTextLen(win->hwndFindEdit) == 0) {
+    // the term comes from the find bar, or from the touch Search pane when
+    // that is the find UI (it has no find edit, and nothing was painted)
+    bool hasBarTerm = win->hwndFindEdit && HwndGetTextLen(win->hwndFindEdit) > 0;
+    if (!hasBarTerm && !TouchSearchPanelQueryTemp(win)) {
         return;
     }
 

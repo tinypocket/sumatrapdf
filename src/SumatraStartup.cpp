@@ -22,6 +22,7 @@
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
+#include "wingui/Anim.h"
 
 #include "Settings.h"
 #include "DisplayMode.h"
@@ -41,6 +42,7 @@
 #include "TextSearch.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "Rail.h"
 #include "WindowTab.h"
 #include "UpdateCheck.h"
 #include "resource.h"
@@ -72,6 +74,7 @@
 #include "SelectTextKeyboard.h"
 #include "SumatraControl.h"
 #include "SumatraLog.h"
+#include "TopBar.h"
 
 // return false if failed in a way that should abort the app
 static NO_INLINE bool MaybeMakePluginWindow(MainWindow* win, HWND hwndParent) {
@@ -393,6 +396,7 @@ void SetTabState(WindowTab* tab, TabState* state) {
     }
 
     tab->tocState = *state->tocState;
+    // each document's own (the touch pane is remembered per tab too)
     SetSidebarVisibility(win, state->showToc, gGlobalPrefs->showFavorites);
 
     DisplayMode displayMode = DisplayModeFromString(state->displayMode, DisplayMode::Automatic);
@@ -712,6 +716,34 @@ static bool MaybeTranslateAccelerator(MSG& msg) {
     bool doAccels = ((msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST) ||
                      (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST));
     if (!doAccels) return false;
+
+    // The in-app browser's address bar owns Ctrl+A (select the whole address)
+    // and Ctrl+L (jump to it). Both are bound to app commands - Select All and
+    // Presentation mode - which fired first and left the address bar inert.
+    if (msg.message == WM_KEYDOWN && IsCtrlPressed() && !IsAltPressed() && !IsShiftPressed()) {
+        MainWindow* browserWin = FindMainWindowByHwnd(msg.hwnd);
+        if (browserWin && browserWin->touchView == TouchView::Web && browserWin->touchBrowser) {
+            if (msg.wParam == 'L') {
+                return false;
+            }
+            if (msg.wParam == 'A' && IsTouchBrowserUrlEdit(browserWin, msg.hwnd)) {
+                return false;
+            }
+        }
+    }
+
+    // A text box's own editing keys are its own: Copy, Cut, Undo and Redo.
+    // Ctrl+C is the document's Copy and Ctrl+Y opens the zoom dialog, and they
+    // fired from inside every text box the user typed in. (Ctrl+A is handled
+    // for every text box in PreTranslateMessage; Ctrl+V and the Insert/Delete
+    // combinations are already kept out of the text box shortcut table.)
+    if (msg.message == WM_KEYDOWN && IsCtrlPressed() && !IsAltPressed() && !IsShiftPressed() &&
+        HwndIsTextBox(msg.hwnd)) {
+        WPARAM key = msg.wParam;
+        if (key == 'C' || key == 'X' || key == 'Z' || key == 'Y') {
+            return false;
+        }
+    }
 
     // Arrows, Home/End and PageUp/PageDown normally accelerate to scroll /
     // go-to-page commands. While the keyboard selection caret is up they move
@@ -1326,7 +1358,7 @@ For more information see <a href="%s">Failed to load libsumatrapdf.dll</a>.)",
         flags |= TDF_RTL_LAYOUT;
     }
     dialogConfig.cbSize = sizeof(TASKDIALOGCONFIG);
-    dialogConfig.pszWindowTitle = L"SumatraPDF";
+    dialogConfig.pszWindowTitle = kAppNameW;
     dialogConfig.pszMainInstruction = L"Failed to load libsumatrapdf.dll";
     dialogConfig.pszContent = CWStrTemp(msg);
     dialogConfig.nDefaultButton = IDOK;
@@ -1391,7 +1423,7 @@ Learn more at https://www.sumatrapdfreader.org/docs/Corrupted-installation
         printf("%s", corruptedInstallationConsole.s);
     }
 
-    const auto* title = L"SumatraPDF installer";
+    const auto* title = L"SumatraPDF+ installer";
     TASKDIALOGCONFIG dialogConfig{};
 
     DWORD flags =
@@ -1454,7 +1486,7 @@ static void ShowInstallerHelp() {
         flags |= TDF_RTL_LAYOUT;
     }
     dialogConfig.cbSize = sizeof(TASKDIALOGCONFIG);
-    dialogConfig.pszWindowTitle = L"SumatraPDF installer usage";
+    dialogConfig.pszWindowTitle = L"SumatraPDF+ installer usage";
     dialogConfig.pszMainInstruction = CWStrTemp(msg);
     dialogConfig.pszContent =
         LR"(<a href="https://www.sumatrapdfreader.org/docs/Installer-cmd-line-arguments">Read more on website</a>)";
@@ -2123,6 +2155,9 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     MainWindow* win = nullptr;
     bool showStartPage = false;
     bool restoreSession = false;
+    // declared up here with restoreSession: a goto Exit below would otherwise
+    // jump over its initialization
+    bool reopenAfterUpdate = false;
     HANDLE hMutex = nullptr;
     HWND existingInstanceHwnd = nullptr;
     HWND existingHwnd = nullptr;
@@ -2413,7 +2448,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     }
 
     if (flags.appdataDir) {
-        SetAppDataDir(flags.appdataDir);
+        SetAppDataDir(flags.appdataDir, true);
     }
 
 #if defined(DEBUG)
@@ -2458,6 +2493,11 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
 
     LoadSettings();
     UpdateGlobalPrefs(flags);
+    // wingui has no access to app prefs, so push the animation settings down
+    AnimSetAppEnabled(gGlobalPrefs->animateUI);
+    AnimSetElaborate(gGlobalPrefs->elaborateAnimations);
+    TabsSetLargerTabs(gGlobalPrefs->largerTabs);
+    TabsSetTwoRowTabs(gGlobalPrefs->twoRowTabs);
     if (gMyWindowWasEmbedded) {
         str::ReplaceWithCopy(&gGlobalPrefs->scrollbars, "windows");
     }
@@ -2490,6 +2530,8 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     gCrashOnOpen = flags.crashOnOpen;
 
     gRenderCache->textColor = ThemePageRenderColors(gRenderCache->backgroundColor);
+    // and the night light, so the first pages already render warm
+    gRenderCache->nightLight = gGlobalPrefs->nightLight ? std::clamp(gGlobalPrefs->nightLightStrength, 0, 100) : 0;
     // logfa("retrieved doc colors in WinMain: 0x%x 0x%x\n", gRenderCache->textColor, gRenderCache->backgroundColor);
 
     gIsStartup = true;
@@ -2617,7 +2659,34 @@ ContinueOpenWindow:
     gInitialSessionData = gGlobalPrefs->sessionData;
     gGlobalPrefs->sessionData = new Vec<SessionData*>();
 
-    restoreSession = SettingsRestoreSession() && (len(*gInitialSessionData) > 0) && !NeedsWindowEmbeddingHacks();
+    // A just-installed update left a one-shot marker asking for the documents
+    // that were open before the handover to come back, even for users who keep
+    // session restore off. Consume it here so it applies exactly once.
+    if (gGlobalPrefs->reopenOnce) {
+        for (Str s : *gGlobalPrefs->reopenOnce) {
+            if (str::EqI(s, StrL("SessionData"))) {
+                reopenAfterUpdate = true;
+                break;
+            }
+        }
+        if (reopenAfterUpdate) {
+            for (Str s : *gGlobalPrefs->reopenOnce) {
+                str::Free(s);
+            }
+            gGlobalPrefs->reopenOnce->Reset();
+            // NOT left empty: the serializer skips an empty array
+            // ("prevent empty arrays from being replaced with the defaults")
+            // and SaveSettings then preserves the previous text, so the marker
+            // would survive and silently turn into permanent session restore.
+            // One empty entry makes the field non-empty, so it is rewritten as
+            // "ReopenOnce =", which no longer matches the SessionData marker.
+            gGlobalPrefs->reopenOnce->Append(str::Dup(StrL("")));
+            log("restoring documents that were open before an update");
+        }
+    }
+
+    restoreSession = (SettingsRestoreSession() || reopenAfterUpdate) && (len(*gInitialSessionData) > 0) &&
+                     !NeedsWindowEmbeddingHacks();
     if (!SettingsUseTabs() && (existingInstanceHwnd != nullptr)) {
         // do not restore a session if tabs are disabled and SumatraPDF is already running
         // TODO: maybe disable restoring if tabs are disabled?

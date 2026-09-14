@@ -33,6 +33,20 @@ enum class TbIcon {
     HomeList,
     HomeThumbnails,
     Pin,
+    Settings,
+    Home,
+    Library,
+    Annotation,
+    Attachment,
+    Bookmark,
+    WindowStack,
+    SmartWidth,
+    Recent,
+    Folder,
+    Document,
+    Web,
+    Moon,
+    Contrast,
     kMax
 };
 

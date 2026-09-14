@@ -4,26 +4,38 @@
 #include "base/Base.h"
 #include "base/BitManip.h"
 #include "base/Dpi.h"
+#include "base/ScopedWin.h"
 #include "base/File.h"
 #include "base/UITask.h"
 #include "base/Win.h"
+#include "base/GdiPlusUtil.h"
 
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
 
 #include "wingui/LabelWithCloseWnd.h"
+#include "wingui/Anim.h"
 
 #include "Settings.h"
 #include "AppSettings.h"
 #include "DocController.h"
 #include "EngineBase.h"
+#include "Annotation.h"
 #include "base/GuessFileType.h"
 #include "EngineAll.h"
 #include "GlobalPrefs.h"
+#include "TouchMetrics.h"
+#include "Rail.h"
+#include "SvgIcons.h"
+#include "Toolbar.h"
+#include "TopBar.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
 #include "DisplayModel.h"
+#include "RenderCache.h"
+#include "base/Pixmap.h"
+#include "base/Dict.h"
 #include "Favorites.h"
 #include "WindowTab.h"
 #include "resource.h"
@@ -34,8 +46,98 @@
 #include "Accelerators.h"
 #include "Theme.h"
 #include "FilterHighlightDraw.h"
+#include "ProgressUpdateUI.h"
+#include "TextSelection.h"
+#include "TextSearch.h"
+#include "SearchAndDDE.h"
+#include "FindBar.h"
 
 static void LayoutTocContainer(MainWindow* win);
+static void UpdateTocStickyHeader(MainWindow* win);
+void UpdateTouchPanelMode(MainWindow* win);
+void EngineMupdfGetAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut);
+void EngineMupdfGetAnnotationsInRange(EngineBase* engine, int fromPage, int toPage, Vec<Annotation*>& annotsOut);
+int EngineMupdfPageCount(EngineBase* engine);
+
+int TouchSidebarRowDy() {
+    Str density = gGlobalPrefs->touchSidebarDensity;
+    if (str::EqI(density, StrL("condensed"))) {
+        return 34;
+    }
+    if (str::EqI(density, StrL("expanded"))) {
+        return 52;
+    }
+    return kPanelRowDy;
+}
+
+static int TouchSidebarListRowDy() {
+    return TouchSidebarRowDy() + 6;
+}
+
+// Dragged narrow, the bookmarks pane takes a smaller font and shorter rows so
+// more of each title fits (TouchSidebarCompactDx, in pixels at 100%; 0 never).
+static bool TocWantsCompact(MainWindow* win) {
+    int limit = gGlobalPrefs->touchSidebarCompactDx;
+    if (!IsTouchChrome(win) || limit <= 0 || !win->hwndTocBox) {
+        return false;
+    }
+    int dx = HwndClientRect(win->hwndTocBox).dx;
+    return dx > 0 && dx < DpiScale(win->hwndTocBox, limit);
+}
+
+// the bookmarks tree's row height, compact or not
+int TocTreeRowDy(MainWindow* win) {
+    int dy = TouchSidebarRowDy();
+    return win && win->tocCompact ? std::max(26, dy * 4 / 5) : dy;
+}
+
+// puts the tree in (or out of) its compact size when the pane's width crosses
+// the limit; force re-applies it (the DPI changed, say, and reset the rows).
+// Only the rows and the titles drawn in them shrink (see
+// DrawTocItemPostPaint): the tree's own font decides the area each row may
+// draw in, and made smaller it cut the page numbers off.
+void UpdateTocCompact(MainWindow* win, bool force) {
+    TreeView* tv = win ? win->tocTreeView : nullptr;
+    if (!tv || !tv->hwnd || !IsTouchChrome(win)) {
+        return;
+    }
+    bool compact = TocWantsCompact(win);
+    if (compact == win->tocCompact && !force) {
+        return;
+    }
+    win->tocCompact = compact;
+    TreeView_SetItemHeight(tv->hwnd, DpiScale(tv->hwnd, TocTreeRowDy(win)));
+    HwndInvalidate(tv->hwnd, false);
+}
+
+static int TouchSearchResultRowDy() {
+    // Search results always need room for both their page label and snippet.
+    // Bookmark density preferences must not compress this two-line card.
+    return std::max(TouchSidebarRowDy() + 18, 68);
+}
+
+// the rows of suggested words under the search field, while there are any:
+// up to two rows of chips, kSuggestRowDy for the first and a chip and a gap
+// more for the second
+constexpr int kSuggestRowDy = 44;
+constexpr int kSuggestChipDy = 34;
+constexpr int kSuggestChipGap = 8;
+constexpr int kSuggestRows = 2;
+
+static int TouchSuggestRowDy(MainWindow* win);
+
+static int TouchSearchResultsY(MainWindow* win) {
+    return DpiScale(win->hwndTocBox, kPanelHeaderDy + kPanelFilterDy + 64) + TouchSuggestRowDy(win) -
+           win->touchPanelScrollY;
+}
+
+static Rect TouchSearchResultRect(MainWindow* win, int idx) {
+    int stride = DpiScale(win->hwndTocBox, TouchSearchResultRowDy());
+    int gap = DpiScale(win->hwndTocBox, 8);
+    Rect client = HwndClientRect(win->hwndTocBox);
+    return Rect{DpiScale(win->hwndTocBox, 12), TouchSearchResultsY(win) + idx * stride + gap / 2,
+                client.dx - DpiScale(win->hwndTocBox, 24), stride - gap};
+}
 
 // When true, multi-highlight every TOC item that matches the current page
 // (issue #4642). Easy to flip for comparison with single-selection behavior.
@@ -221,6 +323,52 @@ static TocItem* FindTocItemByTitlePage(TocItem* item, Str title, int pageNo) {
         }
     }
     return nullptr;
+}
+
+static TocItem* FindTocItemById(TocItem* item, int id) {
+    for (; item; item = item->next) {
+        if (item->id == id) {
+            return item;
+        }
+        TocItem* found = FindTocItemById(item->child, id);
+        if (found) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+static int CountTocLeaves(TocItem* item) {
+    int count = 0;
+    for (; item; item = item->next) {
+        if (item->child) {
+            count += CountTocLeaves(item->child);
+        } else {
+            count++;
+        }
+    }
+    return count;
+}
+
+static TempStr TocParentPathTemp(TocItem* item) {
+    TocItem* chain[64]{};
+    int count = 0;
+    // every titled ancestor: the top-level chapter is the one the reader most
+    // wants to see ("November" under a saint's day), and it has no parent of
+    // its own, so a parent-of-parent test dropped exactly that one
+    for (TocItem* parent = item ? item->parent : nullptr; parent && count < dimofi(chain); parent = parent->parent) {
+        if (len(parent->title) > 0) {
+            chain[count++] = parent;
+        }
+    }
+    str::Builder path;
+    for (int i = count - 1; i >= 0; i--) {
+        if (i != count - 1) {
+            path.Append(StrL(" · "));
+        }
+        path.Append(chain[i]->title);
+    }
+    return str::DupTemp(ToStr(path));
 }
 
 struct GoToTocLinkData {
@@ -617,6 +765,13 @@ static void UpdateDocTocExpansionStateRecur(TreeView* treeView, Vec<int>& tocSta
 }
 
 void UpdateTocExpansionState(Vec<int>& tocState, TreeView* treeView, TocTree* docTree) {
+    // A document with no bookmarks still counts as "toc loaded" (the pane can
+    // be open on it for Search / Thumbnails), and then both the tree's model
+    // and docTree are null - which passed the equality check below and
+    // dereferenced null. Nothing to record in that case.
+    if (!treeView || !docTree || !docTree->root) {
+        return;
+    }
     if (treeView->treeModel != docTree) {
         // CrashMe();
         return;
@@ -1065,6 +1220,13 @@ void LoadTocTree(MainWindow* win) {
         ReportIf(true);
         return;
     }
+    // No document in this tab - the Library tab, or a document tab whose load
+    // has not finished. There is no toc to read, and asking the controller for
+    // one read through a null pointer. Not marked loaded: the tab gets its tree
+    // when it has something to give.
+    if (!tab->ctrl) {
+        return;
+    }
 
     if (win->tocLoaded) {
         return;
@@ -1136,8 +1298,103 @@ static bool HasTocFilter(MainWindow* win) {
     return len(words) > 0;
 }
 
+// "3 sections" under a row title, as in the redesign. Only rows that have
+// children get one.
+static int CountTocChildren(TocItem* ti) {
+    int n = 0;
+    for (TocItem* c = ti ? ti->child : nullptr; c; c = c->next) {
+        n++;
+    }
+    return n;
+}
+
+static int TocItemDepth(TocItem* item) {
+    int depth = 0;
+    while (item && item->parent && item->parent->parent) {
+        depth++;
+        item = item->parent;
+    }
+    return depth;
+}
+
+// the redesigned panel draws a selected row as a rounded pill in the accent
+// tint, matching the rail's active button
+static bool TocUsesRedesignedRows(MainWindow* win) {
+    return IsTouchChrome(win);
+}
+
+static void TocSelectionColors(COLORREF* bgOut, COLORREF* txtOut) {
+    ThemeAccentSurfaceColors(bgOut, txtOut);
+}
+
+// 4a's disclosure chevron: a right-pointing '>' when collapsed, a down '⌄'
+// when expanded, drawn as two antialiased strokes centered in `box`.
+static void DrawTocChevron(HDC hdc, const Rect& box, bool expanded, COLORREF col) {
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    float cx = (float)box.x + box.dx / 2.0f;
+    float cy = (float)box.y + box.dy / 2.0f;
+    // box is already DPI-scaled, so derive the glyph size from it
+    float d = box.dx / 5.0f;
+    Gdiplus::Pen pen(GdiRgbFromCOLORREF(col), std::max(1.5f, box.dx / 14.0f));
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    Gdiplus::PointF pts[3];
+    if (expanded) {
+        // v : down chevron
+        pts[0] = {cx - d, cy - d / 2};
+        pts[1] = {cx, cy + d / 2};
+        pts[2] = {cx + d, cy - d / 2};
+    } else {
+        // > : right chevron
+        pts[0] = {cx - d / 2, cy - d};
+        pts[1] = {cx + d / 2, cy};
+        pts[2] = {cx - d / 2, cy + d};
+    }
+    g.DrawLines(&pen, pts, 3);
+}
+
+static void DrawTocHierarchyGuides(HDC hdc, HWND hwnd, const Rect& row, int depth) {
+    if (depth <= 0) {
+        return;
+    }
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    COLORREF guideCol = ThemeEdgeColor();
+    Gdiplus::Pen pen(GdiRgbFromCOLORREF(guideCol), std::max(1.0f, (float)DpiScale(hwnd, 1)));
+    float inset = (float)DpiScale(hwnd, kPanelRowPadX);
+    float step = (float)DpiScale(hwnd, kPanelIndentDx);
+    float center = (float)DpiScale(hwnd, kPanelChevronDx) / 2.0f;
+    float top = (float)row.y;
+    float bottom = (float)(row.y + row.dy);
+    float mid = top + row.dy / 2.0f;
+
+    // Keep every ancestor rail visible through this row. The final rail bends
+    // into the current level, like a compact discussion-thread hierarchy.
+    for (int level = 0; level < depth - 1; level++) {
+        float x = inset + level * step + center;
+        g.DrawLine(&pen, x, top, x, bottom);
+    }
+    float parentX = inset + (depth - 1) * step + center;
+    float currentX = inset + depth * step + center;
+    float radius = std::min(step / 2.0f, (float)DpiScale(hwnd, 8));
+    Gdiplus::GraphicsPath path;
+    path.StartFigure();
+    path.AddLine(parentX, top, parentX, mid - radius);
+    path.AddBezier(parentX, mid - radius, parentX, mid, parentX + radius, mid, currentX, mid);
+    g.DrawPath(&pen, &path);
+}
+
 // POSTPAINT: redraw title (optional filter highlight), optional right-aligned
 // page label, and multi-match "current page" highlight (issue #4642).
+static void FillTocPill(HDC hdc, const Rect& r, int radius, COLORREF col, COLORREF borderCol = kColorUnset,
+                        int borderWidth = 1) {
+    // the filter field is the same color as the panel, so only a border makes
+    // it readable as a field
+    FillRoundRectAA(hdc, r, radius, col, borderCol, borderWidth);
+}
+
 static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win) {
     TocItem* tocItem = (TocItem*)ev->treeItem;
     if (!tocItem || !tocItem->title) {
@@ -1145,18 +1402,29 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     }
 
     TreeView* tv = ev->treeView;
+    // A filtered result row is drawn entirely here, from the row's own rect:
+    // the TreeView's label for it can be empty, which made GetItemRect fail
+    // and cd->rc collapse, and the row went blank but for its page number.
+    bool filteredRows = win && HasTocFilter(win) && TocUsesRedesignedRows(win);
     Rect labelRect{};
-    if (!tv->GetItemRect(ev->treeItem, true, labelRect)) {
-        return;
-    }
+    bool haveLabel = tv->GetItemRect(ev->treeItem, true, labelRect);
     Rect itemRect{};
     tv->GetItemRect(ev->treeItem, false, itemRect);
+    if (!haveLabel) {
+        if (!filteredRows || itemRect.IsEmpty()) {
+            return;
+        }
+        labelRect = itemRect;
+    }
 
     NMTVCUSTOMDRAW* tvcd = ev->nm;
     HDC hdc = tvcd->nmcd.hdc;
     NMCUSTOMDRAW* cd = &tvcd->nmcd;
     if (cd->rc.right <= cd->rc.left || cd->rc.bottom <= cd->rc.top) {
-        return;
+        if (!filteredRows || itemRect.IsEmpty()) {
+            return;
+        }
+        cd->rc = ToRECT(itemRect);
     }
 
     // POSTPAINT often omits CDIS_SELECTED; also check the control selection.
@@ -1191,7 +1459,6 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     StrVec words;
     GetTocFilterWords(win, words);
     bool filterActive = len(words) > 0;
-
     // Always repaint selected / multi-match rows so themed selection colors
     // replace Explorer's light inactive-selection face (issue #5848). Also
     // when page numbers or filter bars need drawing.
@@ -1222,16 +1489,40 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
         pageW = ToWStrTemp(pageLabel);
         if (pageW.len > 0) {
             pageSize = HdcGetTextExtentPoint32(hdc, pageLabel);
-            pageReserve = pageSize.dx + DpiScale(tv->hwnd, 8);
+            // reserve the number's width plus its right padding so a long
+            // title ellipsizes before it reaches the number
+            int pageGap = TocUsesRedesignedRows(win) ? (kPanelRowPadX + 8) : 8;
+            pageReserve = pageSize.dx + DpiScale(tv->hwnd, pageGap);
         } else {
             showPage = false;
         }
     }
 
     Rect drawRect = ToRect(drawRc);
-    HBRUSH brushBg = CreateSolidBrush(bgCol);
-    HdcFillRect(hdc, drawRect, brushBg);
-    DeleteObject(brushBg);
+    bool roundedRow = isSelected && TocUsesRedesignedRows(win);
+    if (TocUsesRedesignedRows(win)) {
+        int left = DpiScale(tv->hwnd, kPanelRowPadX + TocItemDepth(tocItem) * kPanelIndentDx);
+        int right = drawRect.x + drawRect.dx;
+        drawRect.x = left;
+        drawRect.dx = std::max(0, right - left);
+        // Clear the whole row to the panel background first: the system paints
+        // the item text at the un-shifted position and it would otherwise bleed
+        // out to the left of our redrawn, gutter-shifted title (esp. on the
+        // selected row). Then draw the accent pill for the selection.
+        Rect full = ToRect(cd->rc);
+        HdcFillRect(hdc, full, tv->bgColor);
+        if (roundedRow) {
+            TocSelectionColors(&bgCol, &txtCol);
+            Rect pill = full;
+            pill.Inflate(-DpiScale(tv->hwnd, 12), -DpiScale(tv->hwnd, 1));
+            FillTocPill(hdc, pill, DpiScale(tv->hwnd, kPanelRowRadius), bgCol);
+        }
+        DrawTocHierarchyGuides(hdc, tv->hwnd, full, TocItemDepth(tocItem));
+    } else {
+        HBRUSH brushBg = CreateSolidBrush(bgCol);
+        HdcFillRect(hdc, drawRect, brushBg);
+        DeleteObject(brushBg);
+    }
 
     Rect titleRect = drawRect;
     titleRect.dx = std::max(0, titleRect.dx - pageReserve);
@@ -1240,6 +1531,81 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, txtCol);
     SetBkColor(hdc, bgCol);
+
+    if (filterActive && TocUsesRedesignedRows(win)) {
+        Rect full = ToRect(cd->rc);
+        // The TreeView clips a flat filtered leaf to its own label bounds
+        // during ITEMPOSTPAINT, and the result title is drawn from the row's
+        // left edge, outside them - so the whole row was going blank except
+        // the page number, which already widened the clip for itself. Widen
+        // it for the entire row.
+        Rect client = HwndClientRect(tv->hwnd);
+        int rowDc = SaveDC(hdc);
+        SelectClipRgn(hdc, nullptr);
+        IntersectClipRect(hdc, 0, full.y, client.dx, full.y + full.dy);
+        // width from the control, not from cd->rc: for a filtered leaf that
+        // rect is the label's own bounds, and a short label left no room for
+        // the title once the gutter and page number were taken off it
+        Rect resultTitle{DpiScale(tv->hwnd, 16), full.y + DpiScale(tv->hwnd, 5),
+                         std::max(0, client.dx - DpiScale(tv->hwnd, 32) - pageReserve), DpiScale(tv->hwnd, 21)};
+        HFONT resultFont = HdcGetUiFont(hdc, 15, FW_MEDIUM);
+        SelectObject(hdc, resultFont);
+        DrawTreeItemFilterHighlight(hdc, resultTitle, tocItem->title, words, bgCol, txtCol, resultFont);
+
+        WindowTab* tab = win ? win->CurrentTab() : nullptr;
+        TocItem* original = tab && tab->currToc ? FindTocItemById(tab->currToc->root, tocItem->id) : nullptr;
+        TempStr parentPath = TocParentPathTemp(original);
+        if (parentPath) {
+            Rect parentRect{resultTitle.x, full.y + DpiScale(tv->hwnd, 26), resultTitle.dx, DpiScale(tv->hwnd, 20)};
+            SetTextColor(hdc, roundedRow ? txtCol : ThemeWindowDarkerTextColor());
+            HdcDrawText(hdc, parentPath, parentRect,
+                        DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_WORD_ELLIPSIS | DT_LEFT, HdcGetUiFont(hdc, 13));
+        }
+        if (showPage && pageW.len > 0) {
+            // (client: the row-wide clip set above)
+            int right = client.dx - DpiScale(tv->hwnd, 16);
+            Rect pageRect{right - pageSize.dx, full.y, pageSize.dx, full.dy};
+            // TreeView can clip a flat filtered leaf to its text bounds during
+            // ITEMPOSTPAINT. The page-number column intentionally lives at the
+            // far edge of the full row, so widen the clip to that row while it
+            // is drawn.
+            int savedDc = SaveDC(hdc);
+            SelectClipRgn(hdc, nullptr);
+            IntersectClipRect(hdc, 0, full.y, client.dx, full.y + full.dy);
+            SetTextColor(hdc, roundedRow ? txtCol : ThemeWindowDarkerTextColor());
+            HdcDrawTextTabular(hdc, pageLabel, pageRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_RIGHT);
+            RestoreDC(hdc, savedDc);
+        }
+        RestoreDC(hdc, rowDc);
+        return;
+    }
+
+    int nChildren = CountTocChildren(tocItem);
+    // reserve a chevron gutter at the left of every touch row so parent and
+    // leaf titles line up; parents draw a chevron into it
+    if (TocUsesRedesignedRows(win)) {
+        int chevronW = DpiScale(tv->hwnd, kPanelChevronDx);
+        int gap = DpiScale(tv->hwnd, 8);
+        if (nChildren > 0) {
+            bool expanded = tv->IsExpanded(ev->treeItem);
+            Rect chevBox{titleRect.x, drawRect.y, chevronW, drawRect.dy};
+            COLORREF chevCol = roundedRow ? txtCol : ThemeWindowDarkerTextColor();
+            DrawTocChevron(hdc, chevBox, expanded, chevCol);
+        }
+        titleRect.x += chevronW + gap;
+        titleRect.dx = std::max(0, titleRect.dx - (chevronW + gap));
+    }
+    if (TocUsesRedesignedRows(win)) {
+        int depth = TocItemDepth(tocItem);
+        int size = depth == 0 ? 14 : (depth == 1 ? 13 : (depth == 2 ? 12 : 13));
+        // a size down while the pane is narrow (see UpdateTocCompact)
+        if (win->tocCompact) {
+            size -= 2;
+        }
+        int weight = depth == 0 ? FW_SEMIBOLD : FW_MEDIUM;
+        font = HdcGetUiFont(hdc, size, weight);
+        SelectObject(hdc, font);
+    }
 
     if (filterActive) {
         DrawTreeItemFilterHighlight(hdc, titleRect, tocItem->title, words, bgCol, txtCol, font);
@@ -1252,16 +1618,33 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
         Rect pageRect = drawRect;
         pageRect.Inflate(-2, -1);
         int right = pageRect.x + pageRect.dx;
-        pageRect.x = std::max(pageRect.x, right - pageSize.dx);
-        pageRect.dx = right - pageRect.x;
-        // Slightly muted vs title when not selected (keeps numbers secondary).
-        if (!(isTreeSelected && hasFocus)) {
+        if (roundedRow || TocUsesRedesignedRows(win)) {
+            // 4a: the number is a solid muted warm gray, the accent on the
+            // active row, with the row's own right padding - not the washed
+            // text/background blend the classic rows use.
+            right -= DpiScale(tv->hwnd, kPanelRowPadX);
+            COLORREF numCol = ThemeWindowDarkerTextColor();
+            if (roundedRow) {
+                COLORREF selBg, selFg;
+                TocSelectionColors(&selBg, &selFg);
+                numCol = selFg;
+            }
+            SetTextColor(hdc, numCol);
+        } else if (!(isTreeSelected && hasFocus)) {
+            // Slightly muted vs title when not selected (keeps numbers secondary).
             COLORREF muted =
                 RGB((GetRValue(txtCol) * 2 + GetRValue(bgCol)) / 3, (GetGValue(txtCol) * 2 + GetGValue(bgCol)) / 3,
                     (GetBValue(txtCol) * 2 + GetBValue(bgCol)) / 3);
             SetTextColor(hdc, muted);
         }
-        HdcDrawText(hdc, pageW, pageRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_RIGHT);
+        pageRect.x = std::max(pageRect.x, right - pageSize.dx);
+        pageRect.dx = right - pageRect.x;
+        if (roundedRow || TocUsesRedesignedRows(win)) {
+            // tabular figures so the column of page numbers aligns
+            HdcDrawTextTabular(hdc, pageLabel, pageRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_RIGHT);
+        } else {
+            HdcDrawText(hdc, pageW, pageRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_RIGHT);
+        }
     }
 
     if ((cd->uItemState & CDIS_FOCUS) && isTreeSelected && hasFocus) {
@@ -1312,6 +1695,13 @@ void OnTocCustomDraw(TreeView::CustomDrawEvent* ev) {
             if (!(isTreeSelected && hasFocus) && tocItem->color != kColorUnset) {
                 txtCol = tocItem->color;
             }
+            if (TocUsesRedesignedRows(win)) {
+                TocSelectionColors(&bgCol, &txtCol);
+                // full-row select would fill a rectangle over the pill, so let
+                // the default fill be the panel background; the pill and the
+                // text are drawn in post-paint
+                bgCol = tv->bgColor;
+            }
             tvcd->clrText = txtCol;
             tvcd->clrTextBk = bgCol;
             cd->uItemState &= ~(CDIS_SELECTED | CDIS_FOCUS);
@@ -1324,8 +1714,8 @@ void OnTocCustomDraw(TreeView::CustomDrawEvent* ev) {
             res |= CDRF_NEWFONT;
         }
         // POSTPAINT: selection colors (issue #5848), page numbers, filter, multi-match.
-        bool needPost =
-            isSelected || filterActive || (showPageNumbers && tocItem->pageNo > 0) || (multiHighlight && isMultiMatch);
+        bool needPost = isSelected || filterActive || (showPageNumbers && tocItem->pageNo > 0) ||
+                        (multiHighlight && isMultiMatch) || TocUsesRedesignedRows(win);
         if (needPost) {
             res |= CDRF_NOTIFYPOSTPAINT;
         }
@@ -1353,6 +1743,23 @@ void OnTocCustomDraw(TreeView::CustomDrawEvent* ev) {
 static bool gTocSelChangedByMouseClick = false;
 
 static void TocTreeClick(TreeView::ClickEvent* ev) {
+    // In 4a, a parent row is an expand/collapse control; only leaves navigate.
+    // This preserves every other branch's expansion state (not an accordion).
+    if (!ev->isDblClick && ev->treeItem) {
+        MainWindow* w = FindMainWindowByHwnd(ev->treeView->hwnd);
+        if (w && TocUsesRedesignedRows(w)) {
+            TreeView* tv = ev->treeView;
+            TocItem* it = (TocItem*)ev->treeItem;
+            if (it->child) {
+                HTREEITEM hi = tv->GetHandleByTreeItem(ev->treeItem);
+                if (hi) {
+                    TreeView_Expand(tv->hwnd, hi, TVE_TOGGLE);
+                    ev->result = 1;
+                    return;
+                }
+            }
+        }
+    }
     bool handledBySelChange = gTocSelChangedByMouseClick;
     gTocSelChangedByMouseClick = false;
     // A normal click changes the selection and is handled by
@@ -1490,15 +1897,1855 @@ static void LayoutTocContainer(MainWindow* win) {
         return;
     }
     Rect rc = HwndWindowRect(win->hwndTocBox);
+    if (IsTouchChrome(win)) {
+        UpdateTocCompact(win, false);
+        int headerDy = DpiScale(win->hwndTocBox, kPanelHeaderDy);
+        int filterDy = DpiScale(win->hwndTocBox, kPanelFilterDy);
+        // the same field recipe as the Library's search pill: 40px pill, its
+        // edges on the row highlights' x, magnifier at +14, text from +38, a
+        // 40px slot at the right end for the clear button
+        // a single-line edit top-aligns its text, so the control is sized to
+        // the font and centered in the pill rather than filling it
+        int editDy =
+            HwndMeasureText(win->hwndTocBox, StrL("Xg"), GetAppFont(win->hwndFrame)).dy + DpiScale(win->hwndTocBox, 2);
+        int filterInsetY = std::max(0, (filterDy - editDy) / 2);
+        int filterX = DpiScale(win->hwndTocBox, kPanelRowPadX + 38);
+        int filterRight = DpiScale(win->hwndTocBox, kPanelRowPadX + 40);
+        int bodyY = headerDy + filterDy + DpiScale(win->hwndTocBox, 12);
+        bool showBreadcrumb = win->touchPanelMode == TouchPanelMode::Bookmarks && !HasTocFilter(win);
+        int stickyDy = showBreadcrumb ? DpiScale(win->hwndTocBox, 36) : 0;
+        int treeY = bodyY + stickyDy;
+        int labelDx = HasTocFilter(win) ? rc.dx - DpiScale(win->hwndTocBox, 124) : rc.dx;
+        win->tocLabelWithClose->SetBounds(Rect{0, 0, std::max(0, labelDx), headerDy});
+        SetWindowPos(win->tocFilterEdit->hwnd, nullptr, filterX, headerDy + filterInsetY,
+                     std::max(0, rc.dx - filterX - filterRight), filterDy - 2 * filterInsetY, SWP_NOZORDER);
+        SetWindowPos(win->tocTreeView->hwnd, nullptr, 0, treeY, rc.dx, std::max(0, rc.dy - treeY), SWP_NOZORDER);
+        SetWindowPos(win->hwndTocSticky, HWND_TOP, 0, bodyY, rc.dx, stickyDy, SWP_NOACTIVATE);
+        bool bookmarks = win->touchPanelMode == TouchPanelMode::Bookmarks;
+        bool search = win->touchPanelMode == TouchPanelMode::Search;
+        // Sets the child WS_VISIBLE bits even when the whole panel is currently
+        // hidden: HwndSetVisible() compares that bit rather than
+        // IsWindowVisible() (which also examines ancestors and would no-op
+        // here, leaving the stale tree covering Search after opening it from
+        // Home or Library).
+        HwndSetVisible(win->tocFilterEdit->hwnd, bookmarks || search);
+        HwndSetVisible(win->tocTreeView->hwnd, bookmarks);
+        UpdateTocStickyHeader(win);
+        return;
+    }
     win->tocLayout->Layout(Tight(Size{rc.dx, rc.dy}));
     win->tocLayout->SetBounds(Rect{0, 0, rc.dx, rc.dy});
 }
+
+static Str TouchPanelTitle(TouchPanelMode mode) {
+    switch (mode) {
+        case TouchPanelMode::Thumbnails:
+            return StrL("Thumbnails");
+        case TouchPanelMode::Search:
+            return StrL("Search");
+        case TouchPanelMode::Annotations:
+            return StrL("Annotations");
+        case TouchPanelMode::Attachments:
+            return StrL("Attachments");
+        case TouchPanelMode::Favorites:
+            return StrL("Favorites");
+        default:
+            return StrL("Bookmarks");
+    }
+}
+
+// cue for the panel's filter field, painted by WndProcTocFilterEdit
+static Str TouchPanelFilterCue(MainWindow* win) {
+    return win->touchPanelMode == TouchPanelMode::Bookmarks ? StrL("Search bookmarks") : StrL("Search this document");
+}
+
+static Str* TouchPanelSearchQuery(MainWindow* win, TouchPanelMode mode) {
+    if (mode == TouchPanelMode::Bookmarks) {
+        return &win->touchBookmarkSearchQuery;
+    }
+    if (mode == TouchPanelMode::Search) {
+        return &win->touchDocumentSearchQuery;
+    }
+    return nullptr;
+}
+
+void SetTouchPanelModeAndRestoreSearch(MainWindow* win, TouchPanelMode mode) {
+    if (!win) {
+        return;
+    }
+    Str* oldQuery = TouchPanelSearchQuery(win, win->touchPanelMode);
+    if (oldQuery && win->tocFilterEdit) {
+        str::ReplaceWithCopy(oldQuery, win->tocFilterEdit->GetTextTemp());
+    }
+    win->touchPanelMode = mode;
+    Str* newQuery = TouchPanelSearchQuery(win, mode);
+    if (newQuery && win->tocFilterEdit) {
+        win->tocFilterEdit->SetText(*newQuery);
+    }
+    UpdateTouchPanelMode(win);
+}
+
+// True when the sidebar is showing the touch chrome's Search panel. That panel
+// renders win->findMatches inline, so it is a second live consumer of the find
+// results besides the classic find bar / floating find window.
+bool IsTouchSearchPanelVisible(MainWindow* win) {
+    if (!win || !IsTouchChrome(win)) {
+        return false;
+    }
+    return win->uiState.tocVisible && win->touchPanelMode == TouchPanelMode::Search;
+}
+
+void OpenTouchSearchPanel(MainWindow* win) {
+    if (!win || !IsTouchChrome(win) || !win->IsDocLoaded()) {
+        return;
+    }
+    // whatever was typed into the compact bar continues in the panel
+    TempStr carried;
+    if (IsFindBarVisible(win) && win->hwndFindEdit) {
+        carried = HwndGetTextTemp(win->hwndFindEdit);
+        HideFindBar(win);
+    }
+    SetTouchPanelMode(win, TouchPanelMode::Search);
+    Edit* edit = win->tocFilterEdit;
+    if (!edit || !edit->hwnd) {
+        return;
+    }
+    if (!str::IsEmptyOrWhiteSpace(carried)) {
+        edit->SetText(carried); // onTextChanged runs the search
+    }
+    HwndSetFocus(edit->hwnd);
+    Edit_SetSel(edit->hwnd, 0, -1);
+}
+
+void CollapseTouchSearchPanelToBar(MainWindow* win) {
+    if (!win || !IsTouchChrome(win)) {
+        return;
+    }
+    TempStr query = win->tocFilterEdit && win->tocFilterEdit->hwnd ? win->tocFilterEdit->GetTextTemp() : TempStr{};
+    SetTouchSidebarCollapsed(win, true);
+    ScheduleUiUpdate(win, kUiForceRelayout | kUiSidebarDirty);
+    ShowFindBar(win);
+    if (win->hwndFindEdit) {
+        if (!str::IsEmptyOrWhiteSpace(query)) {
+            HwndSetText(win->hwndFindEdit, query);
+        }
+        HwndSetFocus(win->hwndFindEdit);
+        Edit_SetSel(win->hwndFindEdit, 0, -1);
+    }
+}
+
+// The Search panel's live query, or {} when the panel is not the one driving
+// the find. The panel never opens the classic find bar, so win->hwndFindEdit
+// (which the find code used to treat as the only source of the query) is empty
+// while the panel owns the search - which is why Find Next / Prev did nothing.
+// The edit is the live value; touchDocumentSearchQuery is its saved copy and
+// covers the moment right after a mode switch, before the edit is refilled.
+TempStr TouchSearchPanelQueryTemp(MainWindow* win) {
+    if (!IsTouchSearchPanelVisible(win)) {
+        return {};
+    }
+    if (win->tocFilterEdit && win->tocFilterEdit->hwnd) {
+        TempStr s = win->tocFilterEdit->GetTextTemp();
+        if (!str::IsEmptyOrWhiteSpace(s)) {
+            return s;
+        }
+    }
+    if (!str::IsEmptyOrWhiteSpace(win->touchDocumentSearchQuery)) {
+        return str::DupTemp(win->touchDocumentSearchQuery);
+    }
+    return {};
+}
+
+void UpdateTouchPanelMode(MainWindow* win) {
+    if (!win || !IsTouchChrome(win) || !win->tocLabelWithClose) {
+        return;
+    }
+    bool bookmarks = win->touchPanelMode == TouchPanelMode::Bookmarks;
+    bool hasFilter = bookmarks || win->touchPanelMode == TouchPanelMode::Search;
+    win->tocLabelWithClose->SetLabel(TouchPanelTitle(win->touchPanelMode));
+    LayoutTocContainer(win);
+    if (win->tocFilterEdit) {
+        // the cue is painted by WndProcTocFilterEdit (TouchPanelFilterCue);
+        // the native banner is cleared so the two never overlap
+        SendMessageW(win->tocFilterEdit->hwnd, EM_SETCUEBANNER, TRUE, (LPARAM)L"");
+        ShowWindow(win->tocFilterEdit->hwnd, hasFilter ? SW_SHOW : SW_HIDE);
+        HwndInvalidate(win->tocFilterEdit->hwnd, false);
+    }
+    if (win->tocTreeView) {
+        ShowWindow(win->tocTreeView->hwnd, bookmarks ? SW_SHOW : SW_HIDE);
+    }
+    HwndInvalidate(win->hwndTocBox, true);
+}
+
+// The page image alone. TouchThumbnailHitRect() is what a finger has to hit.
+static Rect TouchThumbnailRect(MainWindow* win, int pageIndex) {
+    HWND hwnd = win->hwndTocBox;
+    Rect rc = HwndClientRect(hwnd);
+    int pad = DpiScale(hwnd, 16);
+    int gap = DpiScale(hwnd, 14);
+    int yStart = DpiScale(hwnd, kPanelHeaderDy + 16);
+    int cardDx = (rc.dx - (2 * pad) - gap) / 2;
+    int pageDy = (cardDx * 25) / 18;
+    int labelDy = DpiScale(hwnd, 24);
+    int row = pageIndex / 2;
+    int col = pageIndex % 2;
+    return Rect{pad + col * (cardDx + gap), yStart + row * (pageDy + labelDy + gap) - win->touchPanelScrollY, cardDx,
+                pageDy};
+}
+
+// A tap anywhere on the card, its page number included, goes to that page.
+// The number reads as part of the card, and hitting only the image left a
+// dead strip between every row.
+static Rect TouchThumbnailHitRect(MainWindow* win, int pageIndex) {
+    Rect r = TouchThumbnailRect(win, pageIndex);
+    if (r.IsEmpty()) {
+        return r;
+    }
+    r.dy += DpiScale(win->hwndTocBox, 24); // the label row under the page
+    return r;
+}
+
+// --- Pages panel thumbnails ------------------------------------------------
+// Rendered one at a time on a worker thread straight from the open engine, and
+// owned by the window. The shared render cache cannot hold them: the document
+// view evicts a thumbnail as soon as it renders a page of its own, which is
+// exactly what tapping a card does, so the cards went white after a few taps.
+
+constexpr int kMaxTouchThumbs = 80;
+
+void FreeTouchThumbnails(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    for (MainWindow::TouchThumb& t : win->touchThumbs) {
+        FreePixmap(t.bmp);
+    }
+    win->touchThumbs.Reset();
+    win->touchThumbQueue.Reset();
+}
+
+static Pixmap* FindTouchThumbnail(MainWindow* win, int pageNo) {
+    for (MainWindow::TouchThumb& t : win->touchThumbs) {
+        if (t.pageNo == pageNo) {
+            return t.bmp;
+        }
+    }
+    return nullptr;
+}
+
+// the page image sits this far inside its card, so a sliver of the card's
+// paper frames it
+constexpr int kTouchThumbInset = 2;
+
+struct TouchThumbRender {
+    MainWindow* win = nullptr;
+    EngineBase* engine = nullptr; // AddRef'd for the render
+    DisplayModel* dm = nullptr;   // identity only, never dereferenced off the UI thread
+    int pageNo = 0;
+    int cardDx = 0;
+    int cardDy = 0;
+    // the night light the thumbnail is made with; one that finishes after it
+    // changed would be the wrong colour, and is dropped
+    int nightLight = 0;
+    Pixmap* bmp = nullptr;
+};
+
+static void PumpTouchThumbnails(MainWindow* win);
+
+static void TouchThumbRenderFinishedUi(TouchThumbRender* r) {
+    MainWindow* win = r->win;
+    bool keep = IsMainWindowValid(win) && win->touchThumbnailDm == r->dm && r->bmp != nullptr &&
+                r->nightLight == gRenderCache->nightLight;
+    if (keep) {
+        // the newest are the ones being looked at; drop from the front
+        while (len(win->touchThumbs) >= kMaxTouchThumbs) {
+            FreePixmap(win->touchThumbs[0].bmp);
+            win->touchThumbs.RemoveAt(0);
+        }
+        MainWindow::TouchThumb t;
+        t.pageNo = r->pageNo;
+        t.bmp = r->bmp;
+        win->touchThumbs.Append(t);
+        r->bmp = nullptr;
+        if (win->hwndTocBox) {
+            HwndInvalidate(win->hwndTocBox, false);
+        }
+    }
+    FreePixmap(r->bmp);
+    r->engine->Release();
+    if (IsMainWindowValid(win)) {
+        win->touchThumbRendering = false;
+        PumpTouchThumbnails(win);
+    }
+    delete r;
+}
+
+static void TouchThumbRenderThread(TouchThumbRender* r) {
+    RectF pageRect = r->engine->PageMediabox(r->pageNo);
+    if (!pageRect.IsEmpty()) {
+        RectF fitted = r->engine->Transform(pageRect, r->pageNo, 1.0f, 0);
+        float zoom = std::min((float)r->cardDx / fitted.dx, (float)r->cardDy / fitted.dy);
+        RectF box = r->engine->Transform(fitted, r->pageNo, 1.0f, 0, true);
+        RenderPageArgs args(r->pageNo, zoom, 0, &box);
+        r->bmp = r->engine->RenderPage(args);
+        // the same warmth as the page beside it
+        WarmPixmap(r->bmp, r->nightLight);
+    }
+    uitask::Post(MkFunc0<TouchThumbRender>(TouchThumbRenderFinishedUi, r), "TouchThumbRenderFinished");
+}
+
+// One render in flight at a time: the engine is shared with the document view,
+// and a panel full of cards must not flood it.
+static void PumpTouchThumbnails(MainWindow* win) {
+    if (!win || win->touchThumbRendering || len(win->touchThumbQueue) == 0) {
+        return;
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm || dm != win->touchThumbnailDm) {
+        win->touchThumbQueue.Reset();
+        return;
+    }
+    EngineBase* engine = dm->GetEngine();
+    if (!engine) {
+        win->touchThumbQueue.Reset();
+        return;
+    }
+    int pageNo = win->touchThumbQueue[0];
+    win->touchThumbQueue.RemoveAt(0);
+    if (FindTouchThumbnail(win, pageNo)) {
+        PumpTouchThumbnails(win); // already arrived while it waited
+        return;
+    }
+    Rect card = TouchThumbnailRect(win, pageNo - 1);
+    // the size it is drawn at, inside the card's paper edge, so the paint can
+    // copy it rather than scale it
+    int inset = DpiScale(win->hwndTocBox, kTouchThumbInset);
+    card.Inflate(-inset, -inset);
+    if (card.dx <= 0 || card.dy <= 0) {
+        return;
+    }
+    auto* r = new TouchThumbRender();
+    r->win = win;
+    r->dm = dm;
+    r->engine = engine;
+    engine->AddRef();
+    r->pageNo = pageNo;
+    r->cardDx = card.dx;
+    r->cardDy = card.dy;
+    r->nightLight = gRenderCache->nightLight;
+    win->touchThumbRendering = true;
+    RunAsync(MkFunc0<TouchThumbRender>(TouchThumbRenderThread, r), "TouchThumbRender");
+}
+
+static void RequestTouchThumbnailPage(MainWindow* win, int pageNo) {
+    if (FindTouchThumbnail(win, pageNo) || win->touchThumbQueue.Contains(pageNo)) {
+        return;
+    }
+    win->touchThumbQueue.Append(pageNo);
+    PumpTouchThumbnails(win);
+}
+
+static void CollectAttachmentItems(TocItem* item, Vec<TocItem*>& items) {
+    for (TocItem* it = item; it; it = it->next) {
+        if (it->dest && it->dest->GetKind() == kindDestinationAttachment) {
+            items.Append(it);
+        }
+        CollectAttachmentItems(it->child, items);
+    }
+}
+
+// A flattened row list for the favorites panel: a header row per document
+// followed by that document's saved pages. Paint, hit-testing and the scroll
+// extent all build it the same way, so they cannot disagree about what sits
+// at a given y (the class of bug that made search results untappable).
+struct TouchFavRow {
+    bool isHeader = false;
+    FileState* fs = nullptr;
+    Favorite* fav = nullptr; // null on a header row
+};
+
+static void CollectTouchFavRows(Vec<TouchFavRow>& rows) {
+    rows.Reset();
+    Vec<FileState*> files;
+    GetFilesWithFavorites(files);
+    for (FileState* fs : files) {
+        TouchFavRow hdr;
+        hdr.isHeader = true;
+        hdr.fs = fs;
+        rows.Append(hdr);
+        for (Favorite* f : *fs->favorites) {
+            if (!f || f->isTemporary) {
+                continue;
+            }
+            TouchFavRow r;
+            r.fs = fs;
+            r.fav = f;
+            rows.Append(r);
+        }
+    }
+}
+
+// height of the strip holding the "add current page" button, when there is a
+// document to add a page from
+static int TouchFavAddStripDy(MainWindow* win) {
+    // the strip always carries the toolbar toggle; the add button only appears
+    // when there is a page to add
+    return DpiScale(win->hwndTocBox, 40);
+}
+
+static int TouchFavRowsTop(MainWindow* win) {
+    return DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) + TouchFavAddStripDy(win) - win->touchPanelScrollY;
+}
+
+// the delete target on a favorite row, and the "add current page" button in the
+// panel header. Both are computed here so the paint and the hit test cannot
+// drift apart.
+// --- favorites drag-to-reorder -------------------------------------------
+// Only within one document: the panel groups by file, and moving a favorite
+// between documents would mean re-homing it, which is a different action.
+static MainWindow* gFavDragWin = nullptr;
+static int gFavDragFromRow = -1; // index into the flattened row list
+static int gFavDragOverRow = -1; // where it would land
+static bool gFavDragActive = false;
+
+static void ResetFavDrag() {
+    gFavDragWin = nullptr;
+    gFavDragFromRow = -1;
+    gFavDragOverRow = -1;
+    gFavDragActive = false;
+}
+
+// which flattened row a y lands on, or -1
+static int TouchFavRowAt(MainWindow* win, int y, int nRows) {
+    int rowDy = DpiScale(win->hwndTocBox, TouchSidebarListRowDy());
+    int y0 = TouchFavRowsTop(win);
+    if (rowDy <= 0 || y < y0) {
+        return -1;
+    }
+    int idx = (y - y0) / rowDy;
+    return (idx >= 0 && idx < nRows) ? idx : -1;
+}
+
+static Rect TouchFavDeleteRect(MainWindow* win, const Rect& row) {
+    HWND hw = win->hwndTocBox;
+    int d = DpiScale(hw, 26);
+    return Rect{row.x + row.dx - d, row.y + (row.dy - d) / 2, d, d};
+}
+
+// Below the header band, not inside it: the panel title is a child window that
+// paints itself over that band, so anything drawn there disappears under it.
+// "Show in toolbar" toggle: a display preference, so it is offered whether or
+// not a document is open.
+static Rect TouchFavToolbarToggleRect(MainWindow* win) {
+    HWND hw = win->hwndTocBox;
+    int dy = DpiScale(hw, 26);
+    int y = DpiScale(hw, kPanelHeaderDy + 7);
+    return Rect{DpiScale(hw, 14), y, DpiScale(hw, 150), dy};
+}
+
+static Rect TouchFavAddRect(MainWindow* win) {
+    HWND hw = win->hwndTocBox;
+    Rect client = HwndClientRect(hw);
+    int d = DpiScale(hw, 28);
+    int pad = DpiScale(hw, 14);
+    int y = DpiScale(hw, kPanelHeaderDy + 6);
+    return Rect{client.dx - d - pad, y, d, d};
+}
+
+// repaints the waiting ring while the annotations list is being gathered
+constexpr UINT_PTR kTouchPanelSpinnerTimerId = 23;
+
+// --- annotations panel: loaded off the UI thread ---------------------------
+// Gathering the annotation list loads every page of the document, which on a
+// long one took seconds - and the panel did it again on every paint, every
+// scroll frame and every click. It now runs once on a worker thread per
+// engine, and the panel shows a waiting spinner until the result arrives.
+
+struct TouchAnnotsScan {
+    MainWindow* win = nullptr;
+    EngineBase* engine = nullptr; // AddRef'd for the duration of the scan
+    int gen = 0;
+    Vec<Annotation*> annots;
+};
+
+static bool TouchAnnotsScanIsCurrent(const TouchAnnotsScan* s) {
+    MainWindow* win = s->win;
+    if (!IsMainWindowValid(win) || win->touchAnnotsGen != s->gen) {
+        return false;
+    }
+    DisplayModel* dm = win->AsFixed();
+    return dm && dm->GetEngine() == s->engine;
+}
+
+static void TouchAnnotsScanFinishedUi(TouchAnnotsScan* s) {
+    if (TouchAnnotsScanIsCurrent(s)) {
+        MainWindow* win = s->win;
+        win->touchAnnots = s->annots;
+        win->touchAnnotsEngine = s->engine;
+        win->touchAnnotsState = MainWindow::TouchAnnotsState::Loaded;
+        if (win->hwndTocBox) {
+            KillTimer(win->hwndTocBox, kTouchPanelSpinnerTimerId);
+            HwndInvalidate(win->hwndTocBox, false);
+        }
+    }
+    s->engine->Release();
+    delete s;
+}
+
+static void TouchAnnotsScanThread(TouchAnnotsScan* s) {
+    // a chunk at a time, so the pages lock is released between them and the UI
+    // thread can still render the pages it needs while the sweep runs
+    constexpr int kChunk = 16;
+    int nPages = EngineMupdfPageCount(s->engine);
+    for (int from = 1; from <= nPages; from += kChunk) {
+        EngineMupdfGetAnnotationsInRange(s->engine, from, from + kChunk - 1, s->annots);
+    }
+    uitask::Post(MkFunc0<TouchAnnotsScan>(TouchAnnotsScanFinishedUi, s), "TouchAnnotsScanFinished");
+}
+
+// Drops the cached list: the pointers belong to the engine's page info, so
+// anything that replaces or edits the document has to invalidate them.
+void InvalidateTouchAnnotations(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    win->touchAnnotsGen++;
+    win->touchAnnots.Reset();
+    win->touchAnnotsEngine = nullptr;
+    win->touchAnnotsState = MainWindow::TouchAnnotsState::NotLoaded;
+    if (win->hwndTocBox && win->touchPanelMode == TouchPanelMode::Annotations) {
+        HwndInvalidate(win->hwndTocBox, false);
+    }
+}
+
+// The cached list, kicking off the scan when it is not there yet. Returns
+// nullptr while the scan is in flight, which is what draws the spinner.
+static const Vec<Annotation*>* TouchAnnotationsCached(MainWindow* win) {
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (!dm) {
+        return nullptr;
+    }
+    EngineBase* engine = dm->GetEngine();
+    if (!engine) {
+        return nullptr;
+    }
+    if (win->touchAnnotsState == MainWindow::TouchAnnotsState::Loaded) {
+        if (win->touchAnnotsEngine == engine) {
+            return &win->touchAnnots;
+        }
+        // a different document is showing now
+        InvalidateTouchAnnotations(win);
+    }
+    if (win->touchAnnotsState == MainWindow::TouchAnnotsState::Loading) {
+        return nullptr;
+    }
+    win->touchAnnotsState = MainWindow::TouchAnnotsState::Loading;
+    win->touchAnnotsStartedMs = GetTickCount64();
+    auto* s = new TouchAnnotsScan();
+    s->win = win;
+    s->engine = engine;
+    s->gen = win->touchAnnotsGen;
+    engine->AddRef();
+    if (win->hwndTocBox) {
+        SetTimer(win->hwndTocBox, kTouchPanelSpinnerTimerId, kAnimTickMs, nullptr);
+    }
+    RunAsync(MkFunc0<TouchAnnotsScan>(TouchAnnotsScanThread, s), "TouchAnnotsScan");
+    return nullptr;
+}
+
+// A ring that sweeps around while we wait, with the reason under it. Same
+// idiom as the saved-page hold ring in the top bar.
+static void DrawTouchPanelWaiting(MainWindow* win, HDC hdc, Str label) {
+    HWND hwnd = win->hwndTocBox;
+    Rect rc = HwndClientRect(hwnd);
+    int ringDy = DpiScale(hwnd, 28);
+    int top = DpiScale(hwnd, kPanelHeaderDy + 72);
+    Rect ring{(rc.dx - ringDy) / 2, top, ringDy, ringDy};
+    double elapsed = (double)(GetTickCount64() - win->touchAnnotsStartedMs);
+    // a full turn a second, with the arc itself growing and shrinking so the
+    // ring reads as busy rather than as a progress bar that never fills
+    float start = (float)(fmod(elapsed / 1000.0, 1.0) * 360.0) - 90.0f;
+    float sweep = 60.0f + (float)(sin(elapsed / 250.0) + 1.0) * 90.0f;
+    Gdiplus::Graphics gfx(hdc);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    COLORREF col = ThemeWindowLinkColor();
+    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(col), GetGValue(col), GetBValue(col)), (float)DpiScale(hwnd, 3));
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    gfx.DrawArc(&pen, ring.x, ring.y, ring.dx, ring.dy, start, sweep);
+
+    Rect text{DpiScale(hwnd, 16), ring.y + ring.dy + DpiScale(hwnd, 16), rc.dx - DpiScale(hwnd, 32),
+              DpiScale(hwnd, 24)};
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, ThemeWindowDarkerTextColor());
+    HdcDrawText(hdc, label, text, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+                HdcGetUiFont(hdc, kFontSizeLabel));
+}
+
+static int TouchPanelMaxScroll(MainWindow* win) {
+    Rect client = HwndClientRect(win->hwndTocBox);
+    int contentBottom = client.dy;
+    if (win->touchPanelMode == TouchPanelMode::Thumbnails && win->ctrl) {
+        int count = win->ctrl->PageCount();
+        if (count > 0) {
+            Rect last = TouchThumbnailRect(win, count - 1);
+            contentBottom = last.y + win->touchPanelScrollY + last.dy + DpiScale(win->hwndTocBox, 40);
+        }
+    } else if (win->touchPanelMode == TouchPanelMode::Search) {
+        contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + kPanelFilterDy + 64) + TouchSuggestRowDy(win) +
+                        len(win->findMatches) * DpiScale(win->hwndTocBox, TouchSearchResultRowDy()) +
+                        DpiScale(win->hwndTocBox, 12);
+    } else if (win->touchPanelMode == TouchPanelMode::Annotations && win->AsFixed()) {
+        const Vec<Annotation*>* annotations = TouchAnnotationsCached(win);
+        int n = annotations ? len(*annotations) : 0;
+        contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) +
+                        n * DpiScale(win->hwndTocBox, TouchSidebarListRowDy()) + DpiScale(win->hwndTocBox, 12);
+    } else if (win->touchPanelMode == TouchPanelMode::Favorites) {
+        Vec<TouchFavRow> rows;
+        CollectTouchFavRows(rows);
+        contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) +
+                        len(rows) * DpiScale(win->hwndTocBox, TouchSidebarListRowDy()) + DpiScale(win->hwndTocBox, 12);
+    } else if (win->touchPanelMode == TouchPanelMode::Attachments && win->ctrl) {
+        Vec<TocItem*> attachments;
+        TocTree* toc = win->ctrl->GetToc();
+        if (toc && toc->root) {
+            CollectAttachmentItems(toc->root->child, attachments);
+        }
+        contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) +
+                        len(attachments) * DpiScale(win->hwndTocBox, TouchSidebarListRowDy()) +
+                        DpiScale(win->hwndTocBox, 12);
+    }
+    return std::max(0, contentBottom - client.dy);
+}
+
+static void PaintTouchPanelPress(MainWindow* win, HDC hdc);
+
+// Search panel: the match count and the prev/next buttons share one 40px row
+// under the filter pill, so they center on the same line. The paint and the
+// hit test (WndProcTocBox) both read these.
+static Rect TouchSearchControlsRect(MainWindow* win) {
+    HWND hwnd = win->hwndTocBox;
+    Rect rc = HwndClientRect(hwnd);
+    return Rect{DpiScale(hwnd, 16), DpiScale(hwnd, kPanelHeaderDy + kPanelFilterDy + 12) + TouchSuggestRowDy(win),
+                rc.dx - DpiScale(hwnd, 32), DpiScale(hwnd, 40)};
+}
+
+// --- search suggestions ------------------------------------------------------------
+// Typing "Aug" offers "August": the words of the document that start with the
+// word being typed, the most frequent first, as chips under the search field.
+// A tap puts the whole word in place of the part typed. The words come from an
+// index of the document built in the background the first time it is searched
+// (from the same page text the search reads, so it also warms the engine's
+// text cache for the search).
+
+struct DocWord {
+    Str lower;   // what the typed word is matched against
+    Str display; // as offered: in lower case if the word ever appears so, else as first seen
+    int count = 0;
+};
+
+struct DocWordIndex {
+    Vec<DocWord> words;
+    ~DocWordIndex() {
+        for (DocWord& w : words) {
+            str::Free(w.lower);
+            str::Free(w.display);
+        }
+    }
+};
+
+constexpr int kMinSuggestWordLen = 3;
+constexpr int kMinSuggestPrefixLen = 2;
+// enough to fill the two rows; the ones that don't fit are dropped
+constexpr int kMaxSuggestions = 12;
+
+struct TouchWordIndexBuild {
+    MainWindow* win = nullptr;
+    EngineBase* engine = nullptr; // AddRef'd for the build
+    DocWordIndex* index = nullptr;
+};
+
+static void AddDocWord(DocWordIndex* index, dict::MapStrToInt& seen, WCHAR* buf, int n) {
+    // an apostrophe belongs inside a word, not at its end
+    while (n > 0 && (buf[n - 1] == L'\'' || buf[n - 1] == 0x2019)) {
+        n--;
+    }
+    if (n < kMinSuggestWordLen) {
+        return;
+    }
+    TempStr display = ToUtf8Temp(WStr(buf, n));
+    CharLowerBuffW(buf, (DWORD)n);
+    TempStr lower = ToUtf8Temp(WStr(buf, n));
+    int idx = -1;
+    if (seen.Get(lower, &idx)) {
+        DocWord& w = index->words[idx];
+        w.count++;
+        // written in lower case even once: it is an ordinary word, and only
+        // capitalized where a sentence started
+        if (str::Eq(display, lower) && !str::Eq(w.display, w.lower)) {
+            str::ReplaceWithCopy(&w.display, lower);
+        }
+        return;
+    }
+    seen.Insert(lower, len(index->words));
+    DocWord w;
+    w.lower = str::Dup(lower);
+    w.display = str::Dup(display);
+    w.count = 1;
+    index->words.Append(w);
+}
+
+static void TouchWordIndexFinishedUi(TouchWordIndexBuild* b);
+
+static void TouchWordIndexThread(TouchWordIndexBuild* b) {
+    dict::MapStrToInt seen(4096);
+    int nPages = b->engine->PageCount();
+    constexpr int kMaxWordDx = 64;
+    WCHAR buf[kMaxWordDx];
+    for (int pageNo = 1; pageNo <= nPages; pageNo++) {
+        int textLen = 0;
+        Str text = b->engine->GetTextForPage(pageNo, &textLen);
+        int n = 0;
+        bool tooLong = false;
+        int i = 0;
+        while (i < text.len) {
+            int c = Utf8CodepointNext(text, i);
+            if (c == 0) {
+                break;
+            }
+            bool letter = c < 0x10000 && IsCharAlphaNumericW((WCHAR)c);
+            bool apostrophe = n > 0 && (c == '\'' || c == 0x2019);
+            if (letter || apostrophe) {
+                if (n < kMaxWordDx) {
+                    buf[n++] = (WCHAR)c;
+                } else {
+                    tooLong = true; // a run of characters no one types as a word
+                }
+                continue;
+            }
+            if (!tooLong) {
+                AddDocWord(b->index, seen, buf, n);
+            }
+            n = 0;
+            tooLong = false;
+        }
+        if (!tooLong) {
+            AddDocWord(b->index, seen, buf, n);
+        }
+        ResetTempArena();
+    }
+    uitask::Post(MkFunc0<TouchWordIndexBuild>(TouchWordIndexFinishedUi, b), "TouchWordIndexFinished");
+}
+
+void FreeTouchWordIndex(MainWindow* win) {
+    delete win->touchWordIndex;
+    win->touchWordIndex = nullptr;
+    win->touchWordIndexEngine = nullptr;
+    win->touchSuggestions.Reset();
+}
+
+static EngineBase* TouchSearchEngine(MainWindow* win) {
+    DisplayModel* dm = win->AsFixed();
+    return dm ? dm->GetEngine() : nullptr;
+}
+
+static void UpdateTouchSuggestions(MainWindow* win);
+
+// builds the current document's index unless it has one or one is on its way
+static void EnsureTouchWordIndex(MainWindow* win) {
+    EngineBase* engine = TouchSearchEngine(win);
+    if (!engine || win->touchWordIndexBuilding) {
+        return;
+    }
+    if (win->touchWordIndex && win->touchWordIndexEngine == engine) {
+        return;
+    }
+    FreeTouchWordIndex(win);
+    win->touchWordIndexEngine = engine;
+    win->touchWordIndexBuilding = true;
+    auto* b = new TouchWordIndexBuild();
+    b->win = win;
+    b->engine = engine;
+    engine->AddRef();
+    b->index = new DocWordIndex();
+    RunAsync(MkFunc0<TouchWordIndexBuild>(TouchWordIndexThread, b), "TouchWordIndex");
+}
+
+static void TouchWordIndexFinishedUi(TouchWordIndexBuild* b) {
+    MainWindow* win = b->win;
+    if (IsMainWindowValid(win)) {
+        win->touchWordIndexBuilding = false;
+        // kept only if the window still shows the document it was built for
+        if (win->touchWordIndexEngine == b->engine && TouchSearchEngine(win) == b->engine) {
+            win->touchWordIndex = b->index;
+            b->index = nullptr;
+            UpdateTouchSuggestions(win);
+            if (win->hwndTocBox) {
+                HwndInvalidate(win->hwndTocBox, false);
+            }
+        } else {
+            // a different document now: index that one instead
+            EnsureTouchWordIndex(win);
+        }
+    }
+    delete b->index;
+    b->engine->Release();
+    delete b;
+}
+
+// the word being typed: what follows the query's last space
+static Str LastQueryWord(Str query) {
+    int sp = str::LastIndexOfChar(query, ' ');
+    return sp >= 0 ? Str(query.s + sp + 1, query.len - sp - 1) : query;
+}
+
+static void UpdateTouchSuggestions(MainWindow* win) {
+    win->touchSuggestions.Reset();
+    DocWordIndex* index = win->touchWordIndex;
+    if (!index || win->touchWordIndexEngine != TouchSearchEngine(win) || !win->tocFilterEdit) {
+        return;
+    }
+    Str typed = LastQueryWord(win->tocFilterEdit->GetTextTemp());
+    WStr typedW = ToWStrTemp(typed);
+    if (typedW.len < kMinSuggestPrefixLen) {
+        return;
+    }
+    CharLowerBuffW(typedW.s, (DWORD)typedW.len);
+    TempStr prefix = ToUtf8Temp(typedW);
+    Vec<DocWord*> found;
+    for (DocWord& w : index->words) {
+        if (w.lower.len > prefix.len && str::StartsWith(w.lower, prefix)) {
+            found.Append(&w);
+        }
+    }
+    std::sort(found.begin(), found.end(), [](DocWord* a, DocWord* b) {
+        if (a->count != b->count) {
+            return a->count > b->count;
+        }
+        return strcmp(a->lower.s, b->lower.s) < 0;
+    });
+    for (int i = 0; i < len(found) && i < kMaxSuggestions; i++) {
+        win->touchSuggestions.Append(found[i]->display);
+    }
+}
+
+// Chips laid out left to right under the field, wrapping onto a second row, as
+// many as fit. The paint and the hit test both read these. Returns the number
+// of rows used.
+static int TouchSuggestChipRects(MainWindow* win, HDC hdc, Vec<Rect>& out) {
+    HWND hwnd = win->hwndTocBox;
+    Rect rc = HwndClientRect(hwnd);
+    int y = DpiScale(hwnd, kPanelHeaderDy + kPanelFilterDy + 8);
+    int dy = DpiScale(hwnd, kSuggestChipDy);
+    int pad = DpiScale(hwnd, 14);
+    int gap = DpiScale(hwnd, kSuggestChipGap);
+    int left = DpiScale(hwnd, 16);
+    int right = rc.dx - DpiScale(hwnd, 16);
+    int x = left;
+    int rows = 0;
+    HFONT font = HdcGetUiFont(hdc, kFontSizeLabel);
+    for (int i = 0; i < len(win->touchSuggestions); i++) {
+        Size sz = HdcMeasureText(hdc, win->touchSuggestions.At(i), DT_SINGLELINE | DT_NOPREFIX, font);
+        // a word wider than the whole row gets the whole row, cut short
+        int dx = std::min(sz.dx + 2 * pad, std::max(0, right - left));
+        if (x + dx > right) {
+            if (rows == kSuggestRows) {
+                break;
+            }
+            // the next row
+            x = left;
+            y += dy + gap;
+        }
+        if (x == left) {
+            rows++;
+        }
+        out.Append(Rect{x, y, dx, dy});
+        x += dx + gap;
+    }
+    return rows;
+}
+
+static int TouchSuggestRowDy(MainWindow* win) {
+    if (len(win->touchSuggestions) == 0 || !win->hwndTocBox) {
+        return 0;
+    }
+    HWND hwnd = win->hwndTocBox;
+    HDC hdc = GetDC(hwnd);
+    Vec<Rect> chips;
+    int rows = TouchSuggestChipRects(win, hdc, chips);
+    ReleaseDC(hwnd, hdc);
+    if (rows == 0) {
+        return 0;
+    }
+    return DpiScale(hwnd, kSuggestRowDy + (rows - 1) * (kSuggestChipDy + kSuggestChipGap));
+}
+
+// the chosen word takes the place of the part typed; the search runs as for
+// any change to the field
+static void AcceptTouchSuggestion(MainWindow* win, int i) {
+    if (!win->tocFilterEdit || i < 0 || i >= len(win->touchSuggestions)) {
+        return;
+    }
+    Str query = win->tocFilterEdit->GetTextTemp();
+    Str typed = LastQueryWord(query);
+    TempStr head = str::DupTemp(Str(query.s, query.len - typed.len));
+    TempStr next = str::JoinTemp(head, win->touchSuggestions.At(i));
+    win->tocFilterEdit->SetText(next);
+    HWND edit = win->tocFilterEdit->hwnd;
+    int end = GetWindowTextLengthW(edit);
+    SendMessageW(edit, EM_SETSEL, end, end);
+}
+
+// [Aa] [ab]  "3 of 12"        [collapse] [prev] [next]
+struct TouchSearchControls {
+    Rect matchCase;
+    Rect wholeWord;
+    Rect count;
+    Rect collapse;
+    Rect prev;
+    Rect next;
+};
+
+static TouchSearchControls TouchSearchControlsLayout(MainWindow* win) {
+    HWND hwnd = win->hwndTocBox;
+    Rect row = TouchSearchControlsRect(win);
+    int d = row.dy;
+    int chip = DpiScale(hwnd, 34);
+    int gap = DpiScale(hwnd, 8);
+    TouchSearchControls c;
+    c.next = Rect{row.x + row.dx - d, row.y, d, d};
+    c.prev = Rect{c.next.x - gap - d, row.y, d, d};
+    c.collapse = Rect{c.prev.x - gap - chip, row.y + (d - chip) / 2, chip, chip};
+    c.matchCase = Rect{row.x, row.y + (d - chip) / 2, chip, chip};
+    c.wholeWord = Rect{c.matchCase.x + chip + DpiScale(hwnd, 4), c.matchCase.y, chip, chip};
+    int countX = c.wholeWord.x + chip + gap;
+    c.count = Rect{countX, row.y, std::max(0, c.collapse.x - gap - countX), row.dy};
+    return c;
+}
+
+// The panel walks the matches itself (rather than through FindNext/FindPrev,
+// which run a fresh search from the selection) so it always knows which one
+// is current, for the "3 of 12" count and the highlighted row.
+static void TouchSearchGoTo(MainWindow* win, int idx) {
+    int n = len(win->findMatches);
+    if (n == 0) {
+        return;
+    }
+    idx = ((idx % n) + n) % n;
+    win->touchFindCurrent = idx;
+    const FindMatch& match = win->findMatches[idx];
+    GoToFindMatch(win, match.startPage, match.startGlyph, match.endPage, match.endGlyph);
+    HwndInvalidate(win->hwndTocBox, false);
+}
+
+static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
+    TouchPanelMode mode = win->touchPanelMode;
+    if (mode == TouchPanelMode::Bookmarks) {
+        return;
+    }
+    // drawn at the end of every return path below
+    struct PressOverlay {
+        MainWindow* w;
+        HDC dc;
+        ~PressOverlay() { PaintTouchPanelPress(w, dc); }
+    } pressOverlay{win, hdc};
+    Rect rc = HwndClientRect(win->hwndTocBox);
+    HdcFillRect(hdc, Rect{0, DpiScale(win->hwndTocBox, kPanelHeaderDy), rc.dx, rc.dy}, ThemeHotBackgroundColor());
+    SetBkMode(hdc, TRANSPARENT);
+    if (mode == TouchPanelMode::Thumbnails) {
+        int pageCount = win->ctrl ? win->ctrl->PageCount() : 0;
+        int current = win->ctrl ? win->ctrl->CurrentPageNo() : 0;
+        auto* dm = win->AsFixed();
+        if (win->touchThumbnailDm != dm) {
+            win->touchThumbnailDm = dm;
+            FreeTouchThumbnails(win);
+        }
+        int count = pageCount;
+        int first = 0;
+        int last = count;
+        if (count > 0) {
+            Rect firstCard = TouchThumbnailRect(win, 0);
+            Rect thirdCard = count > 2 ? TouchThumbnailRect(win, 2) : firstCard;
+            int rowStride = std::max(1, thirdCard.y - firstCard.y);
+            int contentStartY = firstCard.y + win->touchPanelScrollY;
+            first = std::max(0, ((win->touchPanelScrollY - contentStartY) / rowStride) * 2 - 2);
+            int visibleRows = (rc.dy / rowStride) + 3;
+            last = std::min(count, first + visibleRows * 2);
+        }
+        int cardRadius = DpiScale(win->hwndTocBox, 6);
+        // The whole panel repaints as each thumbnail arrives, and the cards were
+        // most of that: a GDI+ surface set up per card, then every image scaled
+        // down by a few pixels on its way in. All the cards are filled on one
+        // surface first, before any plain GDI drawing on the same DC.
+        {
+            Gdiplus::Graphics gfx(hdc);
+            SetSmoothPixelAligned(gfx);
+            // the card is the page's paper around its image, so it warms with it
+            COLORREF paper = WarmColor(RGB(255, 255, 255), gRenderCache->nightLight);
+            for (int i = first; i < last; i++) {
+                FillRoundRectAA(gfx, TouchThumbnailRect(win, i), cardRadius, paper);
+            }
+        }
+        for (int i = first; i < last; i++) {
+            Rect card = TouchThumbnailRect(win, i);
+            bool isCurrent = i + 1 == current;
+            if (dm) {
+                Pixmap* bmp = FindTouchThumbnail(win, i + 1);
+                if (bmp) {
+                    int inset = DpiScale(win->hwndTocBox, kTouchThumbInset);
+                    Rect imageRc = card;
+                    imageRc.Inflate(-inset, -inset);
+                    if (bmp->width <= imageRc.dx && bmp->height <= imageRc.dy) {
+                        // made at this size (see PumpTouchThumbnails): copied
+                        // as it is, centred, rather than scaled
+                        Rect dst{imageRc.x + (imageRc.dx - bmp->width) / 2, imageRc.y + (imageRc.dy - bmp->height) / 2,
+                                 bmp->width, bmp->height};
+                        BlitPixmapRegion(bmp, hdc, dst, Rect{0, 0, bmp->width, bmp->height});
+                    } else {
+                        BlitPixmap(bmp, hdc, imageRc);
+                    }
+                } else {
+                    RequestTouchThumbnailPage(win, i + 1);
+                }
+            }
+            // after the page image, whose square corners would otherwise paint
+            // over the border just where it curves
+            if (isCurrent) {
+                StrokeRoundRectAA(hdc, card, cardRadius, ThemeWindowLinkColor(), DpiScale(win->hwndTocBox, 2));
+            }
+            Rect label{card.x, card.y + card.dy, card.dx, DpiScale(win->hwndTocBox, 24)};
+            SetTextColor(hdc, (i + 1 == current) ? ThemeWindowLinkColor() : ThemeWindowTextColor());
+            HdcDrawTextTabular(hdc, fmt("%d", i + 1), label, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+                               HdcGetUiFont(hdc, kFontSizeMeta, i + 1 == current ? kFontWeightStrong : FW_DONTCARE));
+        }
+        return;
+    }
+
+    if (mode == TouchPanelMode::Search) {
+        win->touchPanelScrollY = std::clamp(win->touchPanelScrollY, 0, TouchPanelMaxScroll(win));
+        // with nothing typed the field's own cue is the whole prompt; the
+        // count row and the buttons only mean something against a query
+        bool hasQuery =
+            win->tocFilterEdit && win->tocFilterEdit->hwnd && GetWindowTextLengthW(win->tocFilterEdit->hwnd) > 0;
+        if (!hasQuery) {
+            return;
+        }
+        int nMatches = len(win->findMatches);
+        TouchSearchControls c = TouchSearchControlsLayout(win);
+        HWND hw = win->hwndTocBox;
+        // the panel's surface color with an edge, never the control
+        // background (pure black on the Dark theme, where the two circles read
+        // as holes); up/down, since the results are a vertical list
+        COLORREF navBg = ThemeTouchSurfaceColor();
+        COLORREF navFg = nMatches > 0 ? ThemeWindowTextColor() : ThemeWindowTextDisabledColor();
+        COLORREF onBg = 0;
+        COLORREF onFg = 0;
+        ThemeAccentSurfaceColors(&onBg, &onFg);
+        // suggested words, under the field
+        {
+            Vec<Rect> chipRects;
+            TouchSuggestChipRects(win, hdc, chipRects);
+            HFONT font = HdcGetUiFont(hdc, kFontSizeLabel);
+            for (int i = 0; i < len(chipRects); i++) {
+                Rect r = chipRects[i];
+                FillTocPill(hdc, r, r.dy / 2, navBg, ThemeEdgeColor());
+                SetTextColor(hdc, ThemeWindowTextColor());
+                HdcDrawText(hdc, win->touchSuggestions.At(i), r, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
+                            font);
+            }
+        }
+        // the find bar's own options, as toggle chips: on = the accent surface
+        struct Chip {
+            Rect r;
+            TbIcon icon;
+            bool on;
+            COLORREF fg;
+        };
+        Chip chips[] = {
+            {c.matchCase, TbIcon::MatchCase, win->findMatchCase, ThemeWindowTextColor()},
+            {c.wholeWord, TbIcon::MatchWholeWord, win->findMatchWholeWord, ThemeWindowTextColor()},
+            {c.collapse, TbIcon::ArrowsDiagonalMinimize, false, ThemeWindowDarkerTextColor()},
+            {c.prev, TbIcon::ChevronUp, false, navFg},
+            {c.next, TbIcon::ChevronDown, false, navFg},
+        };
+        int chipIconDy = DpiScale(hw, 18);
+        int navIconDy = DpiScale(hw, 20);
+        for (const Chip& chip : chips) {
+            COLORREF bg = chip.on ? onBg : navBg;
+            COLORREF fg = chip.on ? onFg : chip.fg;
+            bool round = chip.r.dx == c.next.dx;
+            FillTocPill(hdc, chip.r, round ? chip.r.dy / 2 : DpiScale(hw, 10), bg, chip.on ? onBg : ThemeEdgeColor());
+            int iconDy = round ? navIconDy : chipIconDy;
+            HIMAGELIST icons = GetTintedToolbarImageList(iconDy, fg, bg);
+            if (icons) {
+                ImageList_Draw(icons, (int)chip.icon, hdc, chip.r.x + (chip.r.dx - iconDy) / 2,
+                               chip.r.y + (chip.r.dy - iconDy) / 2, ILD_NORMAL);
+            }
+        }
+        SetTextColor(hdc, ThemeWindowDarkerTextColor());
+        Str countText;
+        if (nMatches == 0) {
+            countText = StrL("No matches");
+        } else if (win->touchFindCurrent >= 0 && win->touchFindCurrent < nMatches) {
+            countText = fmt("%d of %d", win->touchFindCurrent + 1, nMatches);
+        } else {
+            countText = nMatches == 1 ? StrL("1 match") : fmt("%d matches", nMatches);
+        }
+        HdcDrawText(hdc, countText, c.count, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, kFontSizeLabel));
+
+        int rowDy = DpiScale(win->hwndTocBox, TouchSearchResultRowDy());
+        int first = std::max(0, win->touchPanelScrollY / rowDy - 1);
+        int visible = rc.dy / rowDy + 3;
+        int last = std::min(len(win->findMatches), first + visible);
+        StrVec findWords;
+        SplitFilterToWords(win->findCountText ? win->findCountText : win->browserFindTerm, findWords);
+        Vec<u8> highlighted;
+        for (int i = first; i < last; i++) {
+            const FindMatch& match = win->findMatches[i];
+            Rect row = TouchSearchResultRect(win, i);
+            // the panel surface with an edge, like the prev/next buttons above: the
+            // control background is pure black on the Dark theme; the current
+            // match carries the accent edge
+            bool isCurrent = i == win->touchFindCurrent;
+            FillTocPill(hdc, row, DpiScale(win->hwndTocBox, 8), ThemeTouchSurfaceColor(),
+                        isCurrent ? ThemeWindowLinkColor() : ThemeEdgeColor(), isCurrent ? 2 : 1);
+            Rect pageRc{row.x + DpiScale(win->hwndTocBox, 12), row.y + DpiScale(win->hwndTocBox, 6),
+                        row.dx - DpiScale(win->hwndTocBox, 24), DpiScale(win->hwndTocBox, 18)};
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            HdcDrawText(hdc, fmt("Page %d", match.startPage), pageRc, DT_SINGLELINE | DT_LEFT | DT_NOPREFIX,
+                        HdcGetUiFont(hdc, kFontSizeMeta));
+            Rect snippetRc{pageRc.x, pageRc.y + pageRc.dy + DpiScale(win->hwndTocBox, 3), pageRc.dx,
+                           row.y + row.dy - pageRc.y - pageRc.dy - DpiScale(win->hwndTocBox, 7)};
+            SetTextColor(hdc, ThemeWindowTextColor());
+            HFONT snippetFont = HdcGetUiFont(hdc, kFontSizeLabel);
+            ScopedSelectObject selectFont(hdc, snippetFont);
+            DrawMaybeHighlightedText(hdc, snippetRc, match.snippet, findWords, highlighted, ThemeHotBackgroundColor(),
+                                     false, win->findMatchWholeWord,
+                                     DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX | DT_TOP);
+        }
+        // "No matches" is the count row's job; the generic empty state below
+        // used to paint its own prompt across the pill and the buttons
+        return;
+    }
+    if (mode == TouchPanelMode::Favorites) {
+        Vec<TouchFavRow> rows;
+        CollectTouchFavRows(rows);
+        HWND hw = win->hwndTocBox;
+        int rowDy = DpiScale(hw, TouchSidebarListRowDy());
+        int y0 = TouchFavRowsTop(win);
+        if (len(rows) == 0) {
+            TempStr empty = str::DupTemp(StrL("No saved pages yet. Tap the bookmark button to save one."));
+            Rect r{DpiScale(hw, 16), y0 + DpiScale(hw, 8), rc.dx - DpiScale(hw, 32), rowDy * 2};
+            HFONT f = HdcGetUiFont(hdc, kPanelRowFontSize);
+            ScopedSelectObject sel(hdc, f);
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            HdcDrawText(hdc, empty, r, DT_LEFT | DT_WORDBREAK);
+            return;
+        }
+        WindowTab* curTab = win->CurrentTab();
+        Str curPath = (curTab && !curTab->IsAboutTab()) ? curTab->filePath : Str{};
+        // add the page being read; nothing to add without a document
+        if (win->IsDocLoaded()) {
+            Rect add = TouchFavAddRect(win);
+            Gdiplus::Graphics gfx(hdc);
+            gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::SolidBrush bg(GdiRgbFromCOLORREF(ThemeTouchSurfaceColor()));
+            gfx.FillEllipse(&bg, add.x, add.y, add.dx, add.dy);
+            Gdiplus::Pen pen(GdiRgbFromCOLORREF(ThemeWindowLinkColor()), (Gdiplus::REAL)std::max(1, DpiScale(hw, 2)));
+            pen.SetStartCap(Gdiplus::LineCapRound);
+            pen.SetEndCap(Gdiplus::LineCapRound);
+            int acx = add.x + add.dx / 2;
+            int acy = add.y + add.dy / 2;
+            int aarm = DpiScale(hw, 7);
+            gfx.DrawLine(&pen, acx - aarm, acy, acx + aarm, acy);
+            gfx.DrawLine(&pen, acx, acy - aarm, acx, acy + aarm);
+        }
+        {
+            // toolbar toggle: a check box and a label
+            Rect tg = TouchFavToolbarToggleRect(win);
+            bool on = gGlobalPrefs->favoritesInToolbar;
+            Gdiplus::Graphics tgx(hdc);
+            tgx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            int box = DpiScale(hw, 15);
+            Rect br{tg.x, tg.y + (tg.dy - box) / 2, box, box};
+            Gdiplus::Pen bp(GdiRgbFromCOLORREF(ThemeWindowDarkerTextColor()),
+                            (Gdiplus::REAL)std::max(1, DpiScale(hw, 1)));
+            if (on) {
+                Gdiplus::SolidBrush fill(GdiRgbFromCOLORREF(ThemeWindowLinkColor()));
+                tgx.FillRectangle(&fill, br.x, br.y, br.dx, br.dy);
+                Gdiplus::Pen tick(GdiRgbFromCOLORREF(RGB(255, 255, 255)), (Gdiplus::REAL)std::max(1, DpiScale(hw, 2)));
+                tick.SetStartCap(Gdiplus::LineCapRound);
+                tick.SetEndCap(Gdiplus::LineCapRound);
+                tgx.DrawLine(&tick, br.x + box / 4, br.y + box / 2, br.x + box / 2, br.y + (box * 3) / 4);
+                tgx.DrawLine(&tick, br.x + box / 2, br.y + (box * 3) / 4, br.x + (box * 3) / 4, br.y + box / 4);
+            } else {
+                tgx.DrawRectangle(&bp, br.x, br.y, br.dx, br.dy);
+            }
+            HFONT ft = HdcGetUiFont(hdc, kPanelSubFontSize);
+            ScopedSelectObject selt(hdc, ft);
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            Rect tl{br.x + box + DpiScale(hw, 8), tg.y, tg.dx - box - DpiScale(hw, 8), tg.dy};
+            HdcDrawText(hdc, StrL("Show in toolbar"), tl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+        for (int i = 0; i < len(rows); i++) {
+            const TouchFavRow& row = rows[i];
+            Rect r{DpiScale(hw, 12), y0 + i * rowDy, rc.dx - DpiScale(hw, 24), rowDy};
+            if (r.y + r.dy < 0 || r.y > rc.dy) {
+                continue; // scrolled out of view
+            }
+            if (row.isHeader) {
+                // the document this group belongs to; the open one is marked
+                TempStr name = path::GetBaseNameTemp(row.fs->filePath);
+                bool isCurrent = curPath && str::Eq(row.fs->filePath, curPath);
+                HFONT f = HdcGetUiFont(hdc, kPanelSubFontSize, kFontWeightStrong);
+                ScopedSelectObject sel(hdc, f);
+                SetTextColor(hdc, isCurrent ? ThemeWindowLinkColor() : ThemeWindowDarkerTextColor());
+                Rect tr = r;
+                tr.x += DpiScale(hw, 4);
+                HdcDrawText(hdc, name, tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                continue;
+            }
+            // one saved page: its name, and the page number on the right
+            TempStr label = FavReadableNameTemp(row.fav);
+            HFONT f = HdcGetUiFont(hdc, kPanelRowFontSize);
+            ScopedSelectObject sel(hdc, f);
+            SetTextColor(hdc, ThemeWindowTextColor());
+            Rect tr = r;
+            tr.x += DpiScale(hw, 20);
+            tr.dx -= DpiScale(hw, 20 + 56);
+            HdcDrawText(hdc, label, tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            TempStr pageStr = fmt("%d", row.fav->pageNo);
+            HFONT fp = HdcGetUiFont(hdc, kPanelPageFontSize);
+            ScopedSelectObject selp(hdc, fp);
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            Rect pr{r.x + r.dx - DpiScale(hw, 82), r.y, DpiScale(hw, 44), r.dy};
+            HdcDrawText(hdc, pageStr, pr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+            // where a dragged favorite would land
+            if (gFavDragActive && gFavDragWin == win && gFavDragOverRow == i && gFavDragFromRow != i) {
+                Gdiplus::Graphics dg(hdc);
+                Gdiplus::SolidBrush accent(GdiRgbFromCOLORREF(ThemeWindowLinkColor()));
+                bool below = gFavDragFromRow < i;
+                int lineY = below ? (r.y + r.dy - DpiScale(hw, 1)) : r.y;
+                dg.FillRectangle(&accent, r.x, lineY, r.dx, std::max(2, DpiScale(hw, 2)));
+            }
+            // the row being dragged reads as lifted
+            if (gFavDragActive && gFavDragWin == win && gFavDragFromRow == i) {
+                Gdiplus::Graphics dg(hdc);
+                COLORREF c = ThemeWindowTextColor();
+                Gdiplus::SolidBrush lift(Gdiplus::Color(28, GetRValue(c), GetGValue(c), GetBValue(c)));
+                dg.FillRectangle(&lift, r.x, r.y, r.dx, r.dy);
+            }
+
+            // delete: a small x at the end of the row
+            Rect del = TouchFavDeleteRect(win, r);
+            Gdiplus::Graphics gfx(hdc);
+            gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::Pen delPen(GdiRgbFromCOLORREF(ThemeWindowDarkerTextColor()),
+                                (Gdiplus::REAL)std::max(1, DpiScale(hw, 1)));
+            delPen.SetStartCap(Gdiplus::LineCapRound);
+            delPen.SetEndCap(Gdiplus::LineCapRound);
+            int cx = del.x + del.dx / 2;
+            int cy = del.y + del.dy / 2;
+            int arm = DpiScale(hw, 5);
+            gfx.DrawLine(&delPen, cx - arm, cy - arm, cx + arm, cy + arm);
+            gfx.DrawLine(&delPen, cx + arm, cy - arm, cx - arm, cy + arm);
+        }
+        return;
+    }
+    if (mode == TouchPanelMode::Annotations && win->AsFixed()) {
+        const Vec<Annotation*>* cached = TouchAnnotationsCached(win);
+        if (!cached) {
+            DrawTouchPanelWaiting(win, hdc, StrL("Looking through the document…"));
+            return;
+        }
+        const Vec<Annotation*>& annotations = *cached;
+        if (len(annotations) == 0) {
+            Rect rcEmpty = HwndClientRect(win->hwndTocBox);
+            Rect text{DpiScale(win->hwndTocBox, 16), DpiScale(win->hwndTocBox, kPanelHeaderDy + 72),
+                      rcEmpty.dx - DpiScale(win->hwndTocBox, 32), DpiScale(win->hwndTocBox, 24)};
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            HdcDrawText(hdc, StrL("No annotations in this document"), text,
+                        DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX, HdcGetUiFont(hdc, kFontSizeLabel));
+            return;
+        }
+        int y = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) - win->touchPanelScrollY;
+        int rowDy = DpiScale(win->hwndTocBox, TouchSidebarListRowDy());
+        int count = std::min(len(annotations), 10);
+        for (int i = 0; i < count; i++) {
+            Annotation* annot = annotations[i];
+            Rect row{DpiScale(win->hwndTocBox, 12), y + i * rowDy, rc.dx - DpiScale(win->hwndTocBox, 24), rowDy};
+            Rect swatch{row.x + DpiScale(win->hwndTocBox, 2), row.y + DpiScale(win->hwndTocBox, 12),
+                        DpiScale(win->hwndTocBox, 12), DpiScale(win->hwndTocBox, 12)};
+            COLORREF swatchCol = RGB(245, 198, 107);
+            PdfColor pdfCol = GetColor(annot);
+            if (pdfCol != kColorUnset) {
+                u8 r, g, b, a;
+                UnpackPdfColor(pdfCol, r, g, b, a);
+                swatchCol = RGB(r, g, b);
+            }
+            FillTocPill(hdc, swatch, DpiScale(win->hwndTocBox, 3), swatchCol, swatchCol);
+            Str contents = Contents(annot);
+            Str label = contents ? contents : AnnotationReadableNameTemp(Type(annot));
+            Rect textRc{row.x + DpiScale(win->hwndTocBox, 28), row.y + DpiScale(win->hwndTocBox, 3),
+                        row.dx - DpiScale(win->hwndTocBox, 28), DpiScale(win->hwndTocBox, 21)};
+            SetTextColor(hdc, ThemeWindowTextColor());
+            HdcDrawText(hdc, label, textRc, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX | DT_TOP,
+                        HdcGetUiFont(hdc, kFontSizeLabel));
+            Rect metaRc{textRc.x, textRc.y + textRc.dy, textRc.dx, DpiScale(win->hwndTocBox, 18)};
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            HdcDrawText(hdc, fmt("Page %d · %s", PageNo(annot), AnnotationReadableNameTemp(Type(annot))), metaRc,
+                        DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX | DT_TOP, HdcGetUiFont(hdc, kFontSizeMeta));
+        }
+        if (count > 0) {
+            return;
+        }
+    }
+    if (mode == TouchPanelMode::Attachments && win->ctrl) {
+        Vec<TocItem*> attachments;
+        TocTree* toc = win->ctrl->GetToc();
+        if (toc && toc->root) {
+            CollectAttachmentItems(toc->root->child, attachments);
+        }
+        int y = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) - win->touchPanelScrollY;
+        int rowDy = DpiScale(win->hwndTocBox, TouchSidebarListRowDy());
+        for (int i = 0; i < len(attachments); i++) {
+            TocItem* item = attachments[i];
+            Rect row{DpiScale(win->hwndTocBox, 12), y + i * rowDy, rc.dx - DpiScale(win->hwndTocBox, 24), rowDy};
+            Rect icon{row.x, row.y + DpiScale(win->hwndTocBox, 10), DpiScale(win->hwndTocBox, 36),
+                      DpiScale(win->hwndTocBox, 36)};
+            FillTocPill(hdc, icon, DpiScale(win->hwndTocBox, 8), RGB(234, 229, 222), RGB(234, 229, 222));
+            int paperclipDy = DpiScale(win->hwndTocBox, 18);
+            HIMAGELIST attachmentIcons =
+                GetTintedToolbarImageList(paperclipDy, ThemeWindowDarkerTextColor(), RGB(234, 229, 222));
+            if (attachmentIcons) {
+                ImageList_Draw(attachmentIcons, (int)TbIcon::Attachment, hdc, icon.x + (icon.dx - paperclipDy) / 2,
+                               icon.y + (icon.dy - paperclipDy) / 2, ILD_NORMAL);
+            }
+            Rect textRc{row.x + DpiScale(win->hwndTocBox, 48), row.y + DpiScale(win->hwndTocBox, 5),
+                        row.dx - DpiScale(win->hwndTocBox, 48), DpiScale(win->hwndTocBox, 21)};
+            SetTextColor(hdc, ThemeWindowTextColor());
+            HdcDrawText(hdc, item->title, textRc, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX | DT_TOP,
+                        HdcGetUiFont(hdc, kFontSizeLabel, FW_MEDIUM));
+            Rect metaRc{textRc.x, textRc.y + textRc.dy, textRc.dx, DpiScale(win->hwndTocBox, 18)};
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            HdcDrawText(hdc, StrL("Attached file"), metaRc, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX | DT_TOP,
+                        HdcGetUiFont(hdc, kFontSizeMeta));
+        }
+        if (len(attachments) > 0) {
+            return;
+        }
+    }
+
+    Str message;
+    switch (mode) {
+        case TouchPanelMode::Annotations:
+            message = StrL("No annotations on this page");
+            break;
+        case TouchPanelMode::Attachments:
+            message = StrL("No attachments in this document");
+            break;
+        default:
+            break;
+    }
+    Rect textRc{DpiScale(win->hwndTocBox, 16), DpiScale(win->hwndTocBox, kPanelHeaderDy + 24),
+                rc.dx - DpiScale(win->hwndTocBox, 32), DpiScale(win->hwndTocBox, 44)};
+    SetTextColor(hdc, ThemeWindowDarkerTextColor());
+    HdcDrawText(hdc, message, textRc, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+                HdcGetUiFont(hdc, kFontSizeLabel));
+}
+
+static Rect TouchFilterClearRect(MainWindow* win, bool hitTarget) {
+    Edit* edit = win->tocFilterEdit;
+    if (!edit || !edit->hwnd || !HwndIsVisible(edit->hwnd)) {
+        return {};
+    }
+    HWND hwnd = win->hwndTocBox;
+    Rect er = HwndWindowRect(edit->hwnd);
+    POINT tl{er.x, er.y};
+    ScreenToClient(hwnd, &tl);
+    int sideMargin = DpiScale(hwnd, kPanelRowPadX);
+    int pillDy = DpiScale(hwnd, kPanelFilterDy);
+    Rect pill{sideMargin, tl.y - (pillDy - er.dy) / 2, HwndClientRect(hwnd).dx - (2 * sideMargin), pillDy};
+    int clearDy = DpiScale(hwnd, 22);
+    Rect clear{pill.x + pill.dx - DpiScale(hwnd, 9) - clearDy, pill.y + (pill.dy - clearDy) / 2, clearDy, clearDy};
+    if (hitTarget) {
+        clear.Inflate(DpiScale(hwnd, 9), DpiScale(hwnd, 9));
+    }
+    return clear;
+}
+
+// Draws the rounded filter/search field around win->tocFilterEdit on the panel
+// itself (the edit is a plain child; the pill, magnifier and clear button are
+// ours). It runs after EndPaint(), on a GetDC() of the panel, so whatever it
+// touches wins over what WM_PAINT just drew.
+//
+// `ownsBodyBelow` says who is responsible for the area under the field. In
+// Bookmarks mode nobody paints it in WM_PAINT - the tree and sticky-header
+// child windows cover it - and a plain erase down to the bottom of the client
+// is the cheapest way to avoid a WC_STATIC-background sliver between the pill
+// and the tree, so pass true. In the self-painted modes (Search) the body under
+// the field is the panel's own content, drawn by PaintTouchPanelMode() during
+// WM_PAINT; erasing down to the bottom there wipes the match count, the
+// prev/next buttons and the whole results list right after they were drawn.
+// Pass false and the erase stops at the bottom of the pill.
+//
+// `hdcInto`: when the caller is already painting into an off-screen buffer
+// (the self-painted modes) draw there, so the pill lands on screen in the
+// same blit as the body under it. The GetDC() route is for Bookmarks mode.
+static void PaintTouchFilterChrome(MainWindow* win, bool ownsBodyBelow, HDC hdcInto = nullptr) {
+    Edit* edit = win->tocFilterEdit;
+    if (!edit || !edit->hwnd || !HwndIsVisible(edit->hwnd)) {
+        return;
+    }
+    HWND hwnd = win->hwndTocBox;
+    HDC hdc = hdcInto ? hdcInto : GetDC(hwnd);
+    if (!hdc) {
+        return;
+    }
+    Rect rcClient = HwndClientRect(hwnd);
+    Rect er = HwndWindowRect(edit->hwnd);
+    POINT tl{er.x, er.y};
+    ScreenToClient(hwnd, &tl);
+    // same pill as the Library's search field (see DrawTouchLibraryPageV2):
+    // 40px, edges on the rows' x, magnifier at +14, one step of edge color
+    // around it and the accent edge while it has the focus
+    int sideMargin = DpiScale(hwnd, kPanelRowPadX);
+    // the edit is centered in the pill's height, whatever the font made it
+    int pillDy = DpiScale(hwnd, kPanelFilterDy);
+    Rect pill{sideMargin, tl.y - (pillDy - er.dy) / 2, rcClient.dx - (2 * sideMargin), pillDy};
+    // The panel is a WC_STATIC and paints its own background, which is the
+    // control background (pure black on the Dark theme). Everywhere else that
+    // is covered by the header / tree children, but the filter strip is not -
+    // so repaint that band in the panel color before drawing the pill on it.
+    int bandY = pill.y - DpiScale(hwnd, 4);
+    int bandBottom = ownsBodyBelow ? rcClient.dy : pill.y + pill.dy + DpiScale(hwnd, 4);
+    Rect band{0, bandY, rcClient.dx, std::max(0, bandBottom - bandY)};
+    HdcFillRect(hdc, band, ThemeHotBackgroundColor());
+    COLORREF fieldBg = ThemeTouchSurfaceColor();
+    bool focused = GetFocus() == edit->hwnd;
+    FillTocPill(hdc, pill, pill.dy / 2, fieldBg, focused ? ThemeHotEdgeColor() : ThemeEdgeColor());
+
+    int iconDy = DpiScale(hwnd, kPanelFilterIconDy);
+    HIMAGELIST iml = GetTintedToolbarImageList(iconDy, ThemeWindowDarkerTextColor(), fieldBg);
+    if (iml) {
+        int ix = pill.x + DpiScale(hwnd, 14);
+        int iy = pill.y + ((pill.dy - iconDy) / 2);
+        ImageList_Draw(iml, (int)TbIcon::Search, hdc, ix, iy, ILD_NORMAL);
+    }
+
+    if (GetWindowTextLengthW(edit->hwnd) > 0) {
+        // a chip one step above the surface in every theme, with the icon
+        // set's × rather than a font glyph
+        Rect clear = TouchFilterClearRect(win, false);
+        COLORREF chipBg = ThemeEdgeColor();
+        FillTocPill(hdc, clear, clear.dy / 2, chipBg, chipBg);
+        int closeDy = DpiScale(hwnd, 12);
+        HIMAGELIST closeIcons = GetTintedToolbarImageList(closeDy, ThemeWindowTextColor(), chipBg);
+        if (closeIcons) {
+            ImageList_Draw(closeIcons, (int)TbIcon::Close, hdc, clear.x + (clear.dx - closeDy) / 2,
+                           clear.y + (clear.dy - closeDy) / 2, ILD_NORMAL);
+        }
+    }
+    if (hdcInto) {
+        // buffered path: the edit was never drawn over, so leave it alone -
+        // repainting it on every scroll frame is a flicker of its own
+        return;
+    }
+    ReleaseDC(hwnd, hdc);
+    HwndInvalidate(edit->hwnd, false);
+}
+
+constexpr UINT_PTR kTouchPanelPressTimerId = 22;
+
+// --- panel press feedback ------------------------------------------------
+// The panel's rows are pure tap targets and answered a tap with nothing until
+// the view changed, which on a touchscreen is the one place feedback matters
+// most. One overlay, same idea as the Library's.
+static MainWindow* gPanelPressWin = nullptr;
+static Rect gPanelPressRect;
+static AnimVal gPanelPressVal;
+
+// Which row/card sits under a point, for the modes whose rows are a simple
+// list. Bookmarks is a real TreeView with its own selection drawing, so it is
+// deliberately left alone.
+static bool TouchPanelHitRect(MainWindow* win, Point pt, Rect* out) {
+    if (!win || !win->hwndTocBox) {
+        return false;
+    }
+    HWND hwnd = win->hwndTocBox;
+    Rect client = HwndClientRect(hwnd);
+    TouchPanelMode mode = win->touchPanelMode;
+
+    if (mode == TouchPanelMode::Thumbnails && win->ctrl) {
+        int count = win->ctrl->PageCount();
+        for (int i = 0; i < count; i++) {
+            Rect r = TouchThumbnailHitRect(win, i);
+            if (r.Contains(pt)) {
+                *out = r;
+                return true;
+            }
+        }
+        return false;
+    }
+    if (mode == TouchPanelMode::Search) {
+        for (int i = 0; i < len(win->findMatches); i++) {
+            Rect r = TouchSearchResultRect(win, i);
+            if (r.Contains(pt)) {
+                *out = r;
+                return true;
+            }
+        }
+        return false;
+    }
+    // Favorites / Annotations / Attachments all lay rows out the same way
+    if (mode == TouchPanelMode::Favorites || mode == TouchPanelMode::Annotations ||
+        mode == TouchPanelMode::Attachments) {
+        int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
+        int y0 = DpiScale(hwnd, kPanelHeaderDy + 12) - win->touchPanelScrollY;
+        if (rowDy <= 0 || pt.y < y0) {
+            return false;
+        }
+        int idx = (pt.y - y0) / rowDy;
+        if (idx < 0) {
+            return false;
+        }
+        if (mode == TouchPanelMode::Favorites) {
+            // the per-document group headings are not tap targets, so they must
+            // not light up either - feedback has to mean something will happen
+            Vec<TouchFavRow> rows;
+            CollectTouchFavRows(rows);
+            if (idx >= len(rows) || rows[idx].isHeader) {
+                return false;
+            }
+        }
+        *out = Rect{DpiScale(hwnd, 12), y0 + idx * rowDy, client.dx - DpiScale(hwnd, 24), rowDy};
+        return true;
+    }
+    return false;
+}
+
+static void UpdatePanelPressTimer(MainWindow* win) {
+    if (!win || !win->hwndTocBox) {
+        return;
+    }
+    if (gPanelPressVal.IsAnimating()) {
+        SetTimer(win->hwndTocBox, kTouchPanelPressTimerId, kAnimTickMs, nullptr);
+    } else {
+        KillTimer(win->hwndTocBox, kTouchPanelPressTimerId);
+    }
+}
+
+static void SetTouchPanelPressed(MainWindow* win, Point pt, bool down) {
+    if (!win) {
+        return;
+    }
+    Rect r;
+    bool hit = down && TouchPanelHitRect(win, pt, &r);
+    if (hit) {
+        gPanelPressWin = win;
+        gPanelPressRect = r;
+    }
+    float target = hit ? 1.0f : 0.0f;
+    if (AnimEnabled()) {
+        gPanelPressVal.SetTarget(target, hit ? kAnimPressMs : kAnimPressReleaseMs);
+        UpdatePanelPressTimer(win);
+    } else {
+        gPanelPressVal.Set(target);
+    }
+    HwndInvalidate(win->hwndTocBox, false);
+}
+
+static void PaintTouchPanelPress(MainWindow* win, HDC hdc) {
+    if (gPanelPressWin != win) {
+        return;
+    }
+    float amt = gPanelPressVal.Value();
+    if (amt <= 0.01f || gPanelPressRect.IsEmpty()) {
+        return;
+    }
+    Rect r = gPanelPressRect;
+    int inset = (int)((float)DpiScale(win->hwndTocBox, 2) * amt + 0.5f);
+    r.x += inset;
+    r.y += inset;
+    r.dx -= inset * 2;
+    r.dy -= inset * 2;
+    if (r.dx <= 0 || r.dy <= 0) {
+        return;
+    }
+    Gdiplus::Graphics gfx(hdc);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    COLORREF col = ThemeWindowTextColor();
+    Gdiplus::Color c((u8)(38.0f * amt), GetRValue(col), GetGValue(col), GetBValue(col));
+    Gdiplus::SolidBrush br(c);
+    int d = std::min(DpiScale(win->hwndTocBox, 10) * 2, std::min(r.dx, r.dy));
+    Gdiplus::GraphicsPath path;
+    path.AddArc(r.x, r.y, d, d, 180.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y, d, d, 270.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y + r.dy - d, d, d, 0.0f, 90.0f);
+    path.AddArc(r.x, r.y + r.dy - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+    gfx.FillPath(&br, &path);
+}
+
+static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
+    HWND hwnd = win->hwndTocBox;
+    if (win->tocFilterEdit && HwndIsVisible(win->tocFilterEdit->hwnd) &&
+        GetWindowTextLengthW(win->tocFilterEdit->hwnd) > 0 && TouchFilterClearRect(win, true).Contains(pt)) {
+        win->tocFilterEdit->SetText({});
+        HwndSetFocus(win->tocFilterEdit->hwnd);
+        return true;
+    }
+    if (win->touchPanelMode == TouchPanelMode::Favorites) {
+        Vec<TouchFavRow> rows;
+        CollectTouchFavRows(rows);
+        int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
+        int y0 = TouchFavRowsTop(win);
+        if (TouchFavToolbarToggleRect(win).Contains(pt)) {
+            gGlobalPrefs->favoritesInToolbar = !gGlobalPrefs->favoritesInToolbar;
+            SaveSettings();
+            UpdateTopBarForWindow(win);
+            HwndInvalidate(hwnd, false);
+            return true;
+        }
+        // add the current page
+        if (win->IsDocLoaded() && TouchFavAddRect(win).Contains(pt)) {
+            int pageNo = win->ctrl->CurrentPageNo();
+            AddFavoriteQuiet(win, pageNo, FavoriteDefaultNameTemp(win, pageNo));
+            UpdateTopBarForWindow(win);
+            HwndInvalidate(hwnd, false);
+            return true;
+        }
+        // same origin and row height the paint pass used, so the row under the
+        // finger is the row that was drawn there
+        if (rowDy > 0 && pt.y >= y0) {
+            int idx = (pt.y - y0) / rowDy;
+            if (idx >= 0 && idx < len(rows) && !rows[idx].isHeader) {
+                Rect row{DpiScale(hwnd, 12), y0 + idx * rowDy, HwndClientRect(hwnd).dx - DpiScale(hwnd, 24), rowDy};
+                if (TouchFavDeleteRect(win, row).Contains(pt)) {
+                    DelFavorite(rows[idx].fs->filePath, rows[idx].fav->pageNo);
+                    UpdateTopBarForWindow(win);
+                    HwndInvalidate(hwnd, false);
+                    return true;
+                }
+                // GoToFavorite opens the document first when it is not the
+                // current one, so a favorite in another PDF just works
+                GoToFavorite(win, rows[idx].fs, rows[idx].fav);
+                return true;
+            }
+        }
+        return false;
+    }
+    if (win->touchPanelMode == TouchPanelMode::Thumbnails && win->ctrl) {
+        int count = win->ctrl->PageCount();
+        for (int i = 0; i < count; i++) {
+            if (TouchThumbnailHitRect(win, i).Contains(pt)) {
+                win->ctrl->GoToPage(i + 1, true);
+                HwndInvalidate(hwnd, false);
+                return true;
+            }
+        }
+    }
+    if (win->touchPanelMode == TouchPanelMode::Search) {
+        TouchSearchControls c = TouchSearchControlsLayout(win);
+        bool hasQuery =
+            win->tocFilterEdit && win->tocFilterEdit->hwnd && GetWindowTextLengthW(win->tocFilterEdit->hwnd) > 0;
+        if (hasQuery && len(win->touchSuggestions) > 0) {
+            Vec<Rect> chipRects;
+            HDC dc = GetDC(hwnd);
+            TouchSuggestChipRects(win, dc, chipRects);
+            ReleaseDC(hwnd, dc);
+            for (int i = 0; i < len(chipRects); i++) {
+                if (chipRects[i].Contains(pt)) {
+                    AcceptTouchSuggestion(win, i);
+                    return true;
+                }
+            }
+        }
+        if (hasQuery && c.prev.Contains(pt)) {
+            TouchSearchGoTo(win, win->touchFindCurrent < 0 ? len(win->findMatches) - 1 : win->touchFindCurrent - 1);
+            return true;
+        }
+        if (hasQuery && c.next.Contains(pt)) {
+            TouchSearchGoTo(win, win->touchFindCurrent < 0 ? 0 : win->touchFindCurrent + 1);
+            return true;
+        }
+        if (hasQuery && (c.matchCase.Contains(pt) || c.wholeWord.Contains(pt))) {
+            if (c.matchCase.Contains(pt)) {
+                win->findMatchCase = !win->findMatchCase;
+            } else {
+                win->findMatchWholeWord = !win->findMatchWholeWord;
+            }
+            win->touchFindCurrent = -1;
+            TempStr text = win->tocFilterEdit->GetTextTemp();
+            if (text) {
+                SearchDocumentFromTouchPanel(win, text);
+            }
+            HwndInvalidate(hwnd, false);
+            return true;
+        }
+        if (hasQuery && c.collapse.Contains(pt)) {
+            CollapseTouchSearchPanelToBar(win);
+            return true;
+        }
+        int rowDy = DpiScale(hwnd, TouchSearchResultRowDy());
+        int idx = (pt.y - TouchSearchResultsY(win)) / rowDy;
+        if (pt.y >= TouchSearchResultsY(win) && idx >= 0 && idx < len(win->findMatches)) {
+            Rect hit = TouchSearchResultRect(win, idx);
+            hit.Inflate(0, DpiScale(hwnd, 4));
+            if (hit.Contains(pt)) {
+                TouchSearchGoTo(win, idx);
+                return true;
+            }
+        }
+    }
+    if (win->touchPanelMode == TouchPanelMode::Annotations && win->AsFixed()) {
+        const Vec<Annotation*>* cached = TouchAnnotationsCached(win);
+        if (!cached) {
+            return true; // still gathering the list; the tap has nothing to hit yet
+        }
+        int y = DpiScale(hwnd, kPanelHeaderDy + 12) - win->touchPanelScrollY;
+        int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
+        int idx = (pt.y - y) / rowDy;
+        if (pt.y >= y && idx >= 0 && idx < len(*cached)) {
+            win->ctrl->GoToPage(PageNo((*cached)[idx]), true);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Drives the panel list's scroll easing / fling while it is moving. Same
+// KineticScroll the Library columns use, so both decelerate identically.
+constexpr UINT_PTR kTouchPanelScrollTimerId = 21;
+
+static void UpdateTouchPanelScrollTimer(MainWindow* win, HWND hwnd) {
+    if (KsIsMoving(win->touchPanelKs)) {
+        SetTimer(hwnd, kTouchPanelScrollTimerId, kAnimTickMs, nullptr);
+    } else {
+        KillTimer(hwnd, kTouchPanelScrollTimerId);
+    }
+}
+
+// The list is remeasured on every layout and other code paths set the scroll
+// position directly (mode switch, document change), so resync before feeding it.
+static void SyncTouchPanelScroll(MainWindow* win) {
+    KsSetBounds(win->touchPanelKs, 0, TouchPanelMaxScroll(win));
+    if (!KsIsMoving(win->touchPanelKs) && KsPos(win->touchPanelKs) != win->touchPanelScrollY) {
+        KsSetPos(win->touchPanelKs, win->touchPanelScrollY);
+    }
+}
+
+#ifndef WM_POINTERUPDATE
+#define WM_POINTERUPDATE 0x0245
+#define WM_POINTERDOWN 0x0246
+#define WM_POINTERUP 0x0247
+#endif
+
+#ifndef WM_POINTERCAPTURECHANGED
+#define WM_POINTERCAPTURECHANGED 0x024C
+#endif
 
 static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR /*subclassId*/,
                                       DWORD_PTR /*data*/) {
     MainWindow* win = FindMainWindowByHwnd(hwnd);
     if (!win) {
         return DefSubclassProc(hwnd, msg, wp, lp);
+    }
+
+    // WC_STATIC without SS_NOTIFY answers WM_NCHITTEST with HTTRANSPARENT, so
+    // every click and every touch fell straight through the panel to the frame
+    // underneath and WM_LBUTTONUP / WM_POINTERDOWN never arrived here at all.
+    // That is why tapping a search result, a thumbnail or the filter's clear X
+    // did nothing, and why the panel could not be dragged to scroll. Under the
+    // touch chrome the panel draws and hit-tests its own content, so it has to
+    // be solid. Classic chrome keeps the pass-through behavior it always had.
+    if (msg == WM_NCHITTEST && IsTouchChrome(win)) {
+        return HTCLIENT;
+    }
+
+    // The panel is a WC_STATIC: it paints its own background, so drawing the
+    // filter pill on WM_ERASEBKGND gets wiped. Draw after the default paint;
+    // the edit control paints itself afterwards inside its own rect, and only
+    // the pill's rounded ends and border show around it.
+    // The self-painted modes repaint the whole panel on every scroll tick and
+    // press-feedback frame. Drawn straight to the screen that was background
+    // fill, then rows, then the pill on a second DC - three visible passes per
+    // frame, which reads as flicker while scrolling the search results. Build
+    // the frame off-screen and put it up in one blit; the erase is swallowed
+    // for the same reason.
+    // Bookmarks too: its header and tree are child windows, and what the panel
+    // paints itself - its background, the filter pill, the "x of y" chip - went
+    // up as three separate passes, which flashed on every switch to it.
+    if (msg == WM_ERASEBKGND && IsTouchChrome(win)) {
+        return TRUE;
+    }
+    if (msg == WM_PAINT && IsTouchChrome(win)) {
+        if (win->touchPanelMode == TouchPanelMode::Bookmarks) {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            Rect rc = HwndClientRect(hwnd);
+            HDC memDc = CreateCompatibleDC(hdc);
+            HBITMAP bmp = memDc ? CreateCompatibleBitmap(hdc, std::max(1, rc.dx), std::max(1, rc.dy)) : nullptr;
+            HDC target = bmp ? memDc : hdc;
+            HGDIOBJ prev = bmp ? SelectObject(memDc, bmp) : nullptr;
+            HdcFillRect(target, rc, ThemeHotBackgroundColor());
+            PaintTouchFilterChrome(win, true, target);
+            if (HasTocFilter(win)) {
+                WindowTab* tab = win->CurrentTab();
+                int total = tab && tab->currToc ? CountTocLeaves(tab->currToc->root) : 0;
+                int found = win->tocFilteredTree ? CountTocLeaves(win->tocFilteredTree->root) : 0;
+                int dy = DpiScale(hwnd, 32);
+                Rect chip{rc.dx - DpiScale(hwnd, 20) - DpiScale(hwnd, 92), DpiScale(hwnd, 16), DpiScale(hwnd, 92), dy};
+                FillTocPill(target, chip, dy / 2, RGB(234, 229, 222), RGB(234, 229, 222));
+                SetBkMode(target, TRANSPARENT);
+                SetTextColor(target, ThemeWindowDarkerTextColor());
+                HdcDrawText(target, fmt("%d of %d", found, total), chip,
+                            DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+                            HdcGetUiFont(target, kFontSizeMeta, FW_MEDIUM));
+            }
+            if (bmp) {
+                Rect clip = ToRect(ps.rcPaint);
+                BitBlt(hdc, clip.x, clip.y, clip.dx, clip.dy, memDc, clip.x, clip.y, SRCCOPY);
+                SelectObject(memDc, prev);
+                DeleteObject(bmp);
+            }
+            if (memDc) {
+                DeleteDC(memDc);
+            }
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            Rect rc = HwndClientRect(hwnd);
+            HDC memDc = CreateCompatibleDC(hdc);
+            HBITMAP bmp = memDc ? CreateCompatibleBitmap(hdc, std::max(1, rc.dx), std::max(1, rc.dy)) : nullptr;
+            HDC target = bmp ? memDc : hdc;
+            HGDIOBJ prev = bmp ? SelectObject(memDc, bmp) : nullptr;
+            HdcFillRect(target, rc, ThemeHotBackgroundColor());
+            PaintTouchPanelMode(win, target);
+            if (win->touchPanelMode == TouchPanelMode::Search) {
+                // false: PaintTouchPanelMode() just drew the results list under
+                // the field, so the chrome must not erase down to the bottom
+                PaintTouchFilterChrome(win, false, target);
+            }
+            if (bmp) {
+                Rect clip = ToRect(ps.rcPaint);
+                BitBlt(hdc, clip.x, clip.y, clip.dx, clip.dy, memDc, clip.x, clip.y, SRCCOPY);
+                SelectObject(memDc, prev);
+                DeleteObject(bmp);
+            }
+            if (memDc) {
+                DeleteDC(memDc);
+            }
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
     }
 
     LRESULT res = 0;
@@ -1509,12 +3756,211 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 
     switch (msg) {
         case WM_SIZE:
+            win->touchPanelScrollY = std::min(win->touchPanelScrollY, TouchPanelMaxScroll(win));
             LayoutTocContainer(win);
+            break;
+
+        case WM_MOUSEWHEEL:
+            if (win->touchPanelMode != TouchPanelMode::Bookmarks) {
+                int step = DpiScale(hwnd, TouchSidebarRowDy());
+                int direction = GET_WHEEL_DELTA_WPARAM(wp) > 0 ? -1 : 1;
+                SyncTouchPanelScroll(win);
+                KsScrollBy(win->touchPanelKs, direction * step);
+                win->touchPanelScrollY = KsPos(win->touchPanelKs);
+                UpdateTouchPanelScrollTimer(win, hwnd);
+                HwndInvalidate(hwnd, false);
+                return 0;
+            }
+            break;
+
+        case WM_TIMER:
+            if (wp == kTouchPanelPressTimerId) {
+                HwndInvalidate(hwnd, false);
+                UpdatePanelPressTimer(win);
+                return 0;
+            }
+            if (wp == kTouchPanelSpinnerTimerId) {
+                if (win->touchAnnotsState == MainWindow::TouchAnnotsState::Loading) {
+                    HwndInvalidate(hwnd, false);
+                } else {
+                    KillTimer(hwnd, kTouchPanelSpinnerTimerId);
+                }
+                return 0;
+            }
+            if (wp == kTouchPanelScrollTimerId) {
+                bool moving = KsTick(win->touchPanelKs);
+                win->touchPanelScrollY = KsPos(win->touchPanelKs);
+                HwndInvalidate(hwnd, false);
+                if (!moving) {
+                    UpdateTouchPanelScrollTimer(win, hwnd);
+                }
+                return 0;
+            }
             break;
 
         case WM_COMMAND:
             if (LOWORD(wp) == IDC_TOC_LABEL_WITH_CLOSE) {
                 ToggleTocBox(win);
+            }
+            break;
+
+        case WM_LBUTTONDOWN:
+            SetTouchPanelPressed(win, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}, true);
+            if (win->touchPanelMode == TouchPanelMode::Favorites) {
+                Vec<TouchFavRow> rows;
+                CollectTouchFavRows(rows);
+                int idx = TouchFavRowAt(win, GET_Y_LPARAM(lp), len(rows));
+                // headers are not draggable, and neither is the delete target
+                if (idx >= 0 && !rows[idx].isHeader) {
+                    Rect client = HwndClientRect(hwnd);
+                    int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
+                    Rect row{DpiScale(hwnd, 12), TouchFavRowsTop(win) + idx * rowDy, client.dx - DpiScale(hwnd, 24),
+                             rowDy};
+                    if (!TouchFavDeleteRect(win, row).Contains(Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)})) {
+                        gFavDragWin = win;
+                        gFavDragFromRow = idx;
+                        gFavDragOverRow = idx;
+                        gFavDragActive = false; // becomes a drag once it moves
+                        SetCapture(hwnd);
+                    }
+                }
+            }
+            CloseTouchDocumentOverlays(win);
+            break;
+
+        case WM_MOUSEMOVE:
+            if (gFavDragWin == win && gFavDragFromRow >= 0) {
+                Vec<TouchFavRow> rows;
+                CollectTouchFavRows(rows);
+                int idx = TouchFavRowAt(win, GET_Y_LPARAM(lp), len(rows));
+                // only within the same document, and never onto a heading
+                if (idx >= 0 && !rows[idx].isHeader && rows[idx].fs == rows[gFavDragFromRow].fs) {
+                    if (idx != gFavDragOverRow) {
+                        gFavDragOverRow = idx;
+                        HwndInvalidate(hwnd, false);
+                    }
+                    if (idx != gFavDragFromRow) {
+                        gFavDragActive = true;
+                        SetTouchPanelPressed(win, Point{}, false);
+                    }
+                }
+                return 0;
+            }
+            break;
+
+        case WM_LBUTTONUP:
+            SetTouchPanelPressed(win, Point{}, false);
+            if (gFavDragWin == win && gFavDragFromRow >= 0) {
+                bool wasDrag = gFavDragActive;
+                int from = gFavDragFromRow;
+                int to = gFavDragOverRow;
+                if (GetCapture() == hwnd) {
+                    ReleaseCapture();
+                }
+                ResetFavDrag();
+                if (wasDrag && from != to) {
+                    Vec<TouchFavRow> rows;
+                    CollectTouchFavRows(rows);
+                    if (from < len(rows) && to < len(rows) && rows[from].fs == rows[to].fs) {
+                        // flattened rows include headings, so convert to
+                        // indices within this document's own favorites
+                        int fromIdx = 0, toIdx = 0, seen = 0;
+                        for (int i = 0; i < len(rows); i++) {
+                            if (rows[i].isHeader || rows[i].fs != rows[from].fs) {
+                                continue;
+                            }
+                            if (i == from) {
+                                fromIdx = seen;
+                            }
+                            if (i == to) {
+                                toIdx = seen;
+                            }
+                            seen++;
+                        }
+                        MoveFavorite(rows[from].fs->filePath, fromIdx, toIdx);
+                    }
+                    UpdateTopBarForWindow(win);
+                    HwndInvalidate(hwnd, false);
+                    return 0; // a drag is not a tap
+                }
+            }
+            if (ActivateTouchPanelAt(win, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)})) {
+                return 0;
+            }
+            break;
+
+        case WM_POINTERDOWN:
+            if (win->touchPanelMode != TouchPanelMode::Bookmarks && win->touchPanelPointerId == 0) {
+                win->touchPanelPointerId = LOWORD(wp);
+                win->touchPanelPointerStart = HwndScreenToClient(hwnd, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+                win->touchPanelPointerStartScrollY = win->touchPanelScrollY;
+                win->touchPanelPointerMoved = false;
+                SetTouchPanelPressed(win, win->touchPanelPointerStart, true);
+                // touching a coasting list catches it
+                SyncTouchPanelScroll(win);
+                win->touchPanelCaughtCoast = KsIsMoving(win->touchPanelKs);
+                KsStop(win->touchPanelKs);
+                UpdateTouchPanelScrollTimer(win, hwnd);
+                KsDragBegin(win->touchPanelKs, win->touchPanelPointerStart.y);
+                CloseTouchDocumentOverlays(win);
+                return 0;
+            }
+            break;
+
+        case WM_POINTERUPDATE:
+            if (LOWORD(wp) == win->touchPanelPointerId) {
+                Point pt = HwndScreenToClient(hwnd, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+                int dy = pt.y - win->touchPanelPointerStart.y;
+                int threshold = DpiScale(hwnd, 6);
+                if (!win->touchPanelPointerMoved && abs(dy) >= threshold) {
+                    win->touchPanelPointerMoved = true;
+                }
+                if (win->touchPanelPointerMoved) {
+                    // became a drag, so it is no longer a press on a row
+                    SetTouchPanelPressed(win, Point{}, false);
+                    KsDragUpdate(win->touchPanelKs, pt.y);
+                    win->touchPanelScrollY = KsPos(win->touchPanelKs);
+                    HwndInvalidate(hwnd, false);
+                }
+                return 0;
+            }
+            break;
+
+        case WM_POINTERUP:
+            if (LOWORD(wp) == win->touchPanelPointerId) {
+                Point pt = HwndScreenToClient(hwnd, Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+                // A finger rarely lands and lifts on the same pixel, and the
+                // 6px that starts a scroll is well inside that jitter - so the
+                // tap was decided by whether a scroll had *started*, and taps
+                // on the big page cards were being thrown away. Decide it at
+                // lift instead: land and lift close together is a tap, however
+                // the finger wandered in between.
+                int slop = DpiScale(hwnd, 16);
+                int dxLift = abs(pt.x - win->touchPanelPointerStart.x);
+                int dyLift = abs(pt.y - win->touchPanelPointerStart.y);
+                bool nearStart = dxLift <= slop && dyLift <= slop;
+                // ... unless the finger came down on a list that was still
+                // coasting, where the touch was catching it, not tapping a row
+                bool activate = !win->touchPanelPointerMoved || (nearStart && !win->touchPanelCaughtCoast);
+                win->touchPanelCaughtCoast = false;
+                SetTouchPanelPressed(win, Point{}, false);
+                win->touchPanelPointerId = 0;
+                win->touchPanelPointerMoved = false;
+                // let go of a flick and the list coasts to a stop
+                KsDragEnd(win->touchPanelKs);
+                UpdateTouchPanelScrollTimer(win, hwnd);
+                if (activate) {
+                    ActivateTouchPanelAt(win, pt);
+                }
+                return 0;
+            }
+            break;
+
+        case WM_POINTERCAPTURECHANGED:
+            if (LOWORD(wp) == win->touchPanelPointerId) {
+                win->touchPanelPointerId = 0;
+                win->touchPanelPointerMoved = false;
+                return 0;
             }
             break;
     }
@@ -1558,22 +4004,19 @@ static void AppendTocSiblingList(TocItem*& resultFirst, TocItem*& resultLast, To
     }
 }
 
-// Recursively build a filtered copy of the TocItem tree.
-// Multi-word filter (command palette style): every word must appear in the
-// item's own title to keep that node. Non-matching ancestors are omitted and
-// matching descendants are promoted so only fully-matching rows are shown.
-// Returns nullptr if nothing matches.
-static TocItem* FilterTocItemRec(TocItem* item, const StrVec& words) {
-    if (!item) {
-        return nullptr;
-    }
+// Search results are deliberately flat: only leaves are actionable results,
+// and a match can come from either the leaf title or its immediate parent.
+static TocItem* FilterTocLeaves(TocItem* item, const StrVec& words) {
     TocItem* resultFirst = nullptr;
     TocItem* resultLast = nullptr;
     for (TocItem* si = item; si; si = si->next) {
-        TocItem* filteredChildren = FilterTocItemRec(si->child, words);
+        if (si->child) {
+            AppendTocSiblingList(resultFirst, resultLast, FilterTocLeaves(si->child, words));
+            continue;
+        }
         bool titleMatches = si->title && FilterMatches(si->title, words);
-        if (titleMatches) {
-            // keep this node; only fully-matching children stay nested under it
+        bool parentMatches = si->parent && si->parent->title && FilterMatches(si->parent->title, words);
+        if (titleMatches || parentMatches) {
             auto* copy = AllocTocItem(nullptr, si->title, si->pageNo);
             copy->id = si->id;
             copy->fontFlags = si->fontFlags;
@@ -1582,17 +4025,7 @@ static TocItem* FilterTocItemRec(TocItem* item, const StrVec& words) {
             copy->destNotOwned = true;
             copy->isOpenDefault = true;
             copy->isOpenToggled = false;
-            copy->child = filteredChildren;
-            for (TocItem* c = copy->child; c; c = c->next) {
-                c->parent = copy;
-            }
             AppendTocSiblingList(resultFirst, resultLast, copy);
-        } else if (filteredChildren) {
-            // title does not match every word: drop this node, promote children
-            for (TocItem* c = filteredChildren; c; c = c->next) {
-                c->parent = nullptr;
-            }
-            AppendTocSiblingList(resultFirst, resultLast, filteredChildren);
         }
     }
     return resultFirst;
@@ -1619,14 +4052,18 @@ static void ApplyTocFilter(MainWindow* win, Str filter) {
     }
     if (len(words) == 0) {
         // restore original tree
+        TreeView_SetItemHeight(treeView->hwnd, DpiScale(treeView->hwnd, TocTreeRowDy(win)));
         SetInitialExpandState(origTree->root, tab->tocState);
         treeView->SetTreeModel(origTree);
+        HwndInvalidate(win->hwndTocBox, false);
         return;
     }
 
-    TocItem* filteredItems = FilterTocItemRec(origTree->root, words);
+    TreeView_SetItemHeight(treeView->hwnd, DpiScale(treeView->hwnd, 52));
+    TocItem* filteredItems = FilterTocLeaves(origTree->root, words);
     if (!filteredItems) {
         treeView->Clear();
+        HwndInvalidate(win->hwndTocBox, false);
         return;
     }
     // TreeView populates Root()'s children only (the root itself is invisible).
@@ -1640,6 +4077,7 @@ static void ApplyTocFilter(MainWindow* win, Str filter) {
     auto* filteredTree = new TocTree(wrapRoot);
     win->tocFilteredTree = filteredTree;
     treeView->SetTreeModel(filteredTree);
+    HwndInvalidate(win->hwndTocBox, false);
 }
 
 void TocFilterChanged(MainWindow* win) {
@@ -1652,12 +4090,47 @@ void TocFilterChanged(MainWindow* win) {
 }
 
 static void OnTocFilterTextChanged(MainWindow* win) {
+    if (IsTouchChrome(win)) {
+        Str* savedQuery = TouchPanelSearchQuery(win, win->touchPanelMode);
+        if (savedQuery) {
+            str::ReplaceWithCopy(savedQuery, win->tocFilterEdit->GetTextTemp());
+        }
+        // the edit repaints its own text without WM_PAINT; the themed cue
+        // (WndProcTocFilterEdit) needs one when it empties
+        HwndInvalidate(win->tocFilterEdit->hwnd, false);
+    }
+    if (IsTouchChrome(win) && win->touchPanelMode == TouchPanelMode::Search) {
+        TempStr text = win->tocFilterEdit->GetTextTemp();
+        win->touchFindCurrent = -1; // a new query, a new list
+        EnsureTouchWordIndex(win);
+        UpdateTouchSuggestions(win);
+        if (text) {
+            SearchDocumentFromTouchPanel(win, text);
+        } else {
+            AbortFinding(win, true);
+            ClearSearchResult(win);
+        }
+        HwndInvalidate(win->hwndTocBox, false);
+        return;
+    }
     TocFilterChanged(win);
 }
 
 static LRESULT CALLBACK WndProcTocFilterEdit(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR /*subclassId*/,
                                              DWORD_PTR data) {
     MainWindow* win = (MainWindow*)data;
+    if (msg == WM_LBUTTONDOWN) {
+        CloseTouchDocumentOverlays(win);
+    }
+    if (msg == WM_PAINT && win && IsTouchChrome(win)) {
+        // the cue in the theme's muted color, not the native gray banner
+        LRESULT res = DefSubclassProc(hwnd, msg, wp, lp);
+        EditPaintThemedCue(hwnd, TouchPanelFilterCue(win), ThemeWindowDarkerTextColor());
+        return res;
+    }
+    if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS) {
+        HwndInvalidate(hwnd, false);
+    }
     if (msg == WM_KEYDOWN) {
         if (wp == VK_DOWN) {
             // move into the tree: first top-level bookmark
@@ -1694,9 +4167,144 @@ static LRESULT CALLBACK WndProcTocFilterEdit(HWND hwnd, UINT msg, WPARAM wp, LPA
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
+static TempStr TocStickyBreadcrumbTemp(MainWindow* win);
+
+static void UpdateTocStickyHeader(MainWindow* win) {
+    if (!win || !win->hwndTocSticky || !win->tocTreeView || !HwndIsVisible(win->tocTreeView->hwnd) ||
+        win->touchPanelMode != TouchPanelMode::Bookmarks || HasTocFilter(win)) {
+        if (win && win->hwndTocSticky) {
+            HwndHide(win->hwndTocSticky);
+            str::FreePtr(&win->tocStickyText);
+        }
+        return;
+    }
+    TempStr breadcrumb = TocStickyBreadcrumbTemp(win);
+    if (len(breadcrumb) == 0) {
+        str::FreePtr(&win->tocStickyText);
+        HwndShow(win->hwndTocSticky);
+        HwndInvalidate(win->hwndTocSticky, false);
+        return;
+    }
+    if (!str::Eq(win->tocStickyText, breadcrumb)) {
+        str::ReplaceWithCopy(&win->tocStickyText, breadcrumb);
+        HwndInvalidate(win->hwndTocSticky, true);
+    }
+    HwndShow(win->hwndTocSticky);
+}
+
+static TempStr TocStickyBreadcrumbTemp(MainWindow* win) {
+    if (!win || !win->tocTreeView) {
+        return str::DupTemp("");
+    }
+    HWND tree = win->tocTreeView->hwnd;
+    HTREEITEM first = TreeView_GetNextItem(tree, nullptr, TVGN_FIRSTVISIBLE);
+    if (!first) {
+        return str::DupTemp("");
+    }
+    RECT firstRect{};
+    TreeView_GetItemRect(tree, first, &firstRect, FALSE);
+    HTREEITEM deepestStuck = firstRect.top < 0 ? first : TreeView_GetParent(tree, first);
+    TocItem* chain[64]{};
+    int count = 0;
+    for (HTREEITEM handle = deepestStuck; handle && count < dimofi(chain); handle = TreeView_GetParent(tree, handle)) {
+        TocItem* item = (TocItem*)win->tocTreeView->GetTreeItemByHandle(handle);
+        if (item && item->title) {
+            chain[count++] = item;
+        }
+    }
+    if (count == 0) {
+        return str::DupTemp("");
+    }
+    Str root = chain[count - 1]->title;
+    if (count == 1) {
+        return str::DupTemp(root);
+    }
+
+    // The sticky label identifies the document's current top-level section,
+    // not every nested group above the first visible row. Prefer the complete
+    // root + section breadcrumb, but shorten the root before sacrificing the
+    // section name. A character-count cutoff truncated proportional fonts far
+    // too early and could reduce "OCTOECHOS › Third Mode" to a deeper group.
+    Str section = chain[count - 2]->title;
+    TempStr full = fmt("%s › %s", root, section);
+    Rect rc = HwndClientRect(win->hwndTocSticky);
+    int maxDx = std::max(0, rc.dx - DpiScale(win->hwndTocSticky, 28));
+    HDC hdc = GetDC(win->hwndTocSticky);
+    HFONT font = HdcGetUiFont(hdc, kFontSizeMeta, FW_MEDIUM);
+    int fullDx = HdcMeasureText(hdc, full, font).dx;
+    ReleaseDC(win->hwndTocSticky, hdc);
+    if (fullDx <= maxDx) {
+        return str::DupTemp(full);
+    }
+    return fmt("… › %s", section);
+}
+
+static LRESULT CALLBACK WndProcTocSticky(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) {
+    MainWindow* win = (MainWindow*)data;
+    if (msg == WM_ERASEBKGND) {
+        return TRUE;
+    }
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        Rect rc = HwndClientRect(hwnd);
+        HdcFillRect(hdc, rc, ThemeHotBackgroundColor());
+        Str label = win ? win->tocStickyText : Str{};
+        if (len(label) > 0) {
+            Rect text = rc;
+            text.Inflate(-DpiScale(hwnd, 14), 0);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            HdcDrawText(hdc, label, text, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+                        HdcGetUiFont(hdc, kFontSizeMeta, FW_MEDIUM));
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+static LRESULT CALLBACK WndProcTocTreeStickyTracker(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
+                                                    DWORD_PTR data) {
+    LRESULT result = DefSubclassProc(hwnd, msg, wp, lp);
+    MainWindow* win = (MainWindow*)data;
+    if (msg == WM_LBUTTONDOWN) {
+        CloseTouchDocumentOverlays(win);
+    }
+    if (msg == WM_PAINT && win) {
+        // Two empty states share the tree's blank area: a filter that matched
+        // nothing, and (touch pane only, since it stays open for every
+        // document) a document that has no bookmarks at all.
+        TempStr empty = nullptr;
+        WindowTab* tab = win->CurrentTab();
+        if (HasTocFilter(win) && !win->tocFilteredTree) {
+            TempStr query = win->tocFilterEdit ? win->tocFilterEdit->GetTextTemp() : TempStr{};
+            empty = fmt("No bookmarks match \"%s\"", query);
+        } else if (IsTouchChrome(win) && !HasTocFilter(win) && tab && !tab->currToc && win->IsDocLoaded()) {
+            empty = str::DupTemp("This document has no bookmarks");
+        }
+        HDC hdc = empty ? GetDC(hwnd) : nullptr;
+        if (hdc) {
+            Rect text = HwndClientRect(hwnd);
+            text.y += DpiScale(hwnd, 40);
+            text.dy = DpiScale(hwnd, 80);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, ThemeWindowDarkerTextColor());
+            HdcDrawText(hdc, empty, text, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+                        HdcGetUiFont(hdc, kFontSizeLabel));
+            ReleaseDC(hwnd, hdc);
+        }
+    }
+    if (msg == WM_PAINT || msg == WM_VSCROLL || msg == WM_MOUSEWHEEL || msg == WM_GESTURE || msg == WM_KEYUP ||
+        msg == WM_SIZE || msg == TVM_EXPAND || msg == TVM_ENSUREVISIBLE || msg == TVM_SELECTITEM) {
+        UpdateTocStickyHeader(win);
+    }
+    return result;
+}
+
 void CreateToc(MainWindow* win) {
     HMODULE hmod = GetModuleHandle(nullptr);
-    int dx = gGlobalPrefs->sidebarDx;
+    int dx = IsTouchChrome(win) ? DpiScale(win->hwndFrame, kPanelDx) : gGlobalPrefs->sidebarDx;
     DWORD style = WS_CHILD | WS_CLIPCHILDREN;
     HWND parent = win->hwndFrame;
     win->hwndTocBox = CreateWindowExW(0, WC_STATIC, L"", style, 0, 0, dx, 0, parent, nullptr, hmod, nullptr);
@@ -1711,7 +4319,11 @@ void CreateToc(MainWindow* win) {
         l->Create(args);
     }
     win->tocLabelWithClose = l;
-    l->SetPaddingXY(2, 2);
+    // The rail toggles the panel, so the header's close X is redundant - and a
+    // hairline system glyph among custom-drawn controls. 4a's header is just
+    // the title; drop the X under the touch chrome.
+    l->showClose = !gGlobalPrefs->touchChrome;
+    l->SetPaddingXY(gGlobalPrefs->touchChrome ? 16 : 2, gGlobalPrefs->touchChrome ? 19 : 2);
     // label is set in UpdateToolbarSidebarText()
 
     auto* filterEdit = new Edit();
@@ -1719,13 +4331,22 @@ void CreateToc(MainWindow* win) {
         Edit::CreateArgs eargs;
         eargs.parent = win->hwndTocBox;
         eargs.withBorder = false;
-        // underline so the filter field is visible on flat sidebar backgrounds
-        eargs.withBottomBorder = true;
-        eargs.cueText = _TRA("Search Bookmarks");
+        // underline so the filter field is visible on flat sidebar backgrounds.
+        // The redesigned panel draws a pill behind it instead (WndProcTocBox).
+        eargs.withBottomBorder = !gGlobalPrefs->touchChrome;
+        // the touch chrome paints its own themed cue (WndProcTocFilterEdit)
+        eargs.cueText = gGlobalPrefs->touchChrome ? Str{} : _TRA("Search Bookmarks");
         eargs.font = GetAppFont(win->hwndFrame);
         filterEdit->Create(eargs);
     }
     win->tocFilterEdit = filterEdit;
+    if (gGlobalPrefs->touchChrome) {
+        // The edit is placed inside the pill drawn behind it (WndProcTocBox),
+        // to the right of the magnifier and short of the clear button, so it
+        // needs no horizontal inset of its own; the vertical ones center the
+        // text in the 28px it gets
+        filterEdit->SetInsetsPt(12, 2, 12, 2);
+    }
     filterEdit->onTextChanged = MkFunc0(OnTocFilterTextChanged, win);
     SetWindowSubclass(filterEdit->hwnd, WndProcTocFilterEdit, NextSubclassId(), (DWORD_PTR)win);
 
@@ -1736,6 +4357,14 @@ void CreateToc(MainWindow* win) {
     args.fullRowSelect = true;
     args.exStyle = 0;
     args.isRtl = IsUIRtl();
+    if (gGlobalPrefs->touchChrome) {
+        args.itemDy = TouchSidebarRowDy();
+        // 4a indents each level by its chevron column + gap, so a leaf sits
+        // clear of its parent's disclosure. The stock indent is too tight.
+        args.indentDx = kPanelIndentDx;
+        // draw 4a's own chevron glyph instead of the system +/-
+        args.noSystemButtons = true;
+    }
 
     auto fn = MkFunc1Void(TocContextMenu);
     treeView->onContextMenu = fn;
@@ -1747,6 +4376,10 @@ void CreateToc(MainWindow* win) {
     treeView->Create(args);
     ReportIf(!treeView->hwnd);
     win->tocTreeView = treeView;
+    win->hwndTocSticky = CreateWindowExW(0, WC_STATIC, L"", WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0, win->hwndTocBox,
+                                         nullptr, hmod, nullptr);
+    SetWindowSubclass(win->hwndTocSticky, WndProcTocSticky, NextSubclassId(), (DWORD_PTR)win);
+    SetWindowSubclass(treeView->hwnd, WndProcTocTreeStickyTracker, NextSubclassId(), (DWORD_PTR)win);
 
     // stack label, filter edit and tree vertically; the tree flexes to fill the
     // remaining height. The VBox owns these controls/spacer (freed in ~MainWindow).

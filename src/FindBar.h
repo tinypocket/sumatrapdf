@@ -11,6 +11,7 @@ void DeleteFindBar(MainWindow* win);
 void RecreateFindBar(MainWindow* win);
 void ShowFindBar(MainWindow* win);
 void HideFindBar(MainWindow* win);
+void HideFindBarForDocumentChange(MainWindow* win);
 bool IsFindBarVisible(MainWindow* win);
 // true if either the compact bar or the floating find window is visible
 bool IsFindUIVisible(MainWindow* win);
