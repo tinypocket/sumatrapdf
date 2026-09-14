@@ -1241,6 +1241,30 @@ void WebviewWnd::FailInit() {
     HwndDestroyWindowSafe(&hwnd);
 }
 
+void WebviewWnd::SetBackgroundColor(COLORREF col) {
+    backgroundColor = col;
+    ApplyBackgroundColor();
+}
+
+void WebviewWnd::ApplyBackgroundColor() {
+    if (!controller) {
+        return; // OnControllerReady applies it
+    }
+    ICoreWebView2Controller2* controller2 = nullptr;
+    HRESULT hr = controller->QueryInterface(IID_PPV_ARGS(&controller2));
+    if (FAILED(hr) || !controller2) {
+        return;
+    }
+    // {A, R, G, B}
+    COREWEBVIEW2_COLOR bg{0, 0, 0, 0};
+    if (opaqueBackground) {
+        COLORREF c = backgroundColor == kColorUnset ? RGB(255, 255, 255) : backgroundColor;
+        bg = COREWEBVIEW2_COLOR{255, GetRValue(c), GetGValue(c), GetBValue(c)};
+    }
+    controller2->put_DefaultBackgroundColor(bg);
+    controller2->Release();
+}
+
 void WebviewWnd::SetControllerVisible(bool visible) {
     if (visible == isVisible) {
         if ((visible && !isSuspended) || (!visible && isSuspended)) {
@@ -1293,15 +1317,7 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
     isVisible = false;
     controller->put_IsVisible(FALSE);
 
-    ICoreWebView2Controller2* controller2 = nullptr;
-    HRESULT bgHr = controller->QueryInterface(IID_PPV_ARGS(&controller2));
-    if (SUCCEEDED(bgHr) && controller2) {
-        // {A, R, G, B}
-        COREWEBVIEW2_COLOR bg =
-            opaqueBackground ? COREWEBVIEW2_COLOR{255, 255, 255, 255} : COREWEBVIEW2_COLOR{0, 0, 0, 0};
-        controller2->put_DefaultBackgroundColor(bg);
-        controller2->Release();
-    }
+    ApplyBackgroundColor();
 
     if (!allowExternalDrop) {
         ICoreWebView2Controller4* controller4 = nullptr;
@@ -2308,6 +2324,8 @@ void WebviewWnd::FailInit() {}
 void WebviewWnd::QueuePendingOp(PendingWebViewOp::Kind, Str, int) {}
 void WebviewWnd::FlushPendingOps() {}
 void WebviewWnd::SetControllerVisible(bool) {}
+void WebviewWnd::SetBackgroundColor(COLORREF) {}
+void WebviewWnd::ApplyBackgroundColor() {}
 void WebviewWnd::OnBrowserMessage(Str) {}
 LRESULT WebviewWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     return WndProcDefault(hwnd, msg, wparam, lparam);

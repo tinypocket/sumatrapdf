@@ -244,6 +244,9 @@ struct MainWindow {
 
     // whether the current tab's ToC has been loaded into the tree
     bool tocLoaded = false;
+    // the bookmarks tree is in its smaller font (the pane is narrow, see
+    // TouchSidebarCompactDx)
+    bool tocCompact = false;
     // whether the ToC sidebar is currently visible
     // set to temporarily disable UpdateTocSelection
     bool tocKeepSelection = false;

@@ -156,6 +156,11 @@ TouchChrome = true
 ; (introduced in version 3.8)
 TouchSidebarDensity = normal
 
+; below this width (in pixels at 100% scaling) the touch sidebar's bookmarks use
+; a smaller font and shorter rows, so more of each title fits; 0 turns it off
+; (introduced in version 3.8)
+TouchSidebarCompactDx = 300
+
 ; touch chrome: whether the side pane (Bookmarks, Search, ...) is open while
 ; reading. Set when the user opens or closes the pane and applies to every
 ; document, rather than per file or only when a document has bookmarks

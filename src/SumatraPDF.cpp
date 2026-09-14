@@ -2092,13 +2092,11 @@ static void UpdateUiForCurrentTab(MainWindow* win) {
     UpdateTopBarForWindow(win);
 }
 
-// Whether the sidebar opens for this tab outside presentation mode. The
-// classic chrome remembers it per document (WindowTab::showToc, from
-// FileState); the touch pane is one setting for every document.
+// Whether the sidebar opens for this tab outside presentation mode: each tab
+// remembers it (WindowTab::showToc, saved with the file's FileState), so the
+// pane comes and goes as you switch between documents.
 static bool TabShowToc(MainWindow* win, WindowTab* tab) {
-    if (IsTouchChrome(win)) {
-        return gGlobalPrefs->touchSidebarOpen;
-    }
+    (void)win;
     return tab && tab->showToc;
 }
 
@@ -2193,10 +2191,10 @@ static void ReplaceDocumentInCurrentTab(LoadArgs* args, DocController* ctrl, Fil
         }
     }
     if (IsTouchChrome(win) && !win->presentation) {
-        // the touch pane is the user's setting, not the file's: whether this
-        // document has bookmarks, or was last seen with the pane open, does not
-        // decide it (see SetTouchSidebarCollapsed)
-        showToc = gGlobalPrefs->touchSidebarOpen;
+        // A document opened before comes back with the pane the way it was
+        // left (fs->showToc). A new one opens the way the pane was last left
+        // (TouchSidebarOpen): never popped open just because it has bookmarks.
+        showToc = fs ? fs->showToc : gGlobalPrefs->touchSidebarOpen;
     }
 
     AbortFinding(args->win, true);
@@ -4267,6 +4265,8 @@ void UpdateDocumentColors() {
             if (win->hwndTocBox) {
                 HwndInvalidate(win->hwndTocBox, false);
             }
+            // and the in-app browser's pages
+            TouchBrowserApplyNightLight(win);
         }
     }
 
@@ -6898,6 +6898,8 @@ static void ApplySidebarDpiFonts(MainWindow* win, int dpi) {
 
     if (win->tocTreeView && win->tocTreeView->hwnd) {
         HwndSetTreeFontForDpi(win->tocTreeView->hwnd, treeFont, dpi);
+        // back to its smaller size if the pane is narrow
+        UpdateTocCompact(win, true);
     }
     if (win->favTreeView && win->favTreeView->hwnd) {
         HwndSetTreeFontForDpi(win->favTreeView->hwnd, treeFont, dpi);
@@ -9968,7 +9970,7 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             for (MainWindow* w : gWindows) {
                 if (w->tocTreeView) {
                     TempStr filter = w->tocFilterEdit ? HwndGetTextTemp(w->tocFilterEdit->hwnd) : TempStr{};
-                    int rowDy = filter ? 52 : TouchSidebarRowDy();
+                    int rowDy = filter ? 52 : TocTreeRowDy(w);
                     TreeView_SetItemHeight(w->tocTreeView->hwnd, DpiScale(w->tocTreeView->hwnd, rowDy));
                 }
                 if (w->hwndTocBox) {

@@ -957,6 +957,12 @@ const globalPrefs: Field[] = [
     'vertical spacing for touch sidebar rows: "condensed", "normal", or "expanded"',
   ).ver("3.8"),
   field(
+    "TouchSidebarCompactDx",
+    Int,
+    300,
+    "below this width (in pixels at 100% scaling) the touch sidebar's bookmarks use a smaller font and shorter rows, so more of each title fits; 0 turns it off",
+  ).ver("3.8"),
+  field(
     "TouchSidebarOpen",
     Bool,
     false,

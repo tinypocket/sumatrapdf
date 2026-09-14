@@ -74,6 +74,42 @@ static int TouchSidebarListRowDy() {
     return TouchSidebarRowDy() + 6;
 }
 
+// Dragged narrow, the bookmarks pane takes a smaller font and shorter rows so
+// more of each title fits (TouchSidebarCompactDx, in pixels at 100%; 0 never).
+static bool TocWantsCompact(MainWindow* win) {
+    int limit = gGlobalPrefs->touchSidebarCompactDx;
+    if (!IsTouchChrome(win) || limit <= 0 || !win->hwndTocBox) {
+        return false;
+    }
+    int dx = HwndClientRect(win->hwndTocBox).dx;
+    return dx > 0 && dx < DpiScale(win->hwndTocBox, limit);
+}
+
+// the bookmarks tree's row height, compact or not
+int TocTreeRowDy(MainWindow* win) {
+    int dy = TouchSidebarRowDy();
+    return win && win->tocCompact ? std::max(26, dy * 4 / 5) : dy;
+}
+
+// puts the tree in (or out of) its compact size when the pane's width crosses
+// the limit; force re-applies it (the DPI changed, say, and reset the rows).
+// Only the rows and the titles drawn in them shrink (see
+// DrawTocItemPostPaint): the tree's own font decides the area each row may
+// draw in, and made smaller it cut the page numbers off.
+void UpdateTocCompact(MainWindow* win, bool force) {
+    TreeView* tv = win ? win->tocTreeView : nullptr;
+    if (!tv || !tv->hwnd || !IsTouchChrome(win)) {
+        return;
+    }
+    bool compact = TocWantsCompact(win);
+    if (compact == win->tocCompact && !force) {
+        return;
+    }
+    win->tocCompact = compact;
+    TreeView_SetItemHeight(tv->hwnd, DpiScale(tv->hwnd, TocTreeRowDy(win)));
+    HwndInvalidate(tv->hwnd, false);
+}
+
 static int TouchSearchResultRowDy() {
     // Search results always need room for both their page label and snippet.
     // Bookmark density preferences must not compress this two-line card.
@@ -1562,6 +1598,10 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     if (TocUsesRedesignedRows(win)) {
         int depth = TocItemDepth(tocItem);
         int size = depth == 0 ? 14 : (depth == 1 ? 13 : (depth == 2 ? 12 : 13));
+        // a size down while the pane is narrow (see UpdateTocCompact)
+        if (win->tocCompact) {
+            size -= 2;
+        }
         int weight = depth == 0 ? FW_SEMIBOLD : FW_MEDIUM;
         font = HdcGetUiFont(hdc, size, weight);
         SelectObject(hdc, font);
@@ -1858,6 +1898,7 @@ static void LayoutTocContainer(MainWindow* win) {
     }
     Rect rc = HwndWindowRect(win->hwndTocBox);
     if (IsTouchChrome(win)) {
+        UpdateTocCompact(win, false);
         int headerDy = DpiScale(win->hwndTocBox, kPanelHeaderDy);
         int filterDy = DpiScale(win->hwndTocBox, kPanelFilterDy);
         // the same field recipe as the Library's search pill: 40px pill, its
@@ -4011,7 +4052,7 @@ static void ApplyTocFilter(MainWindow* win, Str filter) {
     }
     if (len(words) == 0) {
         // restore original tree
-        TreeView_SetItemHeight(treeView->hwnd, DpiScale(treeView->hwnd, TouchSidebarRowDy()));
+        TreeView_SetItemHeight(treeView->hwnd, DpiScale(treeView->hwnd, TocTreeRowDy(win)));
         SetInitialExpandState(origTree->root, tab->tocState);
         treeView->SetTreeModel(origTree);
         HwndInvalidate(win->hwndTocBox, false);

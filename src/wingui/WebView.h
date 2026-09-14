@@ -110,6 +110,9 @@ struct WebviewWnd : Wnd {
     HWND Create(const CreateWebViewArgs&);
 
     void Eval(Str js);
+    // the color a page with no background of its own is shown on (opaque
+    // webviews only); kColorUnset for white
+    void SetBackgroundColor(COLORREF col);
     void SetHtml(Str html);
     void Init(Str js);
     int AddInitScript(Str js);
@@ -157,6 +160,7 @@ struct WebviewWnd : Wnd {
     void QueuePendingOp(PendingWebViewOp::Kind kind, Str text, int token = 0);
     void FlushPendingOps();
     void SetControllerVisible(bool visible);
+    void ApplyBackgroundColor();
 
     virtual void OnBrowserMessage(Str msg);
 
@@ -205,6 +209,9 @@ struct WebviewWnd : Wnd {
     // empty page a site sent back after a sign-in - otherwise showed whatever
     // was on screen behind the control: the Library, in the in-app browser.
     bool opaqueBackground = false;
+    // with opaqueBackground, the color instead of white (the in-app browser's
+    // night light); change it with SetBackgroundColor
+    COLORREF backgroundColor = kColorUnset;
     // when false, WebView2 won't claim external (file) drops, so they fall
     // through to the host window's drop target (e.g. to open the file)
     bool allowExternalDrop = true;

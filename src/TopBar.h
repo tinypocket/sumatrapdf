@@ -29,3 +29,6 @@ void ShowTouchDocumentPreview(MainWindow*, HWND anchorHwnd, Rect anchorRect);
 void HoverTouchDocumentPreview(MainWindow*, HWND anchorHwnd, Rect anchorRect, bool isOver);
 void CloseTouchDocumentPreview(MainWindow*);
 void CloseTouchDocumentOverlays(MainWindow*, bool commitEdits = true);
+// the night light panel (a switch and a strength slider), under a button given
+// in screen coordinates; the in-app browser's "..." menu opens it too
+void ShowTouchNightLight(MainWindow*, Rect anchorScreen);

@@ -35,6 +35,8 @@
 
 #include "SimpleBrowserWindow.h"
 #include "Toolbar.h"
+#include "TopBar.h"
+#include "base/Pixmap.h"
 
 constexpr int kNavRowPadding = 6;
 constexpr int kNavBtnGap = 4;
@@ -482,6 +484,9 @@ struct TbTab {
     // back to the document can't put us in a takeover loop
     Str lastTakeoverUrl;
     double lastTakeoverMs = 0.0;
+    // the webview's init script that tints each new page with the night
+    // light; 0 while it is off (see TbApplyNightLight)
+    int nightLightScript = 0;
 };
 
 struct TouchBrowser {
@@ -2321,6 +2326,8 @@ constexpr int kTbCmdManageFavs = 1;
 constexpr int kTbCmdSetHome = 2;
 constexpr int kTbCmdCleanup = 3;
 constexpr int kTbCmdInfo = 4;
+// the same setting, and the same panel, as the document's ... menu
+constexpr int kTbCmdNightLight = 5;
 
 struct TbMenuItemDef {
     const char* label; // nullptr = separator
@@ -2333,6 +2340,8 @@ static const TbMenuItemDef gTbMenuItems[] = {
     {nullptr, kTbCmdNone},
     {"Clean up downloaded files...", kTbCmdCleanup},
     {"Where do downloads go?", kTbCmdInfo},
+    {nullptr, kTbCmdNone},
+    {"Night light...", kTbCmdNightLight},
 };
 constexpr int kTbMenuItemCount = (int)dimof(gTbMenuItems);
 
@@ -2365,6 +2374,9 @@ static void TbRunMenuCmd(TbMenuCmdReq* req) {
             break;
         case kTbCmdInfo:
             TbOnInfo(tb);
+            break;
+        case kTbCmdNightLight:
+            ShowTouchNightLight(win, TbMenuAnchorScreenRect(tb));
             break;
         default:
             break;
@@ -2522,6 +2534,12 @@ void TbMenuWnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
         HdcDrawText(hdc, Str(gTbMenuItems[i].label), text,
                     DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX,
                     HdcGetUiFont(hdc, kTbFontMenu, FW_MEDIUM));
+        // ticked while it is on, as in the document's menu
+        if (gTbMenuItems[i].cmd == kTbCmdNightLight && gGlobalPrefs->nightLight) {
+            SetTextColor(hdc, ThemeWindowLinkColor());
+            HdcDrawText(hdc, StrL("\xE2\x9C\x93"), text, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX,
+                        HdcGetUiFont(hdc, kTbFontMenu, FW_SEMIBOLD));
+        }
     }
 }
 
@@ -4018,6 +4036,89 @@ static void TbCloseTab(TbTab* t) {
 
 static bool TbProcessFailed(void* ctx, WebViewProcessFailure kind);
 
+// --- night light --------------------------------------------------------------
+// The document's night light (the ... menu's panel, same setting) tints web
+// pages too: the same multiply as the pages' (red kept, green a little down,
+// blue well down - WarmColor), as an SVG color matrix filter on the page's
+// root element. The filter is built with DOM calls and the CSSOM only: a
+// site's Content-Security-Policy or Trusted Types would block an inline
+// <style>, a style attribute or innerHTML. Frames are left to the top page,
+// whose filter covers them already. Called with 1 1 it takes the filter off.
+static const char kTbNightLightJs[] = R"JS((function (g, b) {
+  if (window !== window.top) return;
+  var apply = function () {
+    var d = document, root = d.documentElement;
+    if (!root) return;
+    var svg = d.getElementById('__sumatra_nl_svg');
+    if (g >= 1 && b >= 1) {
+      root.style.removeProperty('filter');
+      if (svg) svg.remove();
+      return;
+    }
+    var ns = 'http://www.w3.org/2000/svg';
+    if (!svg) {
+      svg = d.createElementNS(ns, 'svg');
+      svg.id = '__sumatra_nl_svg';
+      svg.setAttribute('aria-hidden', 'true');
+      svg.setAttribute('width', '0');
+      svg.setAttribute('height', '0');
+      svg.style.position = 'absolute';
+      svg.style.pointerEvents = 'none';
+      var filter = d.createElementNS(ns, 'filter');
+      filter.id = '__sumatra_nl';
+      filter.setAttribute('color-interpolation-filters', 'sRGB');
+      filter.appendChild(d.createElementNS(ns, 'feColorMatrix'));
+      svg.appendChild(filter);
+    }
+    if (!svg.isConnected) (d.body || root).appendChild(svg);
+    var m = svg.querySelector('feColorMatrix');
+    m.setAttribute('type', 'matrix');
+    m.setAttribute('values', '1 0 0 0 0  0 ' + g + ' 0 0 0  0 0 ' + b + ' 0 0  0 0 0 1 0');
+    root.style.setProperty('filter', 'url(#__sumatra_nl)', 'important');
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', apply);
+  else apply();
+}))JS";
+
+static int TbNightLightStrength() {
+    return gGlobalPrefs->nightLight ? std::clamp(gGlobalPrefs->nightLightStrength, 0, 100) : 0;
+}
+
+static TempStr TbNightLightJsTemp(int strength) {
+    COLORREF warm = WarmColor(RGB(255, 255, 255), strength);
+    TempStr args = fmt("(%.3f, %.3f);", GetGValue(warm) / 255.0, GetBValue(warm) / 255.0);
+    return str::JoinTemp(StrL(kTbNightLightJs), args);
+}
+
+// the tint for the page on screen now and for every page the tab opens later
+static void TbApplyNightLight(TbTab* t) {
+    WebviewWnd* wv = t->webView;
+    if (!wv) {
+        return;
+    }
+    int strength = TbNightLightStrength();
+    // what shows behind a page with no background of its own: warm paper too
+    wv->SetBackgroundColor(strength > 0 ? WarmColor(RGB(255, 255, 255), strength) : kColorUnset);
+    if (t->nightLightScript) {
+        wv->RemoveInitScript(t->nightLightScript);
+        t->nightLightScript = 0;
+    }
+    TempStr js = TbNightLightJsTemp(strength);
+    if (strength > 0) {
+        t->nightLightScript = wv->AddInitScript(js);
+    }
+    wv->Eval(js);
+}
+
+void TouchBrowserApplyNightLight(MainWindow* win) {
+    if (!win || !win->touchBrowser) {
+        return;
+    }
+    for (TbTab* t : win->touchBrowser->tabs) {
+        TbApplyNightLight(t);
+    }
+}
+
 // A tab's webview. Like SimpleBrowserWindow the control is created at a real
 // size (not 0x0); its first Navigate waits for LayoutTouchWebView (see
 // TbTab::pendingUrl).
@@ -4062,6 +4163,9 @@ static TbTab* TbCreateTab(TouchBrowser* tb, Str url) {
     t->tb = tb;
     t->pendingUrl = str::Dup(url);
     t->webView = TbCreateWebView(t);
+    if (TbNightLightStrength() > 0) {
+        TbApplyNightLight(t);
+    }
     tb->tabs.Append(t);
     TbRedrawChrome(tb);
     return t;
@@ -4099,6 +4203,10 @@ static void TbRebuildNow(TbRebuildReq* req) {
         str::ReplaceWithCopy(&t->pendingUrl, url);
         delete t->webView;
         t->webView = TbCreateWebView(t);
+        t->nightLightScript = 0; // went with the old control
+        if (TbNightLightStrength() > 0) {
+            TbApplyNightLight(t);
+        }
         t->didInitialNav = false;
         t->loading = false;
     }

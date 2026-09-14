@@ -288,11 +288,10 @@ void SetTouchSidebarCollapsed(MainWindow* win, bool collapsed) {
     win->touchSidebarCollapsed = collapsed;
     win->uiState.tocVisible = !collapsed;
     win->uiState.favVisible = false;
-    // The pane's state is the user's, not the document's: it is kept globally
-    // (TouchSidebarOpen) so the next document opens the way this one was left,
-    // and a document is never allowed to pop it open just because it has
-    // bookmarks. The tab mirrors it for the classic code paths that read
-    // showToc (fullscreen, tab switches, FileState).
+    // Each tab keeps its own (showToc, saved with the file), so the pane comes
+    // and goes as you switch documents. TouchSidebarOpen remembers the last
+    // one for documents opened for the first time, which is how those open -
+    // never popped open just because they have bookmarks.
     gGlobalPrefs->touchSidebarOpen = !collapsed;
     WindowTab* tab = win->CurrentTab();
     if (tab && !tab->IsAboutTab()) {
@@ -341,15 +340,12 @@ void SetTouchView(MainWindow* win, TouchView view) {
             win->touchView = previous;
             return;
         }
-        // The pane opens if the user left it open (TouchSidebarOpen), whatever
-        // the document: it is never forced open by a document's bookmarks, and
-        // never forced shut by their absence (Search and Thumbnails are useful
-        // without any).
-        bool showToc = gGlobalPrefs->touchSidebarOpen;
+        // The pane is the way this document's tab was left (each tab keeps its
+        // own, see SetTouchSidebarCollapsed): never forced open by a
+        // document's bookmarks, never forced shut by their absence (Search and
+        // Thumbnails are useful without any).
         WindowTab* docTab = win->CurrentTab();
-        if (docTab && !docTab->IsAboutTab()) {
-            docTab->showToc = showToc;
-        }
+        bool showToc = docTab && !docTab->IsAboutTab() ? docTab->showToc : gGlobalPrefs->touchSidebarOpen;
         win->uiState.tocVisible = showToc;
         win->touchSidebarCollapsed = !showToc;
         if (showToc) {
@@ -442,8 +438,8 @@ void SetTouchDocumentTab(MainWindow* win, int tabIndex) {
     }
     HomePageDestroySearch(win);
     win->touchView = TouchView::Doc;
-    // the pane keeps the state the user left it in (see SetTouchSidebarCollapsed)
-    bool showToc = gGlobalPrefs->touchSidebarOpen;
+    // the pane the way this tab was left (see SetTouchSidebarCollapsed)
+    bool showToc = tab->showToc;
     win->touchSidebarCollapsed = !showToc;
     TabsSelect(win, tabIndex);
     win->uiState.tocVisible = showToc;

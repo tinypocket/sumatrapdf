@@ -396,8 +396,8 @@ void SetTabState(WindowTab* tab, TabState* state) {
     }
 
     tab->tocState = *state->tocState;
-    SetSidebarVisibility(win, IsTouchChrome(win) ? gGlobalPrefs->touchSidebarOpen : state->showToc,
-                         gGlobalPrefs->showFavorites);
+    // each document's own (the touch pane is remembered per tab too)
+    SetSidebarVisibility(win, state->showToc, gGlobalPrefs->showFavorites);
 
     DisplayMode displayMode = DisplayModeFromString(state->displayMode, DisplayMode::Automatic);
     if (displayMode != DisplayMode::Automatic) {

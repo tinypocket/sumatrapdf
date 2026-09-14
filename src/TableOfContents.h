@@ -28,6 +28,9 @@ void FreeTouchWordIndex(MainWindow*);
 TempStr TouchSearchPanelQueryTemp(MainWindow*);
 void SetTouchPanelModeAndRestoreSearch(MainWindow*, TouchPanelMode);
 int TouchSidebarRowDy();
+// the bookmarks tree's row height, a size down while the pane is narrow
+int TocTreeRowDy(MainWindow*);
+void UpdateTocCompact(MainWindow*, bool force);
 
 // When true (default), the bookmarks pane highlights every TOC entry that
 // matches the current page (same page number as the best match, plus the

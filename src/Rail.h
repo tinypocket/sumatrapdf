@@ -28,3 +28,5 @@ void LayoutTouchWebView(MainWindow* win, Rect contentRc);
 void DestroyTouchWebView(MainWindow* win);
 void TouchWebGoHome(MainWindow* win);
 void TouchWebToggleBookmark(MainWindow* win);
+// the night light setting changed: re-tint every tab's page
+void TouchBrowserApplyNightLight(MainWindow* win);

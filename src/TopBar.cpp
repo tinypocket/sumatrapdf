@@ -284,6 +284,7 @@ struct TopBarWnd : Wnd {
     void AddCurrentPageBookmark();
     void ShowOverflowMenu(const Rect& anchor);
     void ShowNightLight(const Rect& anchor);
+    void ShowNightLightAtScreen(const Rect& anchorScreen);
     // rebuilds savedPages/savedPageNames from the document's stored favorites
     void RefreshSavedPages();
     Rect PreviewAnchorRect(const Rect& slotRect);
@@ -1244,10 +1245,10 @@ void TouchPreviewWnd::Show(HWND anchorHwnd, Rect anchorRect) {
     } else if (haveTabAligned) {
         x = tabAlignedX;
     }
-    // Never over the rail or the side pane, whichever button opened it: the
-    // tabs start above the rail, so lining up with them would put the strip on
-    // top of the pane while that is open.
-    if (owner && owner->win && owner->win->hwndCanvas) {
+    // With tabs, each card sits under its own tab, whichever button opened the
+    // strip, even if that puts it over the side pane. Without tabs there is
+    // nothing to line up with, so it keeps clear of the rail and the pane.
+    if (!haveTabAligned && owner && owner->win && owner->win->hwndCanvas) {
         int docLeft = HwndMapWindowPoint(owner->win->hwndCanvas, nullptr, {0, 0}).x;
         x = std::max(x, docLeft);
     }
@@ -1783,6 +1784,12 @@ LRESULT TouchBookmarkConfirmWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPA
 }
 
 void TopBarWnd::ShowNightLight(const Rect& anchor) {
+    ShowNightLightAtScreen(HwndMapRectToWindow(anchor, hwnd, HWND_DESKTOP));
+}
+
+// anchored under a button given in screen coordinates: the browser's "..."
+// opens the same panel as the top bar's
+void TopBarWnd::ShowNightLightAtScreen(const Rect& anchorScreen) {
     if (!nightLightWnd) {
         nightLightWnd = new TouchNightLightWnd();
         if (!nightLightWnd->Create(this)) {
@@ -1791,7 +1798,13 @@ void TopBarWnd::ShowNightLight(const Rect& anchor) {
             return;
         }
     }
-    nightLightWnd->Show(anchor);
+    nightLightWnd->Show(anchorScreen);
+}
+
+void ShowTouchNightLight(MainWindow* win, Rect anchorScreen) {
+    if (win && win->topBarWnd) {
+        win->topBarWnd->ShowNightLightAtScreen(anchorScreen);
+    }
 }
 
 constexpr UINT_PTR kNightLightApplyTimerId = 1;
@@ -1823,13 +1836,12 @@ bool TouchNightLightWnd::Create(TopBarWnd* bar) {
     return true;
 }
 
-// right-aligned under the overflow button it was opened from, and kept on the
-// monitor's work area
+// right-aligned under the overflow button it was opened from (in screen
+// coordinates), and kept on the monitor's work area
 void TouchNightLightWnd::Show(Rect anchorRect) {
     int dx = DpiScale(hwnd, 340);
     int dy = DpiScale(hwnd, 136);
-    Point anchor =
-        HwndMapWindowPoint(owner->hwnd, nullptr, {anchorRect.x + anchorRect.dx, anchorRect.y + anchorRect.dy});
+    Point anchor{anchorRect.x + anchorRect.dx, anchorRect.y + anchorRect.dy};
     int x = anchor.x - dx;
     int y = anchor.y + DpiScale(hwnd, 6);
     MONITORINFO mi{};
