@@ -70,8 +70,17 @@ int TouchSidebarRowDy() {
     return kPanelRowDy;
 }
 
-static int TouchSidebarListRowDy() {
-    return TouchSidebarRowDy() + 6;
+// the Favorites and attachments rows; shorter while the pane is narrow (see
+// TocWantsCompact)
+static int TouchSidebarListRowDy(MainWindow* win) {
+    int dy = TouchSidebarRowDy() + 6;
+    return win && win->tocCompact ? std::max(30, dy * 4 / 5) : dy;
+}
+
+// a font size, a size down while the pane is narrow: the same step the
+// bookmarks take (DrawTocItemPostPaint), for Search and Favorites
+static int PaneFontSize(MainWindow* win, int size) {
+    return win && win->tocCompact ? size - 2 : size;
 }
 
 // Dragged narrow, the bookmarks pane takes a smaller font and shorter rows so
@@ -108,12 +117,16 @@ void UpdateTocCompact(MainWindow* win, bool force) {
     win->tocCompact = compact;
     TreeView_SetItemHeight(tv->hwnd, DpiScale(tv->hwnd, TocTreeRowDy(win)));
     HwndInvalidate(tv->hwnd, false);
+    // Search and Favorites draw their own rows in the pane itself
+    HwndInvalidate(win->hwndTocBox, false);
 }
 
-static int TouchSearchResultRowDy() {
+static int TouchSearchResultRowDy(MainWindow* win) {
     // Search results always need room for both their page label and snippet.
-    // Bookmark density preferences must not compress this two-line card.
-    return std::max(TouchSidebarRowDy() + 18, 68);
+    // Bookmark density preferences must not compress this two-line card; the
+    // narrow pane's smaller type does, a little.
+    int dy = std::max(TouchSidebarRowDy() + 18, 68);
+    return win && win->tocCompact ? std::max(54, dy * 5 / 6) : dy;
 }
 
 // the rows of suggested words under the search field, while there are any:
@@ -132,7 +145,7 @@ static int TouchSearchResultsY(MainWindow* win) {
 }
 
 static Rect TouchSearchResultRect(MainWindow* win, int idx) {
-    int stride = DpiScale(win->hwndTocBox, TouchSearchResultRowDy());
+    int stride = DpiScale(win->hwndTocBox, TouchSearchResultRowDy(win));
     int gap = DpiScale(win->hwndTocBox, 8);
     Rect client = HwndClientRect(win->hwndTocBox);
     return Rect{DpiScale(win->hwndTocBox, 12), TouchSearchResultsY(win) + idx * stride + gap / 2,
@@ -2317,7 +2330,7 @@ static void ResetFavDrag() {
 
 // which flattened row a y lands on, or -1
 static int TouchFavRowAt(MainWindow* win, int y, int nRows) {
-    int rowDy = DpiScale(win->hwndTocBox, TouchSidebarListRowDy());
+    int rowDy = DpiScale(win->hwndTocBox, TouchSidebarListRowDy(win));
     int y0 = TouchFavRowsTop(win);
     if (rowDy <= 0 || y < y0) {
         return -1;
@@ -2493,18 +2506,19 @@ static int TouchPanelMaxScroll(MainWindow* win) {
         }
     } else if (win->touchPanelMode == TouchPanelMode::Search) {
         contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + kPanelFilterDy + 64) + TouchSuggestRowDy(win) +
-                        len(win->findMatches) * DpiScale(win->hwndTocBox, TouchSearchResultRowDy()) +
+                        len(win->findMatches) * DpiScale(win->hwndTocBox, TouchSearchResultRowDy(win)) +
                         DpiScale(win->hwndTocBox, 12);
     } else if (win->touchPanelMode == TouchPanelMode::Annotations && win->AsFixed()) {
         const Vec<Annotation*>* annotations = TouchAnnotationsCached(win);
         int n = annotations ? len(*annotations) : 0;
         contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) +
-                        n * DpiScale(win->hwndTocBox, TouchSidebarListRowDy()) + DpiScale(win->hwndTocBox, 12);
+                        n * DpiScale(win->hwndTocBox, TouchSidebarListRowDy(win)) + DpiScale(win->hwndTocBox, 12);
     } else if (win->touchPanelMode == TouchPanelMode::Favorites) {
         Vec<TouchFavRow> rows;
         CollectTouchFavRows(rows);
         contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) +
-                        len(rows) * DpiScale(win->hwndTocBox, TouchSidebarListRowDy()) + DpiScale(win->hwndTocBox, 12);
+                        len(rows) * DpiScale(win->hwndTocBox, TouchSidebarListRowDy(win)) +
+                        DpiScale(win->hwndTocBox, 12);
     } else if (win->touchPanelMode == TouchPanelMode::Attachments && win->ctrl) {
         Vec<TocItem*> attachments;
         TocTree* toc = win->ctrl->GetToc();
@@ -2512,7 +2526,7 @@ static int TouchPanelMaxScroll(MainWindow* win) {
             CollectAttachmentItems(toc->root->child, attachments);
         }
         contentBottom = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) +
-                        len(attachments) * DpiScale(win->hwndTocBox, TouchSidebarListRowDy()) +
+                        len(attachments) * DpiScale(win->hwndTocBox, TouchSidebarListRowDy(win)) +
                         DpiScale(win->hwndTocBox, 12);
     }
     return std::max(0, contentBottom - client.dy);
@@ -2994,7 +3008,7 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
         HdcDrawText(hdc, countText, c.count, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
                     HdcGetUiFont(hdc, kFontSizeLabel));
 
-        int rowDy = DpiScale(win->hwndTocBox, TouchSearchResultRowDy());
+        int rowDy = DpiScale(win->hwndTocBox, TouchSearchResultRowDy(win));
         int first = std::max(0, win->touchPanelScrollY / rowDy - 1);
         int visible = rc.dy / rowDy + 3;
         int last = std::min(len(win->findMatches), first + visible);
@@ -3014,11 +3028,11 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
                         row.dx - DpiScale(win->hwndTocBox, 24), DpiScale(win->hwndTocBox, 18)};
             SetTextColor(hdc, ThemeWindowDarkerTextColor());
             HdcDrawText(hdc, fmt("Page %d", match.startPage), pageRc, DT_SINGLELINE | DT_LEFT | DT_NOPREFIX,
-                        HdcGetUiFont(hdc, kFontSizeMeta));
+                        HdcGetUiFont(hdc, PaneFontSize(win, kFontSizeMeta)));
             Rect snippetRc{pageRc.x, pageRc.y + pageRc.dy + DpiScale(win->hwndTocBox, 3), pageRc.dx,
                            row.y + row.dy - pageRc.y - pageRc.dy - DpiScale(win->hwndTocBox, 7)};
             SetTextColor(hdc, ThemeWindowTextColor());
-            HFONT snippetFont = HdcGetUiFont(hdc, kFontSizeLabel);
+            HFONT snippetFont = HdcGetUiFont(hdc, PaneFontSize(win, kFontSizeLabel));
             ScopedSelectObject selectFont(hdc, snippetFont);
             DrawMaybeHighlightedText(hdc, snippetRc, match.snippet, findWords, highlighted, ThemeHotBackgroundColor(),
                                      false, win->findMatchWholeWord,
@@ -3032,7 +3046,7 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
         Vec<TouchFavRow> rows;
         CollectTouchFavRows(rows);
         HWND hw = win->hwndTocBox;
-        int rowDy = DpiScale(hw, TouchSidebarListRowDy());
+        int rowDy = DpiScale(hw, TouchSidebarListRowDy(win));
         int y0 = TouchFavRowsTop(win);
         if (len(rows) == 0) {
             TempStr empty = str::DupTemp(StrL("No saved pages yet. Tap the bookmark button to save one."));
@@ -3098,7 +3112,7 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
                 // the document this group belongs to; the open one is marked
                 TempStr name = path::GetBaseNameTemp(row.fs->filePath);
                 bool isCurrent = curPath && str::Eq(row.fs->filePath, curPath);
-                HFONT f = HdcGetUiFont(hdc, kPanelSubFontSize, kFontWeightStrong);
+                HFONT f = HdcGetUiFont(hdc, PaneFontSize(win, kPanelSubFontSize), kFontWeightStrong);
                 ScopedSelectObject sel(hdc, f);
                 SetTextColor(hdc, isCurrent ? ThemeWindowLinkColor() : ThemeWindowDarkerTextColor());
                 Rect tr = r;
@@ -3108,7 +3122,7 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             }
             // one saved page: its name, and the page number on the right
             TempStr label = FavReadableNameTemp(row.fav);
-            HFONT f = HdcGetUiFont(hdc, kPanelRowFontSize);
+            HFONT f = HdcGetUiFont(hdc, PaneFontSize(win, kPanelRowFontSize));
             ScopedSelectObject sel(hdc, f);
             SetTextColor(hdc, ThemeWindowTextColor());
             Rect tr = r;
@@ -3117,7 +3131,7 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             HdcDrawText(hdc, label, tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
             TempStr pageStr = fmt("%d", row.fav->pageNo);
-            HFONT fp = HdcGetUiFont(hdc, kPanelPageFontSize);
+            HFONT fp = HdcGetUiFont(hdc, PaneFontSize(win, kPanelPageFontSize));
             ScopedSelectObject selp(hdc, fp);
             SetTextColor(hdc, ThemeWindowDarkerTextColor());
             Rect pr{r.x + r.dx - DpiScale(hw, 82), r.y, DpiScale(hw, 44), r.dy};
@@ -3173,7 +3187,7 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             return;
         }
         int y = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) - win->touchPanelScrollY;
-        int rowDy = DpiScale(win->hwndTocBox, TouchSidebarListRowDy());
+        int rowDy = DpiScale(win->hwndTocBox, TouchSidebarListRowDy(win));
         int count = std::min(len(annotations), 10);
         for (int i = 0; i < count; i++) {
             Annotation* annot = annotations[i];
@@ -3211,7 +3225,7 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             CollectAttachmentItems(toc->root->child, attachments);
         }
         int y = DpiScale(win->hwndTocBox, kPanelHeaderDy + 12) - win->touchPanelScrollY;
-        int rowDy = DpiScale(win->hwndTocBox, TouchSidebarListRowDy());
+        int rowDy = DpiScale(win->hwndTocBox, TouchSidebarListRowDy(win));
         for (int i = 0; i < len(attachments); i++) {
             TocItem* item = attachments[i];
             Rect row{DpiScale(win->hwndTocBox, 12), y + i * rowDy, rc.dx - DpiScale(win->hwndTocBox, 24), rowDy};
@@ -3404,7 +3418,7 @@ static bool TouchPanelHitRect(MainWindow* win, Point pt, Rect* out) {
     // Favorites / Annotations / Attachments all lay rows out the same way
     if (mode == TouchPanelMode::Favorites || mode == TouchPanelMode::Annotations ||
         mode == TouchPanelMode::Attachments) {
-        int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
+        int rowDy = DpiScale(hwnd, TouchSidebarListRowDy(win));
         int y0 = DpiScale(hwnd, kPanelHeaderDy + 12) - win->touchPanelScrollY;
         if (rowDy <= 0 || pt.y < y0) {
             return false;
@@ -3502,7 +3516,7 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
     if (win->touchPanelMode == TouchPanelMode::Favorites) {
         Vec<TouchFavRow> rows;
         CollectTouchFavRows(rows);
-        int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
+        int rowDy = DpiScale(hwnd, TouchSidebarListRowDy(win));
         int y0 = TouchFavRowsTop(win);
         if (TouchFavToolbarToggleRect(win).Contains(pt)) {
             gGlobalPrefs->favoritesInToolbar = !gGlobalPrefs->favoritesInToolbar;
@@ -3591,7 +3605,7 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
             CollapseTouchSearchPanelToBar(win);
             return true;
         }
-        int rowDy = DpiScale(hwnd, TouchSearchResultRowDy());
+        int rowDy = DpiScale(hwnd, TouchSearchResultRowDy(win));
         int idx = (pt.y - TouchSearchResultsY(win)) / rowDy;
         if (pt.y >= TouchSearchResultsY(win) && idx >= 0 && idx < len(win->findMatches)) {
             Rect hit = TouchSearchResultRect(win, idx);
@@ -3608,7 +3622,7 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
             return true; // still gathering the list; the tap has nothing to hit yet
         }
         int y = DpiScale(hwnd, kPanelHeaderDy + 12) - win->touchPanelScrollY;
-        int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
+        int rowDy = DpiScale(hwnd, TouchSidebarListRowDy(win));
         int idx = (pt.y - y) / rowDy;
         if (pt.y >= y && idx >= 0 && idx < len(*cached)) {
             win->ctrl->GoToPage(PageNo((*cached)[idx]), true);
@@ -3813,7 +3827,7 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                 // headers are not draggable, and neither is the delete target
                 if (idx >= 0 && !rows[idx].isHeader) {
                     Rect client = HwndClientRect(hwnd);
-                    int rowDy = DpiScale(hwnd, TouchSidebarListRowDy());
+                    int rowDy = DpiScale(hwnd, TouchSidebarListRowDy(win));
                     Rect row{DpiScale(hwnd, 12), TouchFavRowsTop(win) + idx * rowDy, client.dx - DpiScale(hwnd, 24),
                              rowDy};
                     if (!TouchFavDeleteRect(win, row).Contains(Point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)})) {

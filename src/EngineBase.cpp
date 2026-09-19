@@ -611,6 +611,10 @@ RectF EngineBase::PageContentBox(int pageNo, RenderTarget /*target*/) {
     return PageMediabox(pageNo);
 }
 
+RectF EngineBase::PageContentBoxWithin(int pageNo, RectF region) {
+    return PageContentBox(pageNo).Intersect(region);
+}
+
 bool EngineBase::IsImageCollection() const {
     return isImageCollection;
 }

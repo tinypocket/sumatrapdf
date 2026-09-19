@@ -472,6 +472,10 @@ class EngineBase {
     // the box inside PageMediabox that actually contains any relevant content
     // (used for auto-cropping in Fit Content mode, can be PageMediabox)
     virtual RectF PageContentBox(int pageNo, RenderTarget target = RenderTarget::View);
+    // the content box of just the part of the page inside `region` (page
+    // coordinates): drawings count as well as text, so the music under a
+    // running header is found, not only the lyrics under the music
+    virtual RectF PageContentBoxWithin(int pageNo, RectF region);
 
     // renders a page into a cacheable Pixmap
     // (*cookie_out must be deleted after the call returns)

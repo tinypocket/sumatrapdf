@@ -203,6 +203,10 @@ struct DisplayModel : DocController {
         float bottom = 0.0f;
         bool hasHeader = false;
         bool hasFooter = false;
+        // where the header / footer (with a rule that goes with it) ends: the
+        // blank padding kept around the body must not reach back into it
+        float limitTop = 0.0f;
+        float limitBottom = 0.0f;
     };
     bool PageBodyBand(int pageNo, PageBody* out) const;
     // Per-page bands are found by extracting each page's text, which is far
@@ -216,6 +220,8 @@ struct DisplayModel : DocController {
         bool hasFooter = false;
         float top = 0.0f;
         float bottom = 0.0f;
+        float limitTop = 0.0f;
+        float limitBottom = 0.0f;
         // the engine's content box, which is as slow to get as the text and
         // so comes from the same scan (PageInfo::contentBox is set from it)
         RectF contentBox{};

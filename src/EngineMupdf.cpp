@@ -4181,10 +4181,160 @@ static fz_display_list* GetOrBuildPageDisplayList(FzPageInfo* pi, fz_context* ct
     return fz_keep_display_list(ctx, pi->displayList);
 }
 
-RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget /*target*/) {
-    auto* ctx = Ctx();
+// Measuring content with MuPDF's bbox device counts everything painted,
+// including the white rectangle many generators fill the whole page with first
+// - which made every page's content the whole page, so smart margins had
+// nothing to trim. This pass-through drops fills in white (or fully
+// transparent) on their way to the bbox device; everything else, clips
+// included, goes through unchanged.
+struct InkBboxDevice {
+    fz_device super;
+    fz_device* inner;
+};
 
-    FzPageInfo* pageInfo = GetFzPageInfo(pageNo, false);
+static bool IsBlankFill(fz_context* ctx, fz_colorspace* cs, const float* color, float alpha, fz_color_params cp) {
+    if (alpha <= 0.0f) {
+        return true;
+    }
+    if (!cs || !color) {
+        return false;
+    }
+    float rgb[3] = {0, 0, 0};
+    fz_try(ctx) {
+        fz_convert_color(ctx, cs, color, fz_device_rgb(ctx), rgb, nullptr, cp);
+    }
+    fz_catch(ctx) {
+        return false;
+    }
+    return rgb[0] >= 0.99f && rgb[1] >= 0.99f && rgb[2] >= 0.99f;
+}
+
+#define INK_INNER(dev) (((InkBboxDevice*)(dev))->inner)
+
+static void ink_fill_path(fz_context* ctx, fz_device* dev, const fz_path* path, int even_odd, fz_matrix ctm,
+                          fz_colorspace* cs, const float* color, float alpha, fz_color_params cp) {
+    if (!IsBlankFill(ctx, cs, color, alpha, cp)) {
+        fz_fill_path(ctx, INK_INNER(dev), path, even_odd, ctm, cs, color, alpha, cp);
+    }
+}
+static void ink_stroke_path(fz_context* ctx, fz_device* dev, const fz_path* path, const fz_stroke_state* stroke,
+                            fz_matrix ctm, fz_colorspace* cs, const float* color, float alpha, fz_color_params cp) {
+    fz_stroke_path(ctx, INK_INNER(dev), path, stroke, ctm, cs, color, alpha, cp);
+}
+static void ink_fill_text(fz_context* ctx, fz_device* dev, const fz_text* text, fz_matrix ctm, fz_colorspace* cs,
+                          const float* color, float alpha, fz_color_params cp) {
+    fz_fill_text(ctx, INK_INNER(dev), text, ctm, cs, color, alpha, cp);
+}
+static void ink_stroke_text(fz_context* ctx, fz_device* dev, const fz_text* text, const fz_stroke_state* stroke,
+                            fz_matrix ctm, fz_colorspace* cs, const float* color, float alpha, fz_color_params cp) {
+    fz_stroke_text(ctx, INK_INNER(dev), text, stroke, ctm, cs, color, alpha, cp);
+}
+static void ink_fill_shade(fz_context* ctx, fz_device* dev, fz_shade* shade, fz_matrix ctm, float alpha,
+                           fz_color_params cp) {
+    fz_fill_shade(ctx, INK_INNER(dev), shade, ctm, alpha, cp);
+}
+static void ink_fill_image(fz_context* ctx, fz_device* dev, fz_image* image, fz_matrix ctm, float alpha,
+                           fz_color_params cp) {
+    fz_fill_image(ctx, INK_INNER(dev), image, ctm, alpha, cp);
+}
+static void ink_fill_image_mask(fz_context* ctx, fz_device* dev, fz_image* image, fz_matrix ctm, fz_colorspace* cs,
+                                const float* color, float alpha, fz_color_params cp) {
+    fz_fill_image_mask(ctx, INK_INNER(dev), image, ctm, cs, color, alpha, cp);
+}
+static void ink_clip_path(fz_context* ctx, fz_device* dev, const fz_path* path, int even_odd, fz_matrix ctm,
+                          fz_rect scissor) {
+    fz_clip_path(ctx, INK_INNER(dev), path, even_odd, ctm, scissor);
+}
+static void ink_clip_stroke_path(fz_context* ctx, fz_device* dev, const fz_path* path, const fz_stroke_state* stroke,
+                                 fz_matrix ctm, fz_rect scissor) {
+    fz_clip_stroke_path(ctx, INK_INNER(dev), path, stroke, ctm, scissor);
+}
+static void ink_clip_text(fz_context* ctx, fz_device* dev, const fz_text* text, fz_matrix ctm, fz_rect scissor) {
+    fz_clip_text(ctx, INK_INNER(dev), text, ctm, scissor);
+}
+static void ink_clip_stroke_text(fz_context* ctx, fz_device* dev, const fz_text* text, const fz_stroke_state* stroke,
+                                 fz_matrix ctm, fz_rect scissor) {
+    fz_clip_stroke_text(ctx, INK_INNER(dev), text, stroke, ctm, scissor);
+}
+static void ink_clip_image_mask(fz_context* ctx, fz_device* dev, fz_image* image, fz_matrix ctm, fz_rect scissor) {
+    fz_clip_image_mask(ctx, INK_INNER(dev), image, ctm, scissor);
+}
+static void ink_pop_clip(fz_context* ctx, fz_device* dev) {
+    fz_pop_clip(ctx, INK_INNER(dev));
+}
+static void ink_begin_mask(fz_context* ctx, fz_device* dev, fz_rect area, int luminosity, fz_colorspace* cs,
+                           const float* bc, fz_color_params cp) {
+    fz_begin_mask(ctx, INK_INNER(dev), area, luminosity, cs, bc, cp);
+}
+static void ink_end_mask(fz_context* ctx, fz_device* dev, fz_function* tr) {
+    fz_end_mask_tr(ctx, INK_INNER(dev), tr);
+}
+static void ink_begin_group(fz_context* ctx, fz_device* dev, fz_rect area, fz_colorspace* cs, int isolated,
+                            int knockout, int blendmode, float alpha) {
+    fz_begin_group(ctx, INK_INNER(dev), area, cs, isolated, knockout, blendmode, alpha);
+}
+static void ink_end_group(fz_context* ctx, fz_device* dev) {
+    fz_end_group(ctx, INK_INNER(dev));
+}
+static int ink_begin_tile(fz_context* ctx, fz_device* dev, fz_rect area, fz_rect view, float xstep, float ystep,
+                          fz_matrix ctm, int id, int doc_id) {
+    return fz_begin_tile_tid(ctx, INK_INNER(dev), area, view, xstep, ystep, ctm, id, doc_id);
+}
+static void ink_end_tile(fz_context* ctx, fz_device* dev) {
+    fz_end_tile(ctx, INK_INNER(dev));
+}
+static void ink_close(fz_context* ctx, fz_device* dev) {
+    fz_close_device(ctx, INK_INNER(dev));
+}
+static void ink_drop(fz_context* ctx, fz_device* dev) {
+    fz_drop_device(ctx, INK_INNER(dev));
+}
+
+// a bbox device (into *result) that leaves white fills out
+static fz_device* NewInkBboxDevice(fz_context* ctx, fz_rect* result) {
+    fz_device* inner = fz_new_bbox_device(ctx, result);
+    InkBboxDevice* d = nullptr;
+    fz_try(ctx) {
+        d = fz_new_derived_device(ctx, InkBboxDevice);
+    }
+    fz_catch(ctx) {
+        fz_drop_device(ctx, inner);
+        fz_rethrow(ctx);
+    }
+    d->inner = inner;
+    d->super.close_device = ink_close;
+    d->super.drop_device = ink_drop;
+    d->super.fill_path = ink_fill_path;
+    d->super.stroke_path = ink_stroke_path;
+    d->super.fill_text = ink_fill_text;
+    d->super.stroke_text = ink_stroke_text;
+    d->super.fill_shade = ink_fill_shade;
+    d->super.fill_image = ink_fill_image;
+    d->super.fill_image_mask = ink_fill_image_mask;
+    d->super.clip_path = ink_clip_path;
+    d->super.clip_stroke_path = ink_clip_stroke_path;
+    d->super.clip_text = ink_clip_text;
+    d->super.clip_stroke_text = ink_clip_stroke_text;
+    d->super.clip_image_mask = ink_clip_image_mask;
+    d->super.pop_clip = ink_pop_clip;
+    d->super.begin_mask = ink_begin_mask;
+    d->super.end_mask = ink_end_mask;
+    d->super.begin_group = ink_begin_group;
+    d->super.end_group = ink_end_group;
+    d->super.begin_tile = ink_begin_tile;
+    d->super.end_tile = ink_end_tile;
+    return &d->super;
+}
+
+// The bounding box of what the page draws, optionally of only what falls in
+// `region`: the display list is run with the region as its scissor, so objects
+// wholly outside it (a running header, a footer line) are skipped, and the
+// result is clipped to the region (a full-page background would otherwise
+// cover it all).
+static RectF PageContentBoxIn(EngineMupdf* e, int pageNo, const RectF* region) {
+    auto* ctx = e->Ctx();
+
+    FzPageInfo* pageInfo = e->GetFzPageInfo(pageNo, false);
     if (!pageInfo) {
         // maybe should return a dummy size. not sure how this
         // will play with layout. The page should fail to render
@@ -4193,17 +4343,25 @@ RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget /*target*/) {
     }
 
     RectF mediabox = pageInfo->mediabox;
+    RectF limit = region ? region->Intersect(mediabox) : mediabox;
+    if (limit.IsEmpty()) {
+        return RectF();
+    }
 
     fz_rect pagerect;
     fz_display_list* keptList = nullptr;
     {
         // Hold per-page lock briefly: page bounds + (re-)acquire cached display list.
-        ScopedMutex scope(&renderLock);
+        ScopedMutex scope(&e->renderLock);
         pagerect = fz_bound_page(ctx, pageInfo->page);
         keptList = GetOrBuildPageDisplayList(pageInfo, ctx);
     }
     if (!keptList) {
-        return mediabox;
+        return limit;
+    }
+    fz_rect scissor = pagerect;
+    if (region) {
+        scissor = fz_intersect_rect(pagerect, ToFzRect(limit));
     }
 
     // Lock-free: bbox-device run on a display list is concurrency-safe.
@@ -4212,8 +4370,8 @@ RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget /*target*/) {
     fz_device* dev = nullptr;
     fz_var(dev);
     fz_try(ctx) {
-        dev = fz_new_bbox_device(ctx, &rect);
-        fz_run_display_list(ctx, keptList, dev, fz_identity, pagerect, &fzcookie);
+        dev = NewInkBboxDevice(ctx, &rect);
+        fz_run_display_list(ctx, keptList, dev, fz_identity, scissor, &fzcookie);
         fz_close_device(ctx, dev);
     }
     fz_always(ctx) {
@@ -4222,15 +4380,24 @@ RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget /*target*/) {
     }
     fz_catch(ctx) {
         fz_report_error(ctx);
-        return mediabox;
+        return limit;
     }
 
     if (fz_is_infinite_rect(rect)) {
-        return mediabox;
+        return limit;
     }
 
+    // (an empty rect - a blank page, or nothing in the region - stays empty)
     RectF rect2 = ToRectF(rect);
-    return rect2.Intersect(mediabox);
+    return rect2.Intersect(limit);
+}
+
+RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget /*target*/) {
+    return PageContentBoxIn(this, pageNo, nullptr);
+}
+
+RectF EngineMupdf::PageContentBoxWithin(int pageNo, RectF region) {
+    return PageContentBoxIn(this, pageNo, &region);
 }
 
 RectF EngineMupdf::Transform(const RectF& rect, int pageNo, float zoom, int rotation, bool inverse) {

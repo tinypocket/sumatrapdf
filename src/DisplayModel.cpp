@@ -330,9 +330,44 @@ constexpr float kSmartMarginPadPt = 6.0f;
 
 // One horizontal band of text on a page, in page (unrotated, unzoomed) space.
 struct TextLine {
-    float top;
-    float bottom;
+    float top = 0.0f;
+    float bottom = 0.0f;
+    // The line's wording, reduced to its letters (lower case) and hashed, so
+    // the same footer on another page gets the same key whatever its page
+    // number or punctuation. A line of digits alone - a page number - gets
+    // kPageNumberKey. 0: nothing to compare (a stray mark, punctuation).
+    u32 key = 0;
+    // while the key is being built
+    u32 hash = 2166136261u;
+    int nLetters = 0;
+    bool hasDigit = false;
 };
+
+constexpr u32 kPageNumberKey = 0x9e3779b9u;
+
+static void AddToLineKey(TextLine& line, int c) {
+    if (c <= 0) {
+        return;
+    }
+    if (c >= '0' && c <= '9') {
+        line.hasDigit = true;
+        return;
+    }
+    if (c >= 0x10000 || !IsCharAlphaW((WCHAR)c)) {
+        return;
+    }
+    WCHAR lower = (WCHAR)(uintptr_t)CharLowerW((LPWSTR)(uintptr_t)(WCHAR)c);
+    line.hash = (line.hash ^ (u32)lower) * 16777619u; // FNV-1a
+    line.nLetters++;
+}
+
+static void FinishLineKey(TextLine& line) {
+    if (line.nLetters >= 2) {
+        line.key = line.hash ? line.hash : 1;
+    } else if (line.nLetters == 0 && line.hasDigit) {
+        line.key = kPageNumberKey;
+    }
+}
 
 // Two candidate bands are "the same header" when they sit at the same height.
 // Wording is deliberately NOT compared: in a book divided into sections the
@@ -354,27 +389,36 @@ static void CollectTextLines(EngineBase* engine, int pageNo, Vec<TextLine>& out)
     if (!coords || !text) {
         return;
     }
+    int byteIdx = 0; // the text is UTF-8, walked in step with the boxes
     for (int i = 0; i < nCodepoints; i++) {
+        int c = byteIdx < text.len ? Utf8CodepointNext(text, byteIdx) : 0;
         Rect r = coords[i];
         if (r.dy <= 0 || r.dx <= 0) {
             continue; // spaces and newlines carry an empty box
         }
         float top = (float)r.y;
         float bottom = (float)(r.y + r.dy);
-        bool merged = false;
+        TextLine* into = nullptr;
         for (TextLine& line : out) {
             // any vertical overlap at all: superscripts and accents ride along
             if (top < line.bottom && bottom > line.top) {
                 line.top = std::min(line.top, top);
                 line.bottom = std::max(line.bottom, bottom);
-                merged = true;
+                into = &line;
                 break;
             }
         }
-        if (!merged) {
-            TextLine line{top, bottom};
+        if (!into) {
+            TextLine line;
+            line.top = top;
+            line.bottom = bottom;
             out.Append(line);
+            into = &out.Last();
         }
+        AddToLineKey(*into, c);
+    }
+    for (TextLine& line : out) {
+        FinishLineKey(line);
     }
     // sorted top-down, so the first and last entries are the candidate bands
     VecSort(out, [](const TextLine* a, const TextLine* b) -> int {
@@ -575,17 +619,83 @@ static bool IsLoneEdgeLine(const Vec<TextLine>& lines, int idx, bool atBottom, c
     return gap >= minGap && nearEdge && thin;
 }
 
+// A line that repeats - the same wording at the same height - as the first (or
+// last) line of many pages is a running header (footer), however little it
+// stands off from the body. The band detection above wants a gap wider than
+// the body's line spacing, which a page of music never shows: its text is
+// lyrics, with whole staves between the lines, so a copyright footer 30pt
+// under the last line looked like one more line of lyrics. Wording is compared
+// here, so the pages need not all agree: a quarter of them is enough (and at
+// least two), which also covers footers only on odd or on even pages, and a
+// URL under some hymns of a Menaion but not others.
+struct RepeatedLine {
+    u32 key = 0;
+    float top = 0.0f;
+};
+
+// `lines` holds every page's lines back to back; page i's run from
+// starts[i] to starts[i + 1]
+static void FindRepeatedEdgeLines(const Vec<TextLine>& lines, const Vec<int>& starts, bool atBottom,
+                                  Vec<RepeatedLine>& out) {
+    struct Cand {
+        u32 key;
+        float top;
+        int count;
+    };
+    Vec<Cand> cands;
+    int nPagesWithText = 0;
+    for (int p = 0; p + 1 < len(starts); p++) {
+        int b = starts[p];
+        int e = starts[p + 1];
+        if (e - b < 2) {
+            continue;
+        }
+        nPagesWithText++;
+        const TextLine& l = atBottom ? lines[e - 1] : lines[b];
+        if (l.key == 0) {
+            continue;
+        }
+        bool found = false;
+        for (Cand& c : cands) {
+            if (c.key == l.key && fabsf(c.top - l.top) <= 3.0f) {
+                c.count++;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            cands.Append({l.key, l.top, 1});
+        }
+    }
+    int minPages = std::max(2, (nPagesWithText + 3) / 4);
+    for (const Cand& c : cands) {
+        if (c.count >= minPages) {
+            out.Append({c.key, c.top});
+        }
+    }
+}
+
+static bool IsRepeatedLine(const TextLine& line, const Vec<RepeatedLine>& repeated) {
+    for (const RepeatedLine& r : repeated) {
+        if (r.key == line.key && fabsf(r.top - line.top) <= 3.0f) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Engine-only, so the background scan can run it off the UI thread. hfTopPt /
-// hfBottomPt are the document-wide running bands (0 when there are none).
-static bool ComputePageBody(EngineBase* engine, int pageNo, float hfTopPt, float hfBottomPt, const RectF& contentBox,
+// hfBottomPt are the document-wide running bands (0 when there are none);
+// repeatedTop / repeatedBottom the lines that repeat word for word at the top /
+// bottom of many pages (FindRepeatedEdgeLines).
+static bool ComputePageBody(EngineBase* engine, int pageNo, const Vec<TextLine>& lines, float hfTopPt, float hfBottomPt,
+                            const Vec<RepeatedLine>& repeatedTop, const Vec<RepeatedLine>& repeatedBottom,
                             DisplayModel::PageBody* out) {
     *out = DisplayModel::PageBody();
     RectF media = engine->PageMediabox(pageNo);
     if (media.IsEmpty()) {
         return false;
     }
-    Vec<TextLine> lines;
-    CollectTextLines(engine, pageNo, lines);
     if (len(lines) < 2) {
         return false; // no body to speak of: leave this page alone
     }
@@ -612,6 +722,16 @@ static bool ComputePageBody(EngineBase* engine, int pageNo, float hfTopPt, float
         }
         last = i;
     }
+    // the lines repeated word for word at the top / bottom of many pages
+    if (!out->hasHeader && first == 0 && IsRepeatedLine(lines[0], repeatedTop)) {
+        out->hasHeader = true;
+        first++;
+    }
+    int n = len(lines);
+    if (!out->hasFooter && last == n - 1 && last > first && IsRepeatedLine(lines[last], repeatedBottom)) {
+        out->hasFooter = true;
+        last--;
+    }
     // this page's own lone edge lines, where the document-wide bands did not
     // account for them (or the document has none)
     if (!out->hasHeader && first >= 0 && IsLoneEdgeLine(lines, first, false, media)) {
@@ -625,19 +745,61 @@ static bool ComputePageBody(EngineBase* engine, int pageNo, float hfTopPt, float
     if (first < 0 || last < first) {
         return false; // the whole page looked like header/footer: do not crop it
     }
-    out->top = lines[first].top;
-    out->bottom = lines[last].bottom;
-    // The lines only describe the page's text. Music engraved as vector art
-    // leaves a page with nothing but its running header, a caption and a page
-    // number as text, and cropping to those would keep a sliver and drop the
-    // music. The body has to account for most of what the engine sees as
-    // content, or the page is left to the content-box trim alone.
-    if (!contentBox.IsEmpty()) {
-        float bodyDy = out->bottom - out->top;
-        if (bodyDy < contentBox.dy * 0.5f) {
-            return false;
+    // The body is what the page draws between the header and the footer -
+    // drawings as well as text. Cropping to the text lines alone cut the
+    // staff off the top of a page of music, whose first text is the lyrics
+    // under it.
+    float regionTop = media.y;
+    float regionBottom = media.y + media.dy;
+    for (int i = 0; i < first; i++) {
+        regionTop = std::max(regionTop, lines[i].bottom + 0.5f);
+    }
+    for (int i = last + 1; i < n; i++) {
+        regionBottom = std::min(regionBottom, lines[i].top - 0.5f);
+    }
+    if (regionBottom <= regionTop) {
+        return false;
+    }
+    RectF region{media.x, regionTop, media.dx, regionBottom - regionTop};
+    RectF body = engine->PageContentBoxWithin(pageNo, region);
+    if (body.IsEmpty()) {
+        return false;
+    }
+    float limitTop = regionTop;
+    float limitBottom = regionBottom;
+    // A rule under a header (over a footer) goes with it: a thin drawing on
+    // its own at the edge of the body, with a clear gap before what follows.
+    // Kept as body it held the crop at the rule, and the padding around the
+    // body brought half the header's text back into view.
+    // The strip is generous because a stroked line's box is padded for its
+    // joins; it only counts if no text line falls in it, so a small first line
+    // of text is never taken for a rule.
+    constexpr float kRuleDy = 8.0f;
+    constexpr float kRuleGap = 2.0f;
+    if (out->hasHeader) {
+        float ruleBottom = body.y + kRuleDy;
+        float bodyBottom = body.y + body.dy;
+        bool noText = lines[first].top >= ruleBottom;
+        RectF rest =
+            engine->PageContentBoxWithin(pageNo, RectF{media.x, ruleBottom, media.dx, bodyBottom - ruleBottom});
+        if (noText && !rest.IsEmpty() && rest.y >= ruleBottom + kRuleGap) {
+            limitTop = ruleBottom;
+            body = RectF{body.x, rest.y, body.dx, bodyBottom - rest.y};
         }
     }
+    if (out->hasFooter) {
+        float ruleTop = body.y + body.dy - kRuleDy;
+        bool noText = lines[last].bottom <= ruleTop;
+        RectF rest = engine->PageContentBoxWithin(pageNo, RectF{media.x, body.y, media.dx, ruleTop - body.y});
+        if (noText && !rest.IsEmpty() && rest.y + rest.dy <= ruleTop - kRuleGap) {
+            limitBottom = ruleTop;
+            body.dy = rest.y + rest.dy - body.y;
+        }
+    }
+    out->top = body.y;
+    out->bottom = body.y + body.dy;
+    out->limitTop = limitTop;
+    out->limitBottom = limitBottom;
     return true;
 }
 
@@ -712,32 +874,65 @@ static void SmartMarginScanFinishedUi(SmartMarginScan* s) {
     delete s;
 }
 
+static void PostSmartMarginProgress(SmartMarginScan* s, int done, int total) {
+    auto* p = new SmartMarginProgress();
+    p->dm = s->dm;
+    p->gen = s->gen;
+    p->done = done;
+    p->total = total;
+    uitask::Post(MkFunc0<SmartMarginProgress>(SmartMarginScanProgressUi, p), "SmartMarginScanProgress");
+}
+
 static void SmartMarginScanThread(SmartMarginScan* s) {
     if (s->detectRunningBands) {
         DetectRunningHeaderFooterIn(s->engine, &s->hfTopPt, &s->hfBottomPt);
     }
     constexpr int kProgressEvery = 20;
+    int total = 2 * s->nPages; // the text of every page, then every page's body
+    // Every page's text lines first: the repeated header / footer lines can
+    // only be told once all of them are known.
+    Vec<TextLine> allLines;
+    Vec<int> starts;
     for (int pageNo = 1; pageNo <= s->nPages; pageNo++) {
+        starts.Append(len(allLines));
+        Vec<TextLine> lines;
+        CollectTextLines(s->engine, pageNo, lines);
+        for (const TextLine& l : lines) {
+            allLines.Append(l);
+        }
+        if (pageNo % kProgressEvery == 0) {
+            PostSmartMarginProgress(s, pageNo, total);
+        }
+    }
+    starts.Append(len(allLines));
+    Vec<RepeatedLine> repeatedTop;
+    Vec<RepeatedLine> repeatedBottom;
+    if (s->detectRunningBands) {
+        FindRepeatedEdgeLines(allLines, starts, false, repeatedTop);
+        FindRepeatedEdgeLines(allLines, starts, true, repeatedBottom);
+    }
+    for (int pageNo = 1; pageNo <= s->nPages; pageNo++) {
+        Vec<TextLine> lines;
+        for (int i = starts[pageNo - 1]; i < starts[pageNo]; i++) {
+            lines.Append(allLines[i]);
+        }
         DisplayModel::PageBody body;
         DisplayModel::PageBodyCache entry;
         entry.contentBox = s->engine->PageContentBox(pageNo);
-        if (ComputePageBody(s->engine, pageNo, s->hfTopPt, s->hfBottomPt, entry.contentBox, &body)) {
+        if (ComputePageBody(s->engine, pageNo, lines, s->hfTopPt, s->hfBottomPt, repeatedTop, repeatedBottom, &body)) {
             entry.state = 2;
             entry.hasHeader = body.hasHeader;
             entry.hasFooter = body.hasFooter;
             entry.top = body.top;
             entry.bottom = body.bottom;
+            entry.limitTop = body.limitTop;
+            entry.limitBottom = body.limitBottom;
         } else {
             entry.state = 1;
         }
         s->results.Append(entry);
         if (pageNo % kProgressEvery == 0) {
-            auto* p = new SmartMarginProgress();
-            p->dm = s->dm;
-            p->gen = s->gen;
-            p->done = pageNo;
-            p->total = s->nPages;
-            uitask::Post(MkFunc0<SmartMarginProgress>(SmartMarginScanProgressUi, p), "SmartMarginScanProgress");
+            PostSmartMarginProgress(s, s->nPages + pageNo, total);
         }
     }
     uitask::Post(MkFunc0<SmartMarginScan>(SmartMarginScanFinishedUi, s), "SmartMarginScanFinished");
@@ -784,6 +979,8 @@ bool DisplayModel::PageBodyBand(int pageNo, PageBody* out) const {
     out->bottom = c.bottom;
     out->hasHeader = c.hasHeader;
     out->hasFooter = c.hasFooter;
+    out->limitTop = c.limitTop;
+    out->limitBottom = c.limitBottom;
     return true;
 }
 
@@ -882,11 +1079,14 @@ RectF DisplayModel::PageTrimmedBox(int pageNo, RectF media) const {
         // only crop the side this page actually has a header/footer on:
         // a page without one may open with a plate or an ornament, and
         // there is no text line to tell us it is there
+        // the padding stops short of the header / footer it trimmed off
         if (body.hasHeader) {
             top = std::max(top, body.top - kSmartMarginPadPt);
+            top = std::max(top, std::min(body.limitTop, body.top));
         }
         if (body.hasFooter) {
             bottom = std::min(bottom, body.bottom + kSmartMarginPadPt);
+            bottom = std::min(bottom, std::max(body.limitBottom, body.bottom));
         }
     }
     if (bottom <= top) {

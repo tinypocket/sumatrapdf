@@ -445,6 +445,9 @@ constexpr double kTbSpinnerTurnMs = 900.0;
 constexpr UINT_PTR kTbHoldTimerId = 74;
 constexpr int kTbHoldAfterDomMs = 120;
 constexpr int kTbHoldMaxMs = 2000;
+// switching to a tab that has loaded before: just long enough for it to wake
+// up and paint
+constexpr int kTbSwitchHoldMs = 200;
 // how deep a pressed chrome button sinks, matching the top bar
 constexpr int kTbPressInset = 2;
 
@@ -1048,7 +1051,7 @@ static void TbStartDocDownload(MainWindow* win, Str url, Str ext) {
 static void TbSetChildrenVisible(TouchBrowser* tb, bool show);
 // `hold`: a tab to keep on screen above the newly active one until that has
 // something to show (see kTbHoldTimerId)
-static void TbActivateTab(TouchBrowser* tb, int idx, TbTab* hold = nullptr);
+static void TbActivateTab(TouchBrowser* tb, int idx, TbTab* hold = nullptr, int holdMs = kTbHoldMaxMs);
 // opens `url` in a new browser tab, from the message loop rather than inline
 static void TbRequestNewTab(MainWindow* win, Str url);
 // repaint the chrome (a tab title changed, history changed, ...)
@@ -1098,7 +1101,7 @@ static TbTab* TbHeldTab(TouchBrowser* tb) {
     return held;
 }
 
-static void TbSetHold(TouchBrowser* tb, TbTab* held);
+static void TbSetHold(TouchBrowser* tb, TbTab* held, int ms = kTbHoldMaxMs);
 static void TbEndHold(TouchBrowser* tb);
 static void TbDomContentLoaded(void* ctx);
 
@@ -3547,8 +3550,17 @@ TbHit TbChromeWnd::HitTest(Point pt) const {
 void TbChromeWnd::Invoke(const TbHit& h) {
     switch (h.part) {
         case TbPart::Tab:
-            if (h.idx != tb->activeTab) {
-                TbActivateTab(tb, h.idx);
+            if (h.idx != tb->activeTab && h.idx >= 0 && h.idx < len(tb->tabs)) {
+                // The page you were on stays up while the one you picked
+                // wakes up (a tab out of sight is suspended) and paints: shown
+                // straight away, it came up blank or stale for a moment. A tab
+                // that has never loaded keeps it up until its page is there.
+                TbTab* from = TbActiveTab(tb);
+                TbTab* to = tb->tabs[h.idx];
+                bool canHold =
+                    from && from->webView && from->webView->hwnd && from->url && tb->win->touchView == TouchView::Web;
+                int ms = to->didInitialNav ? kTbSwitchHoldMs : kTbHoldMaxMs;
+                TbActivateTab(tb, h.idx, canHold ? from : nullptr, ms);
             }
             break;
         case TbPart::TabClose:
@@ -3945,14 +3957,14 @@ static Rect TbMenuAnchorScreenRect(TouchBrowser* tb) {
 
 // --- tabs ------------------------------------------------------------------
 
-static void TbSetHold(TouchBrowser* tb, TbTab* held) {
+static void TbSetHold(TouchBrowser* tb, TbTab* held, int ms) {
     tb->holdTab = held;
     HWND hwndChrome = tb->chrome ? tb->chrome->hwnd : nullptr;
     if (!hwndChrome) {
         return;
     }
     if (held) {
-        SetTimer(hwndChrome, kTbHoldTimerId, kTbHoldMaxMs, nullptr);
+        SetTimer(hwndChrome, kTbHoldTimerId, ms, nullptr);
     } else {
         KillTimer(hwndChrome, kTbHoldTimerId);
     }
@@ -4048,12 +4060,12 @@ static const char kTbNightLightJs[] = R"JS((function (g, b) {
   if (window !== window.top) return;
   var apply = function () {
     var d = document, root = d.documentElement;
-    if (!root) return;
+    if (!root) return false;
     var svg = d.getElementById('__sumatra_nl_svg');
     if (g >= 1 && b >= 1) {
       root.style.removeProperty('filter');
       if (svg) svg.remove();
-      return;
+      return true;
     }
     var ns = 'http://www.w3.org/2000/svg';
     if (!svg) {
@@ -4075,9 +4087,21 @@ static const char kTbNightLightJs[] = R"JS((function (g, b) {
     m.setAttribute('type', 'matrix');
     m.setAttribute('values', '1 0 0 0 0  0 ' + g + ' 0 0 0  0 0 ' + b + ' 0 0  0 0 0 1 0');
     root.style.setProperty('filter', 'url(#__sumatra_nl)', 'important');
+    return true;
   };
+  // This runs before the page's own scripts, when the document is usually
+  // still empty: waiting for it to finish parsing showed the page untinted
+  // for a moment first. The tint goes on the moment the parser makes the root
+  // element - before anything is painted - and again when the document is
+  // complete, in case the page replaced what was there.
+  if (!apply()) {
+    var obs = new MutationObserver(function () {
+      if (apply()) obs.disconnect();
+    });
+    obs.observe(document, {childList: true, subtree: true});
+  }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', apply);
-  else apply();
+  window.__sumatraNightLight = apply;
 }))JS";
 
 static int TbNightLightStrength() {
@@ -4241,7 +4265,7 @@ static bool TbProcessFailed(void* ctx, WebViewProcessFailure kind) {
     return false;
 }
 
-static void TbActivateTab(TouchBrowser* tb, int idx, TbTab* hold) {
+static void TbActivateTab(TouchBrowser* tb, int idx, TbTab* hold, int holdMs) {
     int n = len(tb->tabs);
     if (n == 0) {
         tb->activeTab = 0;
@@ -4249,7 +4273,7 @@ static void TbActivateTab(TouchBrowser* tb, int idx, TbTab* hold) {
     }
     tb->activeTab = limitValue(idx, 0, n - 1);
     // any other switch shows the tab it switches to straight away
-    TbSetHold(tb, hold);
+    TbSetHold(tb, hold, holdMs);
     TbSyncUrlBar(tb);
     TbUpdateNavButtons(tb);
     if (tb->chrome) {
@@ -4352,32 +4376,42 @@ static void TbSetChildrenVisible(TouchBrowser* tb, bool show) {
         ShowWindow(hwndChrome, show ? SW_SHOW : SW_HIDE);
     }
     TbTab* held = show ? TbHeldTab(tb) : nullptr;
-    for (int i = 0; i < len(tb->tabs); i++) {
-        TbTab* t = tb->tabs[i];
-        WebviewWnd* wv = t->webView;
-        if (!wv) {
-            continue;
+    // Two passes, the tabs going on screen first: done in tab order, switching
+    // to a tab further right hid the page before the next one was up, and for
+    // a moment the area showed whatever had been painted there before.
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < len(tb->tabs); i++) {
+            TbTab* t = tb->tabs[i];
+            WebviewWnd* wv = t->webView;
+            if (!wv) {
+                continue;
+            }
+            // only the active tab is on screen (with the tab it came from over
+            // it while it loads); the others keep running hidden
+            bool isVisible = show && (i == tb->activeTab || t == held);
+            if (isVisible != (pass == 0)) {
+                continue;
+            }
+            wv->SetIsVisible(isVisible);
+            wv->SetControllerVisible(isVisible);
+            if (wv->hwnd) {
+                // the page left standing is only a picture of where the user
+                // was: a tap on it must not act on a tab that is no longer the
+                // current one
+                EnableWindow(wv->hwnd, t != held);
+            }
+            // The canvas is a sibling that covers the same content area and
+            // sits above us in z-order, so it would paint the Home page over
+            // the page content. Raise the webview (both have WS_CLIPSIBLINGS)
+            // when shown.
+            if (isVisible && wv->hwnd && t != held) {
+                SetWindowPos(wv->hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
         }
-        // only the active tab is on screen (with the tab it came from over it
-        // while it loads); the others keep running hidden
-        bool isVisible = show && (i == tb->activeTab || t == held);
-        wv->SetIsVisible(isVisible);
-        wv->SetControllerVisible(isVisible);
-        if (wv->hwnd) {
-            // the page left standing is only a picture of where the user was:
-            // a tap on it must not act on a tab that is no longer the current one
-            EnableWindow(wv->hwnd, t != held);
+        if (pass == 0 && held) {
+            // above the new tab, which wakes up (and paints) underneath it
+            SetWindowPos(held->webView->hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
-        // The canvas is a sibling that covers the same content area and sits
-        // above us in z-order, so it would paint the Home page over the page
-        // content. Raise the webview (both have WS_CLIPSIBLINGS) when shown.
-        if (isVisible && wv->hwnd && t != held) {
-            SetWindowPos(wv->hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
-    }
-    if (held) {
-        // above the new tab, which loads (and paints) underneath it
-        SetWindowPos(held->webView->hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
     if (show && hwndChrome) {
         // ...but then the chrome must go above the webview, or WebView2 (which
