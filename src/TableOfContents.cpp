@@ -83,6 +83,18 @@ static int PaneFontSize(MainWindow* win, int size) {
     return win && win->tocCompact ? size - 2 : size;
 }
 
+// the document is still opening, so its text cannot be searched yet; the query
+// is kept and run as soon as it is there (TouchSearchRunPending)
+static bool TouchSearchWaiting(MainWindow* win) {
+    return win && len(win->touchSearchPending) > 0;
+}
+
+// a search (or its full-document count, which is what fills the results list)
+// is still reading the document
+static bool TouchSearchRunning(MainWindow* win) {
+    return win && (win->findThread || win->findCountThread || win->findDebouncePending);
+}
+
 // Dragged narrow, the bookmarks pane takes a smaller font and shorter rows so
 // more of each title fits (TouchSidebarCompactDx, in pixels at 100%; 0 never).
 static bool TocWantsCompact(MainWindow* win) {
@@ -1258,6 +1270,9 @@ void LoadTocTree(MainWindow* win) {
 
     auto* tocTree = tab->ctrl->GetToc();
     if (!tocTree || !tocTree->root) {
+        // no bookmarks: the pane drops its filter field (TouchPanelWantsFilter)
+        LayoutTocContainer(win);
+        HwndInvalidate(win->hwndTocBox, false);
         return;
     }
 
@@ -1903,6 +1918,22 @@ void TocTreeKeyDown2(TreeView::KeyDownEvent* ev) {
     ev->result = 1;
 }
 
+// Search always has its field. Bookmarks only gets one when there is something
+// to filter: a document with no bookmarks would otherwise show a search box
+// above "This document has no bookmarks".
+static bool TouchPanelWantsFilter(MainWindow* win) {
+    if (win->touchPanelMode == TouchPanelMode::Search) {
+        return true;
+    }
+    if (win->touchPanelMode != TouchPanelMode::Bookmarks) {
+        return false;
+    }
+    WindowTab* tab = win->CurrentTab();
+    // while the document is still opening currToc isn't there yet; keep the
+    // field until it is known, rather than having it appear a moment later
+    return !tab || !win->IsDocLoaded() || tab->currToc != nullptr;
+}
+
 // Position label, filter edit, and tree window within toc container using the
 // wingui layout engine (VBox built in CreateToc).
 static void LayoutTocContainer(MainWindow* win) {
@@ -1913,6 +1944,7 @@ static void LayoutTocContainer(MainWindow* win) {
     if (IsTouchChrome(win)) {
         UpdateTocCompact(win, false);
         int headerDy = DpiScale(win->hwndTocBox, kPanelHeaderDy);
+        bool wantsFilter = TouchPanelWantsFilter(win);
         int filterDy = DpiScale(win->hwndTocBox, kPanelFilterDy);
         // the same field recipe as the Library's search pill: 40px pill, its
         // edges on the row highlights' x, magnifier at +14, text from +38, a
@@ -1924,7 +1956,9 @@ static void LayoutTocContainer(MainWindow* win) {
         int filterInsetY = std::max(0, (filterDy - editDy) / 2);
         int filterX = DpiScale(win->hwndTocBox, kPanelRowPadX + 38);
         int filterRight = DpiScale(win->hwndTocBox, kPanelRowPadX + 40);
-        int bodyY = headerDy + filterDy + DpiScale(win->hwndTocBox, 12);
+        // with no field the tree sits straight under the header: the gap the
+        // field's band would have erased has nobody to paint it
+        int bodyY = wantsFilter ? headerDy + filterDy + DpiScale(win->hwndTocBox, 12) : headerDy;
         bool showBreadcrumb = win->touchPanelMode == TouchPanelMode::Bookmarks && !HasTocFilter(win);
         int stickyDy = showBreadcrumb ? DpiScale(win->hwndTocBox, 36) : 0;
         int treeY = bodyY + stickyDy;
@@ -1941,7 +1975,7 @@ static void LayoutTocContainer(MainWindow* win) {
         // IsWindowVisible() (which also examines ancestors and would no-op
         // here, leaving the stale tree covering Search after opening it from
         // Home or Library).
-        HwndSetVisible(win->tocFilterEdit->hwnd, bookmarks || search);
+        HwndSetVisible(win->tocFilterEdit->hwnd, wantsFilter && (bookmarks || search));
         HwndSetVisible(win->tocTreeView->hwnd, bookmarks);
         UpdateTocStickyHeader(win);
         return;
@@ -2811,14 +2845,22 @@ static void AcceptTouchSuggestion(MainWindow* win, int i) {
 }
 
 // [Aa] [ab]  "3 of 12"        [collapse] [prev] [next]
+// and, once the pane is too narrow for all of that, the options fold into a
+// single [⋯] chip: [⋯]  "3 of 12"  [prev] [next]
 struct TouchSearchControls {
     Rect matchCase;
     Rect wholeWord;
     Rect count;
     Rect collapse;
+    Rect overflow;
     Rect prev;
     Rect next;
+    bool folded = false;
 };
+
+// the count needs room for "12 of 345" at the label size; below this the row
+// would start stacking its chips on top of each other
+constexpr int kSearchCountMinDx = 62;
 
 static TouchSearchControls TouchSearchControlsLayout(MainWindow* win) {
     HWND hwnd = win->hwndTocBox;
@@ -2826,12 +2868,31 @@ static TouchSearchControls TouchSearchControlsLayout(MainWindow* win) {
     int d = row.dy;
     int chip = DpiScale(hwnd, 34);
     int gap = DpiScale(hwnd, 8);
+    int tight = DpiScale(hwnd, 4);
+    int minCount = DpiScale(hwnd, kSearchCountMinDx);
     TouchSearchControls c;
+    // [Aa] [ab] ... [collapse] plus the gaps around the count
+    int wide = chip * 3 + tight + gap * 2 + minCount + gap + d + gap + d;
+    c.folded = row.dx < wide;
+    if (c.folded) {
+        // three same-size circles, tight gaps, and the count in what is left
+        int g = DpiScale(hwnd, 6);
+        int y = row.y + (d - chip) / 2;
+        c.next = Rect{row.x + row.dx - chip, y, chip, chip};
+        c.prev = Rect{c.next.x - g - chip, y, chip, chip};
+        c.overflow = Rect{row.x, y, chip, chip};
+        c.matchCase = {};
+        c.wholeWord = {};
+        c.collapse = {};
+        int countX = c.overflow.x + chip + g;
+        c.count = Rect{countX, row.y, std::max(0, c.prev.x - g - countX), row.dy};
+        return c;
+    }
     c.next = Rect{row.x + row.dx - d, row.y, d, d};
     c.prev = Rect{c.next.x - gap - d, row.y, d, d};
     c.collapse = Rect{c.prev.x - gap - chip, row.y + (d - chip) / 2, chip, chip};
     c.matchCase = Rect{row.x, row.y + (d - chip) / 2, chip, chip};
-    c.wholeWord = Rect{c.matchCase.x + chip + DpiScale(hwnd, 4), c.matchCase.y, chip, chip};
+    c.wholeWord = Rect{c.matchCase.x + chip + tight, c.matchCase.y, chip, chip};
     int countX = c.wholeWord.x + chip + gap;
     c.count = Rect{countX, row.y, std::max(0, c.collapse.x - gap - countX), row.dy};
     return c;
@@ -2850,6 +2911,51 @@ static void TouchSearchGoTo(MainWindow* win, int idx) {
     const FindMatch& match = win->findMatches[idx];
     GoToFindMatch(win, match.startPage, match.startGlyph, match.endPage, match.endGlyph);
     HwndInvalidate(win->hwndTocBox, false);
+}
+
+// a find option was toggled: the match list is stale, so run the query again
+static void TouchSearchOptionsChanged(MainWindow* win) {
+    win->touchFindCurrent = -1;
+    TempStr text = win->tocFilterEdit ? win->tocFilterEdit->GetTextTemp() : TempStr{};
+    if (text) {
+        SearchDocumentFromTouchPanel(win, text);
+    }
+    HwndInvalidate(win->hwndTocBox, false);
+}
+
+// the narrow pane's [⋯]: what didn't fit on the row
+static void ShowTouchSearchOverflow(MainWindow* win, const Rect& anchor) {
+    constexpr int kSearchMatchCase = 1;
+    constexpr int kSearchWholeWord = 2;
+    constexpr int kSearchCollapse = 3;
+
+    HMENU popup = CreatePopupMenu();
+    uint mc = MF_STRING | (win->findMatchCase ? MF_CHECKED : MF_UNCHECKED);
+    AppendMenuW(popup, mc, kSearchMatchCase, L"Match case");
+    uint ww = MF_STRING | (win->findMatchWholeWord ? MF_CHECKED : MF_UNCHECKED);
+    AppendMenuW(popup, ww, kSearchWholeWord, L"Whole words only");
+    AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(popup, MF_STRING, kSearchCollapse, L"Collapse to the find bar");
+    MarkMenuOwnerDraw(popup);
+
+    Point pt = HwndClientToScreen(win->hwndTocBox, Point{anchor.x, anchor.y + anchor.dy});
+    int cmd = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_LEFTBUTTON, pt.x, pt.y, 0, win->hwndFrame, nullptr);
+    FreeMenuOwnerDrawInfoData(popup);
+    DestroyMenu(popup);
+
+    switch (cmd) {
+        case kSearchMatchCase:
+            win->findMatchCase = !win->findMatchCase;
+            TouchSearchOptionsChanged(win);
+            break;
+        case kSearchWholeWord:
+            win->findMatchWholeWord = !win->findMatchWholeWord;
+            TouchSearchOptionsChanged(win);
+            break;
+        case kSearchCollapse:
+            CollapseTouchSearchPanelToBar(win);
+            break;
+    }
 }
 
 static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
@@ -2975,16 +3081,23 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
             bool on;
             COLORREF fg;
         };
+        // narrow: the options live behind the [⋯] chip, which stays lit while
+        // one of them is on so the state is still visible
+        bool anyOption = win->findMatchCase || win->findMatchWholeWord;
         Chip chips[] = {
             {c.matchCase, TbIcon::MatchCase, win->findMatchCase, ThemeWindowTextColor()},
             {c.wholeWord, TbIcon::MatchWholeWord, win->findMatchWholeWord, ThemeWindowTextColor()},
             {c.collapse, TbIcon::ArrowsDiagonalMinimize, false, ThemeWindowDarkerTextColor()},
+            {c.overflow, TbIcon::Settings, anyOption, ThemeWindowDarkerTextColor()},
             {c.prev, TbIcon::ChevronUp, false, navFg},
             {c.next, TbIcon::ChevronDown, false, navFg},
         };
         int chipIconDy = DpiScale(hw, 18);
         int navIconDy = DpiScale(hw, 20);
         for (const Chip& chip : chips) {
+            if (chip.r.IsEmpty()) {
+                continue; // folded away into the overflow (or the overflow itself)
+            }
             COLORREF bg = chip.on ? onBg : navBg;
             COLORREF fg = chip.on ? onFg : chip.fg;
             bool round = chip.r.dx == c.next.dx;
@@ -2998,10 +3111,20 @@ static void PaintTouchPanelMode(MainWindow* win, HDC hdc) {
         }
         SetTextColor(hdc, ThemeWindowDarkerTextColor());
         Str countText;
-        if (nMatches == 0) {
-            countText = StrL("No matches");
+        // "No matches" is only true once the whole document has been read: a
+        // search started while the document was still opening (or while the
+        // margins were being scanned) said that of a document full of them.
+        if (TouchSearchWaiting(win)) {
+            countText = c.folded ? StrL("Opening…") : StrL("Opening the document…");
+        } else if (TouchSearchRunning(win)) {
+            countText =
+                nMatches == 0 ? StrL("Searching…") : fmt(c.folded ? "%d so far…" : "%d matches so far…", nMatches);
+        } else if (nMatches == 0) {
+            countText = c.folded ? StrL("None") : StrL("No matches");
         } else if (win->touchFindCurrent >= 0 && win->touchFindCurrent < nMatches) {
-            countText = fmt("%d of %d", win->touchFindCurrent + 1, nMatches);
+            countText = fmt(c.folded ? "%d/%d" : "%d of %d", win->touchFindCurrent + 1, nMatches);
+        } else if (c.folded) {
+            countText = fmt("%d", nMatches);
         } else {
             countText = nMatches == 1 ? StrL("1 match") : fmt("%d matches", nMatches);
         }
@@ -3587,22 +3710,21 @@ static bool ActivateTouchPanelAt(MainWindow* win, Point pt) {
             TouchSearchGoTo(win, win->touchFindCurrent < 0 ? 0 : win->touchFindCurrent + 1);
             return true;
         }
-        if (hasQuery && (c.matchCase.Contains(pt) || c.wholeWord.Contains(pt))) {
+        if (hasQuery && !c.matchCase.IsEmpty() && (c.matchCase.Contains(pt) || c.wholeWord.Contains(pt))) {
             if (c.matchCase.Contains(pt)) {
                 win->findMatchCase = !win->findMatchCase;
             } else {
                 win->findMatchWholeWord = !win->findMatchWholeWord;
             }
-            win->touchFindCurrent = -1;
-            TempStr text = win->tocFilterEdit->GetTextTemp();
-            if (text) {
-                SearchDocumentFromTouchPanel(win, text);
-            }
-            HwndInvalidate(hwnd, false);
+            TouchSearchOptionsChanged(win);
             return true;
         }
-        if (hasQuery && c.collapse.Contains(pt)) {
+        if (hasQuery && !c.collapse.IsEmpty() && c.collapse.Contains(pt)) {
             CollapseTouchSearchPanelToBar(win);
+            return true;
+        }
+        if (hasQuery && !c.overflow.IsEmpty() && c.overflow.Contains(pt)) {
+            ShowTouchSearchOverflow(win, c.overflow);
             return true;
         }
         int rowDy = DpiScale(hwnd, TouchSearchResultRowDy(win));
@@ -4118,7 +4240,12 @@ static void OnTocFilterTextChanged(MainWindow* win) {
         win->touchFindCurrent = -1; // a new query, a new list
         EnsureTouchWordIndex(win);
         UpdateTouchSuggestions(win);
-        if (text) {
+        str::FreePtr(&win->touchSearchPending);
+        if (text && !win->IsDocLoaded()) {
+            // the document is still opening: hold the query (the pane says so)
+            // and run it the moment it is ready
+            win->touchSearchPending = str::Dup(text);
+        } else if (text) {
             SearchDocumentFromTouchPanel(win, text);
         } else {
             AbortFinding(win, true);
@@ -4128,6 +4255,20 @@ static void OnTocFilterTextChanged(MainWindow* win) {
         return;
     }
     TocFilterChanged(win);
+}
+
+// the document has finished opening: run the query that was typed while it was
+// still loading
+void TouchSearchRunPending(MainWindow* win) {
+    if (!win || !win->touchSearchPending || !win->IsDocLoaded()) {
+        return;
+    }
+    TempStr text = str::DupTemp(win->touchSearchPending);
+    str::FreePtr(&win->touchSearchPending);
+    if (IsTouchChrome(win) && win->touchPanelMode == TouchPanelMode::Search) {
+        SearchDocumentFromTouchPanel(win, text);
+        HwndInvalidate(win->hwndTocBox, false);
+    }
 }
 
 static LRESULT CALLBACK WndProcTocFilterEdit(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR /*subclassId*/,

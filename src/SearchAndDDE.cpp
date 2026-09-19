@@ -951,6 +951,8 @@ static void CountEndTask(CountEndTaskData* d) {
         return; // superseded (shouldn't happen with the single-worker model)
     }
     win->findCountThread = nullptr;
+    logf("find: %d matches for '%s'%s\n", len(*d->positions), ctd->text,
+         win->findCountEpoch == ctd->epoch ? StrL("") : StrL(" (superseded)"));
     if (win->findCountEpoch == ctd->epoch) {
         // not canceled: install the freshly built cache (steal text from ctd)
         str::FreePtr(&win->findCountText);

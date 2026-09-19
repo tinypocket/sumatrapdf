@@ -523,6 +523,7 @@ bool EngineBase::TryGetTextForPage(int pageNo, int* lenOut, Rect** coordsOut) {
     }
 
     if (extract) {
+        ScopedMutex extractScope(&textExtractLock);
         PageText extracted;
         if (!TryExtractPageText(pageNo, &extracted)) {
             if (lenOut) {
@@ -583,6 +584,8 @@ Str EngineBase::GetTextForPage(int pageNo, int* lenOut, Rect** coordsOut) {
     }
 
     if (extract) {
+        // one extraction at a time across every thread (see textExtractLock)
+        ScopedMutex extractScope(&textExtractLock);
         PageText extracted = ExtractPageText(pageNo);
         EnsurePageText(&extracted);
 

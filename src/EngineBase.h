@@ -614,6 +614,12 @@ class EngineBase {
     PageText* pagesText = nullptr;
     TextExtractionState* pagesTextState = nullptr;
     Mutex textCacheLock;
+    // One extraction at a time: mupdf is not safe for two threads pulling text
+    // out of the same document at once, and several do it - a find, its
+    // full-document count, the smart-margin scan, the search suggestions'
+    // word index. A search started while the scan was running came back with
+    // nothing. Held only around the extraction itself, never the cache.
+    Mutex textExtractLock;
 
     str::Builder errors;
     Mutex errorsLock;

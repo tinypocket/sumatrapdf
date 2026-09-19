@@ -31,6 +31,8 @@ int TouchSidebarRowDy();
 // the bookmarks tree's row height, a size down while the pane is narrow
 int TocTreeRowDy(MainWindow*);
 void UpdateTocCompact(MainWindow*, bool force);
+// run a Search-pane query that was typed before the document had opened
+void TouchSearchRunPending(MainWindow*);
 
 // When true (default), the bookmarks pane highlights every TOC entry that
 // matches the current page (same page number as the best match, plus the

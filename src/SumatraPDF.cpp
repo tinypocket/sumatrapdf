@@ -2343,6 +2343,8 @@ static void ReplaceDocumentInCurrentTab(LoadArgs* args, DocController* ctrl, Fil
 
     SetFrameTitleForTab(tab, false);
     UpdateUiForCurrentTab(win);
+    // a query typed into the Search pane while this document was opening
+    TouchSearchRunPending(win);
 
     if (CanAccessDisk() && tab->GetEngineType() == kindEngineMupdf) {
         ReportIf(!win->AsFixed() || win->AsFixed()->pdfSync);

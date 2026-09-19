@@ -383,3 +383,8 @@ struct DisplayModel : DocController {
 };
 
 extern bool gPredictiveRender;
+
+// The smart-margin scan's result is remembered on disk, keyed by the document's
+// path, size and timestamp, so a long book is read once rather than on every
+// open. Drops that entry, for the ⋯ menu's "Rescan margins".
+void ForgetSmartMarginCache(Str docPath);

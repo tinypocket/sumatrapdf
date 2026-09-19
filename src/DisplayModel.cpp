@@ -46,6 +46,7 @@
 #include "base/Base.h"
 #include "base/Win.h"
 #include "base/Dpi.h"
+#include "base/Pixmap.h"
 #include "base/Timer.h"
 
 #include "wingui/UIModels.h"
@@ -66,6 +67,8 @@
 #include "TextSearch.h"
 #include "RenderCache.h"
 #include "base/UITask.h"
+#include "base/File.h"
+#include "AppTools.h"
 #include "WindowTab.h"
 #include "MainWindow.h"
 
@@ -803,6 +806,87 @@ static bool ComputePageBody(EngineBase* engine, int pageNo, const Vec<TextLine>&
     return true;
 }
 
+// --- scanned pages ----------------------------------------------------------
+// A scanned book is one image per page, and the image covers the whole page:
+// what the page draws says nothing about where its margins end, and there is
+// no text to read either. The page is rendered small (a few milliseconds) and
+// the ink is found in the pixels instead.
+
+// the size the page is rendered at to look for ink; enough to see a line of
+// text, small enough to be cheap on a book of hundreds of pages
+constexpr float kInkScanDpi = 24.0f;
+// a row counts as inked when this much of its width is darker than the paper
+constexpr float kInkRowFraction = 0.01f;
+
+static bool ComputeInkBox(EngineBase* engine, int pageNo, const RectF& media, RectF* out) {
+    if (media.IsEmpty()) {
+        return false;
+    }
+    RenderPageArgs args(pageNo, kInkScanDpi / 72.0f, 0);
+    Pixmap* pix = engine->RenderPage(args);
+    if (!pix || !pix->data || pix->width < 8 || pix->height < 8) {
+        FreePixmap(pix);
+        return false;
+    }
+    int w = pix->width;
+    int h = pix->height;
+    int bpp = PixmapBytesPerPixel(pix->format);
+    // the paper's own shade, so a grey or yellowed scan is not all "ink":
+    // the brightness nine tenths of the pixels are below
+    Vec<u8> lum;
+    VecReserve(lum, w * h);
+    for (int y = 0; y < h; y++) {
+        const u8* row = pix->data + (size_t)y * pix->stride;
+        for (int x = 0; x < w; x++) {
+            const u8* p = row + (size_t)x * bpp;
+            lum.Append((u8)((p[0] * 29 + p[1] * 150 + p[2] * 77) >> 8)); // BGR
+        }
+    }
+    Vec<u8> sorted = lum;
+    VecSort(sorted, [](const u8* a, const u8* b) -> int { return (int)*a - (int)*b; });
+    int paper = sorted[(int)(len(sorted) * 0.9)];
+    int threshold = std::max(24, paper - 48);
+    int minDark = std::max(2, (int)(w * kInkRowFraction));
+
+    int top = -1;
+    int bottom = -1;
+    int left = w;
+    int right = -1;
+    for (int y = 0; y < h; y++) {
+        int dark = 0;
+        int rowLeft = w;
+        int rowRight = -1;
+        for (int x = 0; x < w; x++) {
+            if (lum[y * w + x] < threshold) {
+                dark++;
+                rowLeft = std::min(rowLeft, x);
+                rowRight = std::max(rowRight, x);
+            }
+        }
+        if (dark >= minDark) {
+            if (top < 0) {
+                top = y;
+            }
+            bottom = y;
+            left = std::min(left, rowLeft);
+            right = std::max(right, rowRight);
+        }
+    }
+    FreePixmap(pix);
+    if (top < 0 || bottom <= top) {
+        return false; // a blank page: leave it alone
+    }
+    // one pixel of slack, so a stroke's faint edge is not clipped
+    float sx = media.dx / (float)w;
+    float sy = media.dy / (float)h;
+    float y0 = media.y + std::max(0, top - 1) * sy;
+    float y1 = media.y + std::min(h, bottom + 2) * sy;
+    float x0 = media.x + std::max(0, left - 1) * sx;
+    float x1 = media.x + std::min(w, right + 2) * sx;
+    *out = RectF{x0, y0, std::max(1.0f, x1 - x0), std::max(1.0f, y1 - y0)};
+    return true;
+}
+
 // --- background smart-margin scan ------------------------------------------
 // Text extraction for every page of a long book takes many seconds, which used
 // to happen inside the first layout, on the UI thread. The scan does it on a
@@ -831,6 +915,141 @@ struct SmartMarginProgress {
     int done = 0;
     int total = 0;
 };
+
+// Reading every page of a 600-page scan takes tens of seconds, and nothing
+// about the result changes until the file does - so the scan's output is kept
+// next to the settings, keyed by the document's path, size and timestamp. A
+// stale or foreign file simply misses and the scan runs as before. The ⋯ menu's
+// "Rescan margins" deletes the entry (ForgetSmartMarginCache).
+constexpr u32 kSmartCacheMagic = 0x314d5343; // "CSM1"
+constexpr u32 kSmartCacheVersion = 1;
+
+struct SmartMarginCacheHeader {
+    u32 magic;
+    u32 version;
+    u32 entrySize; // sizeof(PageBodyCache): a layout change invalidates the file
+    i32 nPages;
+    u32 flags; // bit 0: the running-header/footer pass was part of the scan
+    u32 pathHash;
+    i64 fileSize;
+    u64 fileTime;
+    float hfTopPt;
+    float hfBottomPt;
+};
+
+static u64 SmartCachePathHash(Str path) {
+    u64 h = 1469598103934665603ull;
+    for (int i = 0; i < path.len; i++) {
+        // the path is matched case-insensitively, as the filesystem does
+        char c = path.s[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = (char)(c - 'A' + 'a');
+        }
+        h = (h ^ (u8)c) * 1099511628211ull;
+    }
+    return h;
+}
+
+static TempStr SmartCachePathTemp(Str docPath) {
+    if (docPath.len == 0) {
+        return {};
+    }
+    TempStr dir = GetPathInAppDataDirTemp(StrL("smartmargins"));
+    if (!dir) {
+        return {};
+    }
+    if (!dir::Exists(dir) && !dir::Create(dir)) {
+        return {};
+    }
+    TempStr name = fmt("%016llx.bin", (unsigned long long)SmartCachePathHash(docPath));
+    return path::JoinTemp(dir, name);
+}
+
+static void SmartCacheFileKey(Str docPath, i64* sizeOut, u64* timeOut) {
+    *sizeOut = file::GetSize(docPath);
+    FILETIME ft = file::GetModificationTime(docPath);
+    *timeOut = ((u64)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+}
+
+static bool LoadSmartMarginCache(SmartMarginScan* s) {
+    Str docPath = s->engine->FilePath();
+    TempStr cachePath = SmartCachePathTemp(docPath);
+    if (!cachePath) {
+        return false;
+    }
+    Str data = file::ReadFile(cachePath);
+    if (!data.s) {
+        return false;
+    }
+    defer {
+        str::Free(data);
+    };
+    SmartMarginCacheHeader h;
+    int entries = s->nPages;
+    i64 want = (i64)sizeof(h) + (i64)entries * (i64)sizeof(DisplayModel::PageBodyCache);
+    if (data.len != want) {
+        return false;
+    }
+    memcpy(&h, data.s, sizeof(h));
+    i64 fileSize = 0;
+    u64 fileTime = 0;
+    SmartCacheFileKey(docPath, &fileSize, &fileTime);
+    u32 flags = s->detectRunningBands ? 1 : 0;
+    bool ok = h.magic == kSmartCacheMagic && h.version == kSmartCacheVersion &&
+              h.entrySize == (u32)sizeof(DisplayModel::PageBodyCache) && h.nPages == entries && h.flags == flags &&
+              h.pathHash == (u32)SmartCachePathHash(docPath) && h.fileSize == fileSize && h.fileTime == fileTime;
+    if (!ok) {
+        return false;
+    }
+    s->hfTopPt = h.hfTopPt;
+    s->hfBottomPt = h.hfBottomPt;
+    const u8* p = (const u8*)data.s + sizeof(h);
+    for (int i = 0; i < entries; i++) {
+        DisplayModel::PageBodyCache e;
+        memcpy(&e, p + (size_t)i * sizeof(e), sizeof(e));
+        s->results.Append(e);
+    }
+    return true;
+}
+
+static void SaveSmartMarginCache(SmartMarginScan* s) {
+    Str docPath = s->engine->FilePath();
+    TempStr cachePath = SmartCachePathTemp(docPath);
+    if (!cachePath || len(s->results) != s->nPages) {
+        return;
+    }
+    SmartMarginCacheHeader h{};
+    h.magic = kSmartCacheMagic;
+    h.version = kSmartCacheVersion;
+    h.entrySize = (u32)sizeof(DisplayModel::PageBodyCache);
+    h.nPages = s->nPages;
+    h.flags = s->detectRunningBands ? 1 : 0;
+    h.pathHash = (u32)SmartCachePathHash(docPath);
+    SmartCacheFileKey(docPath, &h.fileSize, &h.fileTime);
+    h.hfTopPt = s->hfTopPt;
+    h.hfBottomPt = s->hfBottomPt;
+    size_t entryBytes = (size_t)s->nPages * sizeof(DisplayModel::PageBodyCache);
+    size_t total = sizeof(h) + entryBytes;
+    u8* buf = AllocArray<u8>((int)total);
+    if (!buf) {
+        return;
+    }
+    memcpy(buf, &h, sizeof(h));
+    for (int i = 0; i < s->nPages; i++) {
+        memcpy(buf + sizeof(h) + (size_t)i * sizeof(DisplayModel::PageBodyCache), &s->results[i],
+               sizeof(DisplayModel::PageBodyCache));
+    }
+    file::WriteFile(cachePath, Str((char*)buf, (int)total));
+    free(buf);
+}
+
+// the ⋯ menu's "Rescan margins": drop what was remembered for this document
+void ForgetSmartMarginCache(Str docPath) {
+    TempStr cachePath = SmartCachePathTemp(docPath);
+    if (cachePath) {
+        file::Delete(cachePath);
+    }
+}
 
 static bool SmartScanIsCurrent(DisplayModel* dm, int gen) {
     return gLiveDisplayModels.Contains(dm) && dm->smartScanGen == gen;
@@ -884,6 +1103,13 @@ static void PostSmartMarginProgress(SmartMarginScan* s, int done, int total) {
 }
 
 static void SmartMarginScanThread(SmartMarginScan* s) {
+    auto timer = TimeGet();
+    if (LoadSmartMarginCache(s)) {
+        logf("smart margins: %d pages from the cache in %.0f ms\n", s->nPages, TimeSinceInMs(timer));
+        PostSmartMarginProgress(s, s->nPages, s->nPages);
+        uitask::Post(MkFunc0<SmartMarginScan>(SmartMarginScanFinishedUi, s), "SmartMarginScanFinished");
+        return;
+    }
     if (s->detectRunningBands) {
         DetectRunningHeaderFooterIn(s->engine, &s->hfTopPt, &s->hfBottomPt);
     }
@@ -919,6 +1145,16 @@ static void SmartMarginScanThread(SmartMarginScan* s) {
         DisplayModel::PageBody body;
         DisplayModel::PageBodyCache entry;
         entry.contentBox = s->engine->PageContentBox(pageNo);
+        // A page whose content fills it (a scan: one image, edge to edge) has
+        // told us nothing. Read its pixels instead.
+        RectF media = s->engine->PageMediabox(pageNo);
+        bool fullBleed = !media.IsEmpty() && entry.contentBox.dy >= media.dy * 0.97f;
+        if (fullBleed) {
+            RectF ink;
+            if (ComputeInkBox(s->engine, pageNo, media, &ink) && ink.dy < media.dy * 0.97f) {
+                entry.contentBox = ink;
+            }
+        }
         if (ComputePageBody(s->engine, pageNo, lines, s->hfTopPt, s->hfBottomPt, repeatedTop, repeatedBottom, &body)) {
             entry.state = 2;
             entry.hasHeader = body.hasHeader;
@@ -935,6 +1171,8 @@ static void SmartMarginScanThread(SmartMarginScan* s) {
             PostSmartMarginProgress(s, s->nPages + pageNo, total);
         }
     }
+    logf("smart margins: scanned %d pages in %.0f ms\n", s->nPages, TimeSinceInMs(timer));
+    SaveSmartMarginCache(s);
     uitask::Post(MkFunc0<SmartMarginScan>(SmartMarginScanFinishedUi, s), "SmartMarginScanFinished");
 }
 

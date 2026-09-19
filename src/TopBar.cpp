@@ -2410,6 +2410,7 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
     constexpr int kOverflowSmartHeaderFooter = 2;
     constexpr int kOverflowTrimDialog = 3;
     constexpr int kOverflowNightLight = 4;
+    constexpr int kOverflowRescanMargins = 5;
 
     HMENU popup = CreatePopupMenu();
     bool on = gGlobalPrefs->smartMargins;
@@ -2423,6 +2424,9 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
     uint hfFlags =
         MF_STRING | (hf ? MF_CHECKED : MF_UNCHECKED) | (hasDoc && on ? MF_ENABLED : (MF_DISABLED | MF_GRAYED));
     AppendMenuW(popup, hfFlags, kOverflowSmartHeaderFooter, L"Smart header && footer");
+    // what the scan found is remembered per document; this reads the pages again
+    uint rescan = (hasDoc && on) ? MF_ENABLED : (MF_DISABLED | MF_GRAYED);
+    AppendMenuW(popup, MF_STRING | rescan, kOverflowRescanMargins, L"Rescan margins");
     // the manual fallback, for documents nothing can be read from
     AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(popup, MF_STRING | enabled, kOverflowTrimDialog, L"Trim headers && footers…");
@@ -2439,6 +2443,19 @@ void TopBarWnd::ShowOverflowMenu(const Rect& anchor) {
 
     if (cmd == kOverflowTrimDialog) {
         ShowTrimHeaderFooterDialog(win);
+        HwndInvalidate(hwnd, false);
+        return;
+    }
+    if (cmd == kOverflowRescanMargins) {
+        DisplayModel* dm = win->AsFixed();
+        if (dm && dm->GetEngine()) {
+            ForgetSmartMarginCache(dm->GetEngine()->FilePath());
+            ScrollState state = dm->GetScrollState();
+            dm->InvalidateSmartMargins();
+            dm->Relayout(dm->GetZoomVirtual(), dm->GetRotation());
+            dm->SetScrollState(state);
+            win->RedrawAll(true);
+        }
         HwndInvalidate(hwnd, false);
         return;
     }

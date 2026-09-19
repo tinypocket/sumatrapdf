@@ -131,6 +131,7 @@ MainWindow::~MainWindow() {
     str::Free(tocStickyText);
     FreeTouchThumbnails(this);
     FreeTouchWordIndex(this);
+    str::FreePtr(&touchSearchPending);
     str::Free(touchBookmarkSearchQuery);
     str::Free(touchDocumentSearchQuery);
 

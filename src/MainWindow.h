@@ -244,6 +244,10 @@ struct MainWindow {
 
     // whether the current tab's ToC has been loaded into the tree
     bool tocLoaded = false;
+    // A query typed into the touch Search pane before the document had
+    // finished opening: kept here and run as soon as it has (see
+    // TouchSearchRunPending), instead of coming back with no matches.
+    Str touchSearchPending;
     // the bookmarks tree is in its smaller font (the pane is narrow, see
     // TouchSidebarCompactDx)
     bool tocCompact = false;
