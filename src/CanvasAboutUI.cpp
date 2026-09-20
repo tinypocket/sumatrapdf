@@ -267,6 +267,11 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
             if ((HWND)lp == win->hwndHomeSearch) {
                 UINT notify = HIWORD(wp);
                 if (notify == EN_CHANGE) {
+                    if (win->homeSearchRestoring) {
+                        // putting the saved query back into a freshly created
+                        // edit, not a keystroke: leave the view where it was
+                        return 0;
+                    }
                     win->homePageScrollY = 0;
                     if (win->touchView == TouchView::Library) {
                         win->libraryTreeScrollY = 0;
@@ -429,6 +434,14 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
             HomePageHideCloseButton();
             HomePageOnMouseHWheel(win, -GET_WHEEL_DELTA_WPARAM(wp));
             return 0;
+
+        case WM_GESTURE:
+            // two fingers on the Library resize its cards, the way a pinch
+            // zooms a document
+            if (HomePageOnGesture(win, wp, lp)) {
+                return 0;
+            }
+            break;
 
         case WM_POINTERDOWN:
         case WM_POINTERUPDATE:

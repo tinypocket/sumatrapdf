@@ -176,6 +176,11 @@ LibraryPinnedFolders =
 ; folders hidden in the Library view (introduced in version 3.8)
 LibraryHiddenFolders =
 
+; size of the file cards and folder tiles in the Library, as a percentage.
+; Changed by pinching the Library with two fingers, or from its view menu.
+; Clamped to 60 - 200 (introduced in version 3.8)
+LibraryCardZoom = 100
+
 ; if true, favorites within each file are sorted alphabetically by name (or page
 ; label); if false (the default), they are sorted by page number (introduced in
 ; version 3.7)

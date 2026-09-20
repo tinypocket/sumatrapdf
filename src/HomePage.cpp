@@ -995,16 +995,25 @@ static void EnsureHomeSearchCreated(MainWindow* win) {
     SendMessage(win->hwndHomeSearch, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(margin, margin));
     // restore the query from before the edit control was destroyed
     // (e.g. by switching to a document tab and back)
+    // which view's query this edit is showing, so it goes back into the same
+    // slot when it is destroyed - by then the view may already have changed
+    // (LoadModelIntoTab switches the view before taking the box down)
+    win->homeSearchOwner = win->touchView;
     Str query = win->touchView == TouchView::Library ? win->librarySearchQuery : win->homeSearchQuery;
     if (len(query) > 0) {
+        // WM_SETTEXT sends EN_CHANGE, which the canvas reads as "the user just
+        // typed": it would jump to the search results and scroll both panes
+        // back to the top, throwing away the folder the user was in
+        win->homeSearchRestoring = true;
         HwndSetText(win->hwndHomeSearch, query);
+        win->homeSearchRestoring = false;
     }
 }
 
 void HomePageDestroySearch(MainWindow* win) {
     if (win->hwndHomeSearch) {
         TempStr query = HwndGetTextTemp(win->hwndHomeSearch);
-        Str* savedQuery = win->touchView == TouchView::Library ? &win->librarySearchQuery : &win->homeSearchQuery;
+        Str* savedQuery = win->homeSearchOwner == TouchView::Library ? &win->librarySearchQuery : &win->homeSearchQuery;
         str::ReplaceWithCopy(savedQuery, query);
         DestroyWindow(win->hwndHomeSearch);
         win->hwndHomeSearch = nullptr;
@@ -2716,9 +2725,44 @@ static void DrawTouchFileCard(MainWindow* win, HDC hdc, FileState* fs, const Rec
     DrawTouchFileCardPath(win, hdc, fs->filePath, fs, nullptr, card, showProgress, linkClip, false, true);
 }
 
+// The Library's cards and folder tiles are sized by a zoom percentage the user
+// sets by pinching the view or from its view menu. Every metric that makes up a
+// card goes through here, so one factor moves the whole grid together.
+constexpr int kLibraryZoomMin = 60;
+constexpr int kLibraryZoomMax = 200;
+
+int LibraryCardZoom() {
+    int zoom = gGlobalPrefs ? gGlobalPrefs->libraryCardZoom : 100;
+    if (zoom <= 0) {
+        zoom = 100; // an old or hand-edited settings file
+    }
+    return std::clamp(zoom, kLibraryZoomMin, kLibraryZoomMax);
+}
+
+// the steps the view menu offers and a pinch snaps to on the way past
+static const int gLibraryZoomSteps[] = {60, 75, 90, 100, 115, 135, 160, 200};
+
+void SetLibraryCardZoom(int zoom) {
+    zoom = std::clamp(zoom, kLibraryZoomMin, kLibraryZoomMax);
+    if (!gGlobalPrefs || gGlobalPrefs->libraryCardZoom == zoom) {
+        return;
+    }
+    gGlobalPrefs->libraryCardZoom = zoom;
+    SaveSettings();
+}
+
+// a card metric at the current zoom: DpiScale() of the design value, scaled
+static int LibraryScale(HDC hdc, int designDy) {
+    return DpiScale(hdc, designDy) * LibraryCardZoom() / 100;
+}
+
+static int LibraryScale(HWND hwnd, int designDy) {
+    return DpiScale(hwnd, designDy) * LibraryCardZoom() / 100;
+}
+
 static int TouchCardColumns(HWND hwnd, int width) {
-    int cardDx = DpiScale(hwnd, 148);
-    int gap = DpiScale(hwnd, 20);
+    int cardDx = LibraryScale(hwnd, 148);
+    int gap = LibraryScale(hwnd, 20);
     return std::max(1, (width + gap) / (cardDx + gap));
 }
 
@@ -2871,9 +2915,9 @@ static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc
 
     int pad = DpiScale(hdc, 24);
     int gap = DpiScale(hdc, 20);
-    int cardDx = DpiScale(hdc, 148);
-    int cardDy = DpiScale(hdc, 196);
-    int cardBlockDy = cardDy + DpiScale(hdc, 50);
+    int cardDx = LibraryScale(hdc, 148);
+    int cardDy = LibraryScale(hdc, 196);
+    int cardBlockDy = cardDy + LibraryScale(hdc, 50);
     // No "Currently open" carousel: an open document is still a recent file and
     // appears in the RECENT section like any other, so the carousel only
     // duplicated it and pushed everything else down.
@@ -3556,6 +3600,30 @@ static void TouchLibrarySelectFallback(MainWindow* win) {
 static void LibraryNavNoteSearch(MainWindow* win);
 static void ShowFolderFromTouchSearch(MainWindow* win, Str folderPath);
 
+// The card-size button's menu: the same steps a pinch snaps to, ticked at
+// whatever the Library is showing now.
+static void ShowLibraryCardSizeMenu(MainWindow* win) {
+    static const char* kNames[] = {"Smallest", "Smaller", "Small", "Default", "Large", "Larger", "Largest", "Huge"};
+    int current = LibraryCardZoom();
+    HMENU popup = CreatePopupMenu();
+    for (int i = 0; i < (int)dimof(gLibraryZoomSteps); i++) {
+        int zoom = gLibraryZoomSteps[i];
+        TempStr label = fmt("%s  (%d%%)", Str(kNames[i]), zoom);
+        uint flags = MF_STRING | (zoom == current ? MF_CHECKED : MF_UNCHECKED);
+        AppendMenuW(popup, flags, (UINT_PTR)(i + 1), ToWStrTemp(label).s);
+    }
+    MarkMenuOwnerDraw(popup);
+    Point pt = HwndGetCursorPos(win->hwndCanvas);
+    pt = HwndClientToScreen(win->hwndCanvas, pt);
+    int cmd = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_LEFTBUTTON, pt.x, pt.y, 0, win->hwndFrame, nullptr);
+    FreeMenuOwnerDrawInfoData(popup);
+    DestroyMenu(popup);
+    if (cmd >= 1 && cmd <= (int)dimof(gLibraryZoomSteps)) {
+        SetLibraryCardZoom(gLibraryZoomSteps[cmd - 1]);
+        HwndInvalidate(win->hwndCanvas);
+    }
+}
+
 bool HandleTouchLibraryLink(MainWindow* win, Str url) {
     if (!win || !gGlobalPrefs) {
         return false;
@@ -3639,6 +3707,8 @@ bool HandleTouchLibraryLink(MainWindow* win, Str url) {
     } else if (str::Eq(url, kLinkLibraryListView)) {
         win->libraryListView = true;
         win->libraryFilesScrollY = 0;
+    } else if (str::Eq(url, kLinkLibraryCardSize)) {
+        ShowLibraryCardSizeMenu(win);
     } else if (str::Eq(url, kLinkLibrarySearchScopeOpen)) {
         win->librarySearchScopePickerOpen = true;
     } else if (str::Eq(url, kLinkLibrarySearchScopeDone)) {
@@ -3985,14 +4055,14 @@ static bool TouchLibraryFolderVisible(MainWindow* win, const StrVecWithData<Touc
         }
     }
     int pad = DpiScale(hdc, 24);
-    int gap = DpiScale(hdc, 20);
-    int cardDx = DpiScale(hdc, 148);
-    int cardDy = DpiScale(hdc, 196);
+    int gap = LibraryScale(hdc, 20);
+    int cardDx = LibraryScale(hdc, 148);
+    int cardDy = LibraryScale(hdc, 196);
     int columns = TouchCardColumns(win->hwndCanvas, rc.dx - leftDx - 2 * pad);
     for (int i = 0; i < len(selectedFiles); i++) {
         int col = i % columns;
         int row = i / columns;
-        Rect card{leftDx + pad + col * (cardDx + gap), headerDy + pad + row * (cardDy + DpiScale(hdc, 70)), cardDx,
+        Rect card{leftDx + pad + col * (cardDx + gap), headerDy + pad + row * (cardDy + LibraryScale(hdc, 70)), cardDx,
                   cardDy};
         int fileIdx = selectedFiles[i];
         Str filePath = files[fileIdx];
@@ -4894,10 +4964,14 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     // for Recent (the recent cards have no list variant)
     Rect headerAction{rc.dx - DpiScale(hdc, 24) - 2 * viewButtonDy, (headerDy - viewButtonDy) / 2, 2 * viewButtonDy,
                       viewButtonDy};
+    // leftmost edge of the buttons at the right end of the header, so the card
+    // size button can sit beside whatever else ended up there
+    int headerActionsLeft = headerAction.x;
     if (recentSelected) {
         int openDx = DpiScale(hdc, 118);
         Rect open{rc.dx - DpiScale(hdc, 24) - openDx, (headerDy - DpiScale(hdc, 40)) / 2, openDx, DpiScale(hdc, 40)};
         headerAction = open;
+        headerActionsLeft = open.x;
         FillHomeRoundRect(hdc, open, open.dy / 2, selBg);
         SetTextColor(hdc, selFg);
         int openIconDy = DpiScale(hdc, 16);
@@ -4921,6 +4995,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
             int pinBtnDy = viewButtonDy;
             int pinGap = DpiScale(hdc, 8);
             Rect pinBtn{headerAction.x - pinGap - pinBtnDy, headerAction.y, pinBtnDy, pinBtnDy};
+            headerActionsLeft = pinBtn.x;
             bool isPinned = TouchLibraryPathIn(gGlobalPrefs->libraryPinnedFolders, selectedPath);
             COLORREF pinBg = isPinned ? ThemeWindowLinkColor() : ThemeHotBackgroundColor();
             FillHomeRoundRect(hdc, pinBtn, DpiScale(hdc, 11), pinBg);
@@ -4960,6 +5035,22 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         }
         win->staticLinks.Append(new StaticLink(contentView, Str(kLinkLibraryContentView), StrL("Content view")));
         win->staticLinks.Append(new StaticLink(listView, Str(kLinkLibraryListView), StrL("List view")));
+    }
+
+    // Card size, beside the view controls. Pinching the pane sets the same
+    // value; this is the way to it without a touch screen. List rows are all
+    // one height, so it only means something in the card view.
+    if (!win->libraryListView) {
+        int sizeDy = viewButtonDy;
+        int sizeGap = DpiScale(hdc, 8);
+        Rect sizeBtn{headerActionsLeft - sizeGap - sizeDy, (headerDy - sizeDy) / 2, sizeDy, sizeDy};
+        FillHomeRoundRect(hdc, sizeBtn, DpiScale(hdc, 11), ThemeHotBackgroundColor());
+        SetTextColor(hdc, ThemeWindowDarkerTextColor());
+        // the percentage itself: what it is set to now, and a hint that it moves
+        TempStr sizeText = fmt("%d%%", LibraryCardZoom());
+        HdcDrawText(hdc, sizeText, sizeBtn, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, 11, FW_SEMIBOLD));
+        win->staticLinks.Append(new StaticLink(sizeBtn, Str(kLinkLibraryCardSize), StrL("Card size")));
     }
 
     // Back / Forward at the head of the row, ahead of the title. Greyed when
@@ -5061,21 +5152,21 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         int filesViewportDy = std::max(0, rc.dy - headerDy);
         int itemCount = len(selectedFolders) + len(selectedFiles);
         int filesContentDy = 0;
-        int gap = DpiScale(hdc, 20);
-        int cardDx = DpiScale(hdc, 148);
-        int cardDy = DpiScale(hdc, 196);
+        int gap = LibraryScale(hdc, 20);
+        int cardDx = LibraryScale(hdc, 148);
+        int cardDy = LibraryScale(hdc, 196);
         int columns = TouchCardColumns(win->hwndCanvas, rc.dx - leftDx - 2 * pad);
         // search results carry a third line under each card / a second line
         // in each row: the folder the match lives in
-        int cardStepY = cardDy + DpiScale(hdc, showingSearchFiles ? 102 : 70);
+        int cardStepY = cardDy + LibraryScale(hdc, showingSearchFiles ? 102 : 70);
         int listPadY = DpiScale(hdc, 8);
         int listRowDy = DpiScale(hdc, showingSearchFiles ? 58 : 44);
         // folders: a denser grid of square tiles above the file cards (see
         // DrawTouchLibraryFolderCard), with a two-line name and count under each
-        int tileDx = DpiScale(hdc, 112);
-        int tileGap = DpiScale(hdc, 16);
+        int tileDx = LibraryScale(hdc, 112);
+        int tileGap = LibraryScale(hdc, 16);
         int tileColumns = std::max(1, (rc.dx - leftDx - 2 * pad + tileGap) / (tileDx + tileGap));
-        int tileStepY = tileDx + DpiScale(hdc, 80);
+        int tileStepY = tileDx + LibraryScale(hdc, 80);
         int foldersBlockDy = TouchCardRows(len(selectedFolders), tileColumns) * tileStepY;
         if (foldersBlockDy > 0 && len(selectedFiles) > 0) {
             foldersBlockDy += DpiScale(hdc, 8);
@@ -5101,13 +5192,22 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
             }
         }
         win->libraryFilesScrollMaxY = std::max(0, filesContentDy - filesViewportDy);
-        win->libraryFilesScrollY = std::clamp(win->libraryFilesScrollY, 0, win->libraryFilesScrollMaxY);
+        // The scan may not have filled this folder yet. Clamping against a list
+        // that is still empty would throw away a scroll position restored from
+        // before a document was opened, so leave the field alone and paint from
+        // the top until there is something to scroll.
+        bool listReady = !libraryLoading || win->libraryFilesScrollMaxY > 0;
+        int filesScrollY = 0;
+        if (listReady) {
+            win->libraryFilesScrollY = std::clamp(win->libraryFilesScrollY, 0, win->libraryFilesScrollMaxY);
+            filesScrollY = win->libraryFilesScrollY;
+        }
         Rect filesClip{leftDx, headerDy, std::max(0, rc.dx - leftDx), filesViewportDy};
         int filesDc = SaveDC(hdc);
         IntersectClipRect(hdc, filesClip.x, filesClip.y, filesClip.x + filesClip.dx, filesClip.y + filesClip.dy);
 
         if (win->libraryListView) {
-            int rowY = headerDy + listPadY - win->libraryFilesScrollY;
+            int rowY = headerDy + listPadY - filesScrollY;
             auto drawListRow = [&](bool isFolder, int idx) {
                 Rect row{leftDx + DpiScale(hdc, 16), rowY, rc.dx - leftDx - DpiScale(hdc, 32), listRowDy};
                 rowY += listRowDy;
@@ -5181,7 +5281,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
                 drawListRow(false, fileIdx);
             }
         } else {
-            int gridTop = headerDy + pad - win->libraryFilesScrollY;
+            int gridTop = headerDy + pad - filesScrollY;
             for (int j = 0; j < len(selectedFolders); j++) {
                 Rect tile{leftDx + pad + (j % tileColumns) * (tileDx + tileGap),
                           gridTop + (j / tileColumns) * tileStepY, tileDx, tileDx};
@@ -6194,6 +6294,60 @@ static void DrawPinFlight(MainWindow* win, HDC hdc) {
         {(float)glyph.x + glyph.dx * 0.27f, (float)glyph.y + glyph.dy * 0.84f},
     };
     gfx.FillPolygon(&brush, pts, dimofi(pts));
+}
+
+// A pinch on the Library resizes its cards, the way one zooms a document. The
+// gesture reports the distance between the fingers; the ratio against the last
+// report scales the card zoom, so it tracks the fingers rather than stepping.
+// The value is only written to the settings when the fingers come off.
+bool HomePageOnGesture(MainWindow* win, WPARAM wp, LPARAM lp) {
+    if (!win || !IsTouchChrome(win) || win->touchView != TouchView::Library) {
+        return false;
+    }
+    GESTUREINFO gi{};
+    gi.cbSize = sizeof(gi);
+    HGESTUREINFO hgi = (HGESTUREINFO)lp;
+    if (!GetGestureInfo(hgi, &gi)) {
+        CloseGestureInfoHandle(hgi);
+        return true; // the handle is ours now; don't hand the message on
+    }
+    if (gi.dwID != GID_ZOOM) {
+        // leave panning and everything else to the pointer handler, which
+        // already drives the kinetic scroll
+        return false;
+    }
+    // the finger distance is the low 32 bits of the gesture's argument
+    float curr = (float)(u32)(gi.ullArguments & 0xffffffffull);
+    if (gi.dwFlags & GF_BEGIN) {
+        win->libraryPinchStart = curr;
+        win->libraryPinchZoom = (float)LibraryCardZoom();
+    } else if (win->libraryPinchStart > 0.0f && curr > 0.0f) {
+        // against the start of the pinch, not the previous report: rounding to
+        // whole percent every frame would otherwise swallow slow movement
+        float factor = curr / win->libraryPinchStart;
+        int zoom = (int)lround(win->libraryPinchZoom * factor);
+        zoom = std::clamp(zoom, kLibraryZoomMin, kLibraryZoomMax);
+        if (gGlobalPrefs && zoom != gGlobalPrefs->libraryCardZoom) {
+            // during the pinch the value moves freely; SetLibraryCardZoom (and
+            // the settings write) waits for the end of the gesture
+            gGlobalPrefs->libraryCardZoom = zoom;
+            win->libraryFilesScrollY = std::clamp(win->libraryFilesScrollY, 0, win->libraryFilesScrollMaxY);
+            KsSetPos(win->libraryFilesKs, win->libraryFilesScrollY);
+            HwndInvalidate(win->hwndCanvas);
+        }
+    }
+    if (gi.dwFlags & GF_END) {
+        win->libraryPinchStart = 0.0f;
+        if (gGlobalPrefs) {
+            // the value moved freely during the pinch; put back what it was
+            // before, so SetLibraryCardZoom sees the change and saves it once
+            int zoom = gGlobalPrefs->libraryCardZoom;
+            gGlobalPrefs->libraryCardZoom = (int)win->libraryPinchZoom;
+            SetLibraryCardZoom(zoom);
+        }
+    }
+    CloseGestureInfoHandle(hgi);
+    return true;
 }
 
 // Tap-and-hold fired: treat it exactly like a right-click at the point the

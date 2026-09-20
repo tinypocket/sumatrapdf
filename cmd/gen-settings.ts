@@ -974,6 +974,14 @@ const globalPrefs: Field[] = [
   compactArray("LibraryPinnedFolders", Str, null, "folders pinned in the Library view").ver("3.8"),
   compactArray("LibraryHiddenFolders", Str, null, "folders hidden in the Library view").ver("3.8"),
   field(
+    "LibraryCardZoom",
+    Int,
+    100,
+    "size of the file cards and folder tiles in the Library, as a percentage. " +
+      "Changed by pinching the Library with two fingers, or from its view menu. " +
+      "Clamped to 60 - 200",
+  ).ver("3.8"),
+  field(
     "SortFavoritesByName",
     Bool,
     false,

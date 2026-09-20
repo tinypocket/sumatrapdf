@@ -272,12 +272,18 @@ static const char* gIconHome =
   <path d="M6 10v9a1 1 0 0 0 1 1h3v-5h4v5h3a1 1 0 0 0 1 -1v-9" />
 </svg>)";
 
+// The one icon in the set that keeps its own colors: the Library is where the
+// app starts, and three coloured spines read as books at a glance where an
+// outline of the same weight as every other icon did not. The fills are stated
+// (so the tinting leaves them alone), mid-toned enough to hold up on the light
+// and the dark theme, and the strokes stay currentColor so the outline still
+// follows the theme.
 static const char* gIconLibrary =
     R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="1.7" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
   <rect x="0" y="0" width="24" height="24" stroke="none"></rect>
-  <rect x="3" y="4" width="5" height="16" rx="1" />
-  <rect x="9.5" y="4" width="5" height="16" rx="1" />
-  <path d="M16.5 5l3 -1l3.5 15l-3 1z" />
+  <rect x="3" y="4" width="5" height="16" rx="1" fill="#c2622c" />
+  <rect x="9.5" y="4" width="5" height="16" rx="1" fill="#3f7d7b" />
+  <path d="M16.5 5l3 -1l3.5 15l-3 1z" fill="#c79a3a" />
   <path d="M4.5 8h2m4.5 0h2m4.7 0l3 -.75" />
 </svg>)";
 

@@ -401,6 +401,17 @@ struct MainWindow {
     // remembers the search query while the edit control is destroyed
     // (e.g. when a document tab is active)
     Str homeSearchQuery;
+    // set while that saved query is being put back into a newly created edit:
+    // the EN_CHANGE it sends is not the user typing, and must not reset the
+    // view (see EnsureHomeSearchCreated)
+    bool homeSearchRestoring = false;
+    // the view the live search box belongs to, so its text is saved back into
+    // that view's slot even if the view has already changed
+    TouchView homeSearchOwner = TouchView::Library;
+    // a pinch in progress on the Library: the finger distance it started at and
+    // the card zoom at that moment, so the gesture scales against its own start
+    float libraryPinchStart = 0.0f;
+    float libraryPinchZoom = 100.0f;
     int librarySelectedFolder = 0;
     Str librarySelectedFolderPath;
     // the Library sidebar's "Recent" row is selected: the content pane shows

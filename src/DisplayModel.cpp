@@ -1327,6 +1327,18 @@ RectF DisplayModel::PageTrimmedBox(int pageNo, RectF media) const {
             bottom = std::min(bottom, std::max(body.limitBottom, body.bottom));
         }
     }
+    // The outer edges of the document are left where they are: the top of the
+    // first page and the bottom of the last. A document opens on its title and
+    // ends part-way down a page, and cropping those two edges to the text blows
+    // what little is there up to the height of a whole page. A single page is
+    // both the first and the last, so it keeps both. The manual trim, asked for
+    // by hand, still applies below.
+    if (pageNo <= 1) {
+        top = media.y;
+    }
+    if (pageNo >= PageCount()) {
+        bottom = media.y + media.dy;
+    }
     if (bottom <= top) {
         return ApplyManualTrim(media, media);
     }
