@@ -879,6 +879,8 @@ struct TabsCtrl : Wnd {
 
     int ctrlID = 0;
     bool withToolTips = false;
+    // tool tips deactivated because the strip is being used with a finger
+    bool tooltipsOffForTouch = false;
     bool inTitleBar = false;
     bool draggingTab = false;
     // dx of tab if there's more space available

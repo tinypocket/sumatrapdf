@@ -886,10 +886,31 @@ static bool CanDragTab(TabInfo* tab) {
     return true;
 }
 
+// Windows turns a finger tap into a mouse click at the same spot and leaves the
+// cursor sitting there, so the tool tip's hover timer fires a second later over
+// a tab nobody is pointing at any more. The documented marker for an input the
+// system synthesized from touch or a pen.
+static bool MouseMsgIsFromTouch() {
+    return (GetMessageExtraInfo() & 0xffffff80) == 0xff515700;
+}
+
 LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     Point mousePos = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
     if (WM_MOUSELEAVE == msg) {
         mousePos = HwndGetCursorPos(hwnd);
+    }
+
+    // tool tips off while the tab strip is being used with a finger, back on at
+    // the next real mouse move
+    if (withToolTips && msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) {
+        bool touch = MouseMsgIsFromTouch();
+        if (touch != tooltipsOffForTouch) {
+            tooltipsOffForTouch = touch;
+            HWND ttHwnd = GetToolTipsHwnd();
+            if (ttHwnd) {
+                SendMessageW(ttHwnd, TTM_ACTIVATE, touch ? FALSE : TRUE, 0);
+            }
+        }
     }
 
     TabsCtrl::MouseState tabState;

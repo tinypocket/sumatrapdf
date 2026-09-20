@@ -23,6 +23,11 @@ RenderedBitmap* LoadThumbnailForFile(Str filePath);
 void SaveThumbnailForFile(Str filePath, RenderedBitmap* thumbnail);
 void RemoveThumbnail(FileState* fs);
 
+// Draws a thumbnail with the night light applied. Thumbnails are cached as they
+// were rendered, so the warm tint goes on at paint time - the previews then
+// match the pages they stand for. (defined in HomePage.cpp)
+void BlitThumbnailWarm(RenderedBitmap* thumb, HDC hdc, Rect dst);
+
 TempStr GetThumbnailCacheDirTemp();
 TempStr GetThumbnailPathTemp(Str filePath);
 void DeleteThumbnailForFile(Str path);

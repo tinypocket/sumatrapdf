@@ -2117,7 +2117,7 @@ static void FillHomeRoundRectAlpha(HDC hdc, const Rect& r, int radius, COLORREF 
 // scaled into a small bitmap of the size shown, warmed, and copied out. A card
 // is a few tens of thousands of pixels; with the night light off, nothing
 // changes.
-static void BlitHomeThumbnail(RenderedBitmap* thumb, HDC hdc, Rect dst) {
+void BlitThumbnailWarm(RenderedBitmap* thumb, HDC hdc, Rect dst) {
     int strength = gRenderCache ? gRenderCache->nightLight : 0;
     if (strength <= 0 || dst.dx <= 0 || dst.dy <= 0) {
         thumb->Blit(hdc, dst);
@@ -2251,7 +2251,7 @@ static void DrawHomeListRow(HomePageLayout& l, ThumbnailLayout& thumb, HFONT fon
     Rect thumbBox = thumb.rcListThumb;
     if (thumbImg) {
         Rect thumbDst = FitRectInRect(thumbImg->GetSize(), thumbBox);
-        BlitHomeThumbnail(thumbImg, hdc, thumbDst);
+        BlitThumbnailWarm(thumbImg, hdc, thumbDst);
         thumb.szThumb = thumbImg->GetSize();
     }
     Str path = fs->filePath;
@@ -2411,7 +2411,7 @@ static void DrawHomePageLayout(HomePageLayout& l) {
             Rect innerBox = page;
             innerBox.Inflate(-inset, -inset);
             Rect inner = FitRectInRect(thumb.szThumb, innerBox);
-            BlitHomeThumbnail(thumbImg, hdc, inner);
+            BlitThumbnailWarm(thumbImg, hdc, inner);
         }
         if (!thumbImg) {
             // no thumbnail yet: the card is still a surface, not a hole
@@ -2616,7 +2616,7 @@ static void DrawTouchFileCardPath(MainWindow* win, HDC hdc, Str filePath, FileSt
     RenderedBitmap* thumb = explicitThumbnail ? explicitThumbnail : (fs ? LoadThumbnail(fs) : nullptr);
     if (thumb) {
         Rect dst = FitRectInRect(thumb->GetSize(), thumbRc);
-        BlitHomeThumbnail(thumb, hdc, dst);
+        BlitThumbnailWarm(thumb, hdc, dst);
     } else {
         FillHomeRoundRect(hdc, thumbRc, DpiScale(hdc, 6), RGB(234, 229, 222));
         SetBkMode(hdc, TRANSPARENT);

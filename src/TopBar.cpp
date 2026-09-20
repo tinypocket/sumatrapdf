@@ -1328,7 +1328,8 @@ void TouchPreviewWnd::DrawCard(HDC hdc, const PreviewCard& c, int offsetX, bool 
             dstDx = src.dx * dstDy / src.dy;
         }
         Rect dst{thumbArea.x + (thumbArea.dx - dstDx) / 2, thumbArea.y + (thumbArea.dy - dstDy) / 2, dstDx, dstDy};
-        thumbnail->Blit(hdc, dst);
+        // the same warm tint the pages themselves are drawn with
+        BlitThumbnailWarm(thumbnail, hdc, dst);
     } else {
         SetTextColor(hdc, ThemeWindowDarkerTextColor());
         HdcDrawText(hdc, StrL("page"), thumbArea, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
