@@ -988,6 +988,17 @@ SessionData [
     ; width of the favorites / bookmarks sidebar in screen pixels (0 if it
     ; wasn't shown)
     SidebarDx = 0
+
+    ; URLs of the open in-product browser tabs (introduced in version 3.8)
+    BrowserTabs =
+
+    ; index of the selected in-product browser tab (1-based) (introduced in
+    ; version 3.8)
+    BrowserTabIndex = 1
+
+    ; if true, the in-product browser was the active view (introduced in version
+    ; 3.8)
+    BrowserActive = false
   ]
 ]
 

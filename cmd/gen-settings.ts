@@ -786,6 +786,9 @@ const sessionData: Field[] = [
   field("WindowState", Int, 0, "state of the window. 1 is normal, 2 is maximized, 3 is fullscreen, 4 is minimized"),
   compactStruct("WindowPos", windowPos, "position of the window (can be on any monitor)").structName("Rect"),
   field("SidebarDx", Int, 0, "width of the favorites / bookmarks sidebar in screen pixels (0 if it wasn't shown)"),
+  compactArray("BrowserTabs", Str, null, "URLs of the open in-product browser tabs").ver("3.8"),
+  field("BrowserTabIndex", Int, 1, "index of the selected in-product browser tab (1-based)").ver("3.8"),
+  field("BrowserActive", Bool, false, "if true, the in-product browser was the active view").ver("3.8"),
 ];
 
 const globalPrefs: Field[] = [
@@ -1443,12 +1446,9 @@ const globalPrefs: Field[] = [
     false,
     "if true, pages are shown in warmer colors - less blue - so white paper is easier on the eyes at night, like Windows' night light but for the page only",
   ).ver("3.8"),
-  field(
-    "NightLightStrength",
-    Int,
-    50,
-    "how warm the night light makes the page, from 0 (barely) to 100 (warmest)",
-  ).ver("3.8"),
+  field("NightLightStrength", Int, 50, "how warm the night light makes the page, from 0 (barely) to 100 (warmest)").ver(
+    "3.8",
+  ),
   field("CheckForUpdates", Bool, true, "if true, check at startup whether an update is available").internal(),
   emptyLine(),
   comment("Settings below are not recognized by the current version"),

@@ -62,6 +62,7 @@ constexpr const char* kLinkLibraryUnhidePrefix = "<Library,Unhide>";
 constexpr const char* kLinkLibraryClearSearch = "<Library,ClearSearch>";
 constexpr const char* kLinkLibraryContentView = "<Library,ContentView>";
 constexpr const char* kLinkLibraryListView = "<Library,ListView>";
+constexpr const char* kLinkLibraryHeaderOverflow = "<Library,HeaderOverflow>";
 // the card-size button in the header: opens the list of sizes. The same value
 // is what a two-finger pinch on the pane changes.
 constexpr const char* kLinkLibraryCardSize = "<Library,CardSize>";

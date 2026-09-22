@@ -1132,6 +1132,7 @@ static bool TbNavigationStarting(void* ctx, Str url, bool newWindow) {
     // title is known as soon as the document is parsed) and clearing later
     // would throw the new title away. Navigations we cancelled above returned
     // before this, so they keep the title of the page still on screen.
+    str::ReplaceWithCopy(&tab->url, url);
     str::FreePtr(&tab->title);
     TbRedrawChrome(tb);
     return true;
@@ -4334,7 +4335,7 @@ static void TbRequestNewTab(MainWindow* win, Str url) {
     uitask::Post(MkFunc0<TbNewTabReq>(TbOpenNewTabNow, req), "TbOpenNewTabNow");
 }
 
-static TouchBrowser* CreateTouchBrowser(MainWindow* win) {
+static TouchBrowser* CreateTouchBrowser(MainWindow* win, const Vec<Str>* savedUrls = nullptr, int activeTab = 0) {
     if (!HasWebView()) {
         return nullptr;
     }
@@ -4350,8 +4351,17 @@ static TouchBrowser* CreateTouchBrowser(MainWindow* win) {
     }
     tb->chrome = chrome;
 
-    TbCreateTab(tb, TouchBrowserHomeUrl());
-    tb->activeTab = 0;
+    if (savedUrls) {
+        for (Str url : *savedUrls) {
+            if (!str::IsEmptyOrWhiteSpace(url)) {
+                TbCreateTab(tb, url);
+            }
+        }
+    }
+    if (len(tb->tabs) == 0) {
+        TbCreateTab(tb, TouchBrowserHomeUrl());
+    }
+    tb->activeTab = limitValue(activeTab, 0, len(tb->tabs) - 1);
     return tb;
 }
 
@@ -4520,6 +4530,34 @@ void TouchWebToggleBookmark(MainWindow* win) {
     TbRelayoutChrome(tb);
     if (win->touchView == TouchView::Web) {
         TbSetChildrenVisible(tb, true);
+    }
+}
+
+// Browser tabs are part of the window session, just like document tabs. Use
+// the pending URL for a tab that has not loaded yet; otherwise keep the latest
+// URL accepted by NavigationStarting, including a page still loading at exit.
+void RememberTouchBrowserSession(MainWindow* win, SessionData* data) {
+    if (!win || !data || !win->touchBrowser) {
+        return;
+    }
+    TouchBrowser* tb = win->touchBrowser;
+    for (TbTab* tab : tb->tabs) {
+        Str url = tab->url ? tab->url : tab->pendingUrl;
+        if (!str::IsEmptyOrWhiteSpace(url)) {
+            data->browserTabs->Append(str::Dup(url));
+        }
+    }
+    data->browserTabIndex = tb->activeTab + 1;
+    data->browserActive = win->touchView == TouchView::Web;
+}
+
+void RestoreTouchBrowserSession(MainWindow* win, const SessionData* data) {
+    if (!win || !data || !data->browserTabs || len(*data->browserTabs) == 0 || win->touchBrowser) {
+        return;
+    }
+    win->touchBrowser = CreateTouchBrowser(win, data->browserTabs, data->browserTabIndex - 1);
+    if (data->browserActive) {
+        win->lastNonDocView = TouchView::Web;
     }
 }
 

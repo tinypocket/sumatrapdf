@@ -474,6 +474,9 @@ struct MainWindow {
 
     // Direct-pointer panning for the touch Home/Library surfaces.
     UINT32 touchAboutPointerId = 0;
+    UINT32 touchAboutSecondPointerId = 0;
+    Point touchAboutPointerPos;
+    Point touchAboutSecondPointerPos;
     int touchAboutPanArea = 0;
     int touchAboutPanAxis = 0;
     Point touchAboutPanStart;

@@ -3624,6 +3624,69 @@ static void ShowLibraryCardSizeMenu(MainWindow* win) {
     }
 }
 
+static void ShowLibraryHeaderOverflow(MainWindow* win) {
+    constexpr int kCmdContentView = 1;
+    constexpr int kCmdListView = 2;
+    constexpr int kCmdOpenFile = 3;
+    constexpr int kCmdTogglePin = 4;
+    constexpr int kCmdZoomFirst = 100;
+
+    bool isRecent = win->libraryRecentSelected;
+    bool isSearch = win->librarySearchFilesSelected;
+    Str selectedPath = win->librarySelectedFolderPath ? Str(win->librarySelectedFolderPath) : Str{};
+    HMENU popup = CreatePopupMenu();
+    if (isRecent) {
+        AppendMenuW(popup, MF_STRING, kCmdOpenFile, L"Open file…");
+    } else {
+        uint contentFlags = MF_STRING | (!win->libraryListView ? MF_CHECKED : MF_UNCHECKED);
+        uint listFlags = MF_STRING | (win->libraryListView ? MF_CHECKED : MF_UNCHECKED);
+        AppendMenuW(popup, contentFlags, kCmdContentView, L"Content view");
+        AppendMenuW(popup, listFlags, kCmdListView, L"List view");
+        if (selectedPath && !isSearch) {
+            AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
+            bool pinned = TouchLibraryPathIn(gGlobalPrefs->libraryPinnedFolders, selectedPath);
+            AppendMenuW(popup, MF_STRING, kCmdTogglePin, pinned ? L"Unpin folder" : L"Pin folder");
+        }
+    }
+
+    HMENU sizes = CreatePopupMenu();
+    int currentZoom = LibraryCardZoom();
+    for (int i = 0; i < (int)dimof(gLibraryZoomSteps); i++) {
+        int zoom = gLibraryZoomSteps[i];
+        TempStr label = fmt("%d%%", zoom);
+        uint flags = MF_STRING | (zoom == currentZoom ? MF_CHECKED : MF_UNCHECKED);
+        AppendMenuW(sizes, flags, kCmdZoomFirst + i, ToWStrTemp(label).s);
+    }
+    AppendMenuW(popup, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(popup, MF_POPUP, (UINT_PTR)sizes, L"Card size");
+    MarkMenuOwnerDraw(popup);
+
+    Point pt = HwndGetCursorPos(win->hwndCanvas);
+    pt = HwndClientToScreen(win->hwndCanvas, pt);
+    int cmd = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_LEFTBUTTON, pt.x, pt.y, 0, win->hwndFrame, nullptr);
+    FreeMenuOwnerDrawInfoData(popup);
+    DestroyMenu(popup);
+
+    if (cmd == kCmdOpenFile) {
+        HwndSendCommand(win->hwndFrame, CmdOpenFile);
+        return;
+    }
+    if (cmd == kCmdContentView || cmd == kCmdListView) {
+        win->libraryListView = cmd == kCmdListView;
+        win->libraryFilesScrollY = 0;
+    } else if (cmd == kCmdTogglePin && selectedPath) {
+        if (!TouchLibraryRemovePath(gGlobalPrefs->libraryPinnedFolders, selectedPath)) {
+            TouchLibraryAddPath(&gGlobalPrefs->libraryPinnedFolders, selectedPath);
+        }
+        SaveSettings();
+    } else if (cmd >= kCmdZoomFirst && cmd < kCmdZoomFirst + (int)dimof(gLibraryZoomSteps)) {
+        SetLibraryCardZoom(gLibraryZoomSteps[cmd - kCmdZoomFirst]);
+    } else {
+        return;
+    }
+    win->RedrawAll(true);
+}
+
 bool HandleTouchLibraryLink(MainWindow* win, Str url) {
     if (!win || !gGlobalPrefs) {
         return false;
@@ -3709,6 +3772,8 @@ bool HandleTouchLibraryLink(MainWindow* win, Str url) {
         win->libraryFilesScrollY = 0;
     } else if (str::Eq(url, kLinkLibraryCardSize)) {
         ShowLibraryCardSizeMenu(win);
+    } else if (str::Eq(url, kLinkLibraryHeaderOverflow)) {
+        ShowLibraryHeaderOverflow(win);
     } else if (str::Eq(url, kLinkLibrarySearchScopeOpen)) {
         win->librarySearchScopePickerOpen = true;
     } else if (str::Eq(url, kLinkLibrarySearchScopeDone)) {
@@ -4967,7 +5032,26 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     // leftmost edge of the buttons at the right end of the header, so the card
     // size button can sit beside whatever else ended up there
     int headerActionsLeft = headerAction.x;
-    if (recentSelected) {
+    bool compactHeader = rc.dx - leftDx < DpiScale(hdc, 560);
+    if (compactHeader) {
+        int overflowDy = DpiScale(hdc, 40);
+        Rect overflow{rc.dx - DpiScale(hdc, 20) - overflowDy, (headerDy - overflowDy) / 2, overflowDy, overflowDy};
+        headerAction = overflow;
+        headerActionsLeft = overflow.x;
+        FillHomeRoundRect(hdc, overflow, overflow.dy / 2, ThemeHotBackgroundColor());
+        Gdiplus::Graphics gfx(hdc);
+        gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::SolidBrush dots(GdiRgbFromCOLORREF(ThemeWindowDarkerTextColor()));
+        float cy = (float)(overflow.y + overflow.dy / 2);
+        float dotDy = (float)std::max(2, DpiScale(hdc, 3));
+        float gap = (float)DpiScale(hdc, 6);
+        float cx = (float)(overflow.x + overflow.dx / 2);
+        for (int i = -1; i <= 1; i++) {
+            gfx.FillEllipse(&dots, cx + i * gap - dotDy / 2.0f, cy - dotDy / 2.0f, dotDy, dotDy);
+        }
+        win->staticLinks.Append(
+            new StaticLink(overflow, Str(kLinkLibraryHeaderOverflow), StrL("More Library options")));
+    } else if (recentSelected) {
         int openDx = DpiScale(hdc, 118);
         Rect open{rc.dx - DpiScale(hdc, 24) - openDx, (headerDy - DpiScale(hdc, 40)) / 2, openDx, DpiScale(hdc, 40)};
         headerAction = open;
@@ -5040,7 +5124,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     // Card size, beside the view controls. Pinching the pane sets the same
     // value; this is the way to it without a touch screen. List rows are all
     // one height, so it only means something in the card view.
-    if (!win->libraryListView) {
+    if (!compactHeader && !win->libraryListView) {
         int sizeDy = viewButtonDy;
         int sizeGap = DpiScale(hdc, 8);
         Rect sizeBtn{headerActionsLeft - sizeGap - sizeDy, (headerDy - sizeDy) / 2, sizeDy, sizeDy};
@@ -5093,7 +5177,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     }
 
     int titleX = fwdRc.x + fwdRc.dx + DpiScale(hdc, 12);
-    Rect header{titleX, 0, std::max(0, headerAction.x - titleX - DpiScale(hdc, 16)), headerDy};
+    Rect header{titleX, 0, std::max(0, headerActionsLeft - titleX - DpiScale(hdc, 16)), headerDy};
     SetTextColor(hdc, ThemeWindowTextColor());
     Str headerTitle = selectedName;
     if (recentSelected) {
@@ -5101,8 +5185,13 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     } else if (showingSearchFiles) {
         headerTitle = fmt("Files matching “%s”", query);
     }
-    HdcDrawText(hdc, headerTitle, header, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
-                HdcGetUiFont(hdc, 18, FW_SEMIBOLD));
+    if (header.dx > 0) {
+        int savedDc = SaveDC(hdc);
+        IntersectClipRect(hdc, header.x, header.y, header.x + header.dx, header.y + header.dy);
+        HdcDrawText(hdc, headerTitle, header, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+                    HdcGetUiFont(hdc, 18, FW_SEMIBOLD));
+        RestoreDC(hdc, savedDc);
+    }
 
     {
         // "\x01recent"/"\x01search:..." cannot collide with a path, so Recent
@@ -6296,12 +6385,59 @@ static void DrawPinFlight(MainWindow* win, HDC hdc) {
     gfx.FillPolygon(&brush, pts, dimofi(pts));
 }
 
-// A pinch on the Library resizes its cards, the way one zooms a document. The
-// gesture reports the distance between the fingers; the ratio against the last
-// report scales the card zoom, so it tracks the fingers rather than stepping.
-// The value is only written to the settings when the fingers come off.
+static void BeginLibraryPinch(MainWindow* win, float distance) {
+    win->libraryPinchStart = distance;
+    win->libraryPinchZoom = (float)LibraryCardZoom();
+}
+
+static void UpdateLibraryPinch(MainWindow* win, float distance) {
+    if (!gGlobalPrefs || win->libraryPinchStart <= 0.0f || distance <= 0.0f) {
+        return;
+    }
+    // Scale against the start of the pinch, not the previous report: rounding
+    // to whole percent every frame would otherwise swallow slow movement.
+    float factor = distance / win->libraryPinchStart;
+    int zoom = (int)lround(win->libraryPinchZoom * factor);
+    zoom = std::clamp(zoom, kLibraryZoomMin, kLibraryZoomMax);
+    if (zoom == gGlobalPrefs->libraryCardZoom) {
+        return;
+    }
+    // During the pinch the value moves freely. The settings write waits until
+    // the fingers come off, avoiding disk writes for every pointer update.
+    gGlobalPrefs->libraryCardZoom = zoom;
+    win->libraryFilesScrollY = std::clamp(win->libraryFilesScrollY, 0, win->libraryFilesScrollMaxY);
+    KsSetPos(win->libraryFilesKs, win->libraryFilesScrollY);
+    HwndInvalidate(win->hwndCanvas);
+}
+
+static void FinishLibraryPinch(MainWindow* win) {
+    if (win->libraryPinchStart <= 0.0f) {
+        return;
+    }
+    win->libraryPinchStart = 0.0f;
+    if (!gGlobalPrefs) {
+        return;
+    }
+    int zoom = gGlobalPrefs->libraryCardZoom;
+    gGlobalPrefs->libraryCardZoom = (int)win->libraryPinchZoom;
+    SetLibraryCardZoom(zoom);
+}
+
+static float PointerDistance(Point a, Point b) {
+    float dx = (float)(a.x - b.x);
+    float dy = (float)(a.y - b.y);
+    return sqrtf(dx * dx + dy * dy);
+}
+
+// A pinch on the Library resizes its cards, the way one zooms a document. This
+// legacy gesture path remains for touchpads and Windows gesture promotion;
+// physical touch contacts are also tracked directly below because consuming a
+// one-finger Library pan can prevent Windows from promoting the pair.
 bool HomePageOnGesture(MainWindow* win, WPARAM wp, LPARAM lp) {
-    if (!win || !IsTouchChrome(win) || win->touchView != TouchView::Library) {
+    // The touch shell paints the Library on its Home tab even while touchView
+    // is still Doc (notably when the app starts with no documents). Match the
+    // paint and wheel handlers: the active About tab identifies the Library.
+    if (!win || !IsTouchChrome(win) || !win->IsCurrentTabAbout()) {
         return false;
     }
     GESTUREINFO gi{};
@@ -6314,37 +6450,23 @@ bool HomePageOnGesture(MainWindow* win, WPARAM wp, LPARAM lp) {
     if (gi.dwID != GID_ZOOM) {
         // leave panning and everything else to the pointer handler, which
         // already drives the kinetic scroll
-        return false;
+        CloseGestureInfoHandle(hgi);
+        return true;
+    }
+    if (win->touchAboutSecondPointerId != 0) {
+        // The direct WM_POINTER path owns this physical-touch pinch.
+        CloseGestureInfoHandle(hgi);
+        return true;
     }
     // the finger distance is the low 32 bits of the gesture's argument
     float curr = (float)(u32)(gi.ullArguments & 0xffffffffull);
     if (gi.dwFlags & GF_BEGIN) {
-        win->libraryPinchStart = curr;
-        win->libraryPinchZoom = (float)LibraryCardZoom();
-    } else if (win->libraryPinchStart > 0.0f && curr > 0.0f) {
-        // against the start of the pinch, not the previous report: rounding to
-        // whole percent every frame would otherwise swallow slow movement
-        float factor = curr / win->libraryPinchStart;
-        int zoom = (int)lround(win->libraryPinchZoom * factor);
-        zoom = std::clamp(zoom, kLibraryZoomMin, kLibraryZoomMax);
-        if (gGlobalPrefs && zoom != gGlobalPrefs->libraryCardZoom) {
-            // during the pinch the value moves freely; SetLibraryCardZoom (and
-            // the settings write) waits for the end of the gesture
-            gGlobalPrefs->libraryCardZoom = zoom;
-            win->libraryFilesScrollY = std::clamp(win->libraryFilesScrollY, 0, win->libraryFilesScrollMaxY);
-            KsSetPos(win->libraryFilesKs, win->libraryFilesScrollY);
-            HwndInvalidate(win->hwndCanvas);
-        }
+        BeginLibraryPinch(win, curr);
+    } else {
+        UpdateLibraryPinch(win, curr);
     }
     if (gi.dwFlags & GF_END) {
-        win->libraryPinchStart = 0.0f;
-        if (gGlobalPrefs) {
-            // the value moved freely during the pinch; put back what it was
-            // before, so SetLibraryCardZoom sees the change and saves it once
-            int zoom = gGlobalPrefs->libraryCardZoom;
-            gGlobalPrefs->libraryCardZoom = (int)win->libraryPinchZoom;
-            SetLibraryCardZoom(zoom);
-        }
+        FinishLibraryPinch(win);
     }
     CloseGestureInfoHandle(hgi);
     return true;
@@ -6488,10 +6610,29 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
     }
     UINT32 pointerId = LOWORD(wp);
     if (msg == WM_POINTERDOWN) {
-        if (win->touchAboutPointerId != 0 || win->libraryManageFoldersOpen) {
+        if (win->libraryManageFoldersOpen) {
             return false;
         }
         Point pt = TouchAboutPointerPos(win, lp);
+        if (win->touchAboutPointerId != 0) {
+            if (pointerId == win->touchAboutPointerId) {
+                return true;
+            }
+            if (win->touchAboutSecondPointerId != 0) {
+                return pointerId == win->touchAboutSecondPointerId;
+            }
+            win->touchAboutSecondPointerId = pointerId;
+            win->touchAboutSecondPointerPos = pt;
+            KillTimer(win->hwndCanvas, kAboutHoldTimerID);
+            str::FreePtr(&win->urlOnLastButtonDown);
+            KsStop(win->libraryTreeKs);
+            KsStop(win->libraryFilesKs);
+            UpdateLibraryScrollTimer(win);
+            win->touchAboutPanMoved = true;
+            win->touchAboutSuppressMouseUp = true;
+            BeginLibraryPinch(win, PointerDistance(win->touchAboutPointerPos, pt));
+            return true;
+        }
         Rect canvas = HwndClientRect(win->hwndCanvas);
         int headerDy = DpiScale(win->hwndCanvas, 64);
         int area = 0;
@@ -6519,6 +6660,7 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
             return false;
         }
         win->touchAboutPointerId = pointerId;
+        win->touchAboutPointerPos = pt;
         win->touchAboutPanArea = area;
         win->touchAboutPanAxis = area == 2 ? 0 : 2;
         win->touchAboutPanStart = pt;
@@ -6547,11 +6689,22 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
         SetTimer(win->hwndCanvas, kAboutHoldTimerID, 500, nullptr);
         return true;
     }
-    if (pointerId != win->touchAboutPointerId) {
+    bool isFirstPointer = pointerId == win->touchAboutPointerId;
+    bool isSecondPointer = pointerId == win->touchAboutSecondPointerId;
+    if (!isFirstPointer && !isSecondPointer) {
         return false;
     }
     if (msg == WM_POINTERUPDATE) {
         Point pt = TouchAboutPointerPos(win, lp);
+        if (isFirstPointer) {
+            win->touchAboutPointerPos = pt;
+        } else {
+            win->touchAboutSecondPointerPos = pt;
+        }
+        if (win->touchAboutSecondPointerId != 0) {
+            UpdateLibraryPinch(win, PointerDistance(win->touchAboutPointerPos, win->touchAboutSecondPointerPos));
+            return true;
+        }
         int dx = pt.x - win->touchAboutPanStart.x;
         int dy = pt.y - win->touchAboutPanStart.y;
         int threshold = DpiScale(win->hwndCanvas, 6);
@@ -6591,6 +6744,27 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
         return true;
     }
     if (msg == WM_POINTERUP) {
+        if (win->touchAboutSecondPointerId != 0) {
+            UINT32 remainingPointerId = isFirstPointer ? win->touchAboutSecondPointerId : win->touchAboutPointerId;
+            Point remainingPointerPos = isFirstPointer ? win->touchAboutSecondPointerPos : win->touchAboutPointerPos;
+            KillTimer(win->hwndCanvas, kAboutHoldTimerID);
+            FinishLibraryPinch(win);
+            KsStop(win->libraryTreeKs);
+            KsStop(win->libraryFilesKs);
+            UpdateLibraryScrollTimer(win);
+            // Keep swallowing the remaining contact until it also comes up.
+            // Otherwise Windows may promote that final release to a mouse tap
+            // and open the card that happened to be under the user's finger.
+            win->touchAboutPointerId = remainingPointerId;
+            win->touchAboutSecondPointerId = 0;
+            win->touchAboutPointerPos = remainingPointerPos;
+            win->touchAboutPanStart = remainingPointerPos;
+            win->touchAboutPanArea = 0;
+            win->touchAboutPanAxis = 0;
+            win->touchAboutPanMoved = true;
+            win->touchAboutSuppressMouseUp = true;
+            return true;
+        }
         Point pt = TouchAboutPointerPos(win, lp);
         KillTimer(win->hwndCanvas, kAboutHoldTimerID);
         int area = win->touchAboutPanArea;
@@ -6610,8 +6784,10 @@ bool HomePageOnPointerEvent(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, Poi
         return true;
     }
     if (msg == WM_POINTERCAPTURECHANGED) {
+        FinishLibraryPinch(win);
         win->touchAboutSuppressMouseUp = win->touchAboutPanMoved;
         win->touchAboutPointerId = 0;
+        win->touchAboutSecondPointerId = 0;
         win->touchAboutPanArea = 0;
         win->touchAboutPanAxis = 0;
         win->touchAboutPanMoved = false;

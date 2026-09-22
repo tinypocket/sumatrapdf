@@ -575,6 +575,12 @@ struct SessionData {
     // width of the favorites / bookmarks sidebar in screen pixels (0 if it
     // wasn't shown)
     int sidebarDx;
+    // URLs of the open in-product browser tabs
+    Vec<Str>* browserTabs;
+    // index of the selected in-product browser tab (1-based)
+    int browserTabIndex;
+    // if true, the in-product browser was the active view
+    bool browserActive;
 };
 
 // Preferences are persisted in SumatraPDF-settings.txt
@@ -1577,15 +1583,20 @@ static const FieldInfo gSessionDataFields[] = {
     {offsetof(SessionData, windowState), SettingType::Int, 0},
     {offsetof(SessionData, windowPos), SettingType::Compact, (intptr_t)&gRect_3_Info},
     {offsetof(SessionData, sidebarDx), SettingType::Int, 0},
+    {offsetof(SessionData, browserTabs), SettingType::StringArray, 0},
+    {offsetof(SessionData, browserTabIndex), SettingType::Int, 1},
+    {offsetof(SessionData, browserActive), SettingType::Bool, false},
 };
 static const StructInfo gSessionDataInfo = {
     sizeof(SessionData),
-    5,
+    8,
     gSessionDataFields,
-    "TabStates\0TabIndex\0WindowState\0WindowPos\0SidebarDx",
+    "TabStates\0TabIndex\0WindowState\0WindowPos\0SidebarDx\0BrowserTabs\0BrowserTabIndex\0BrowserActive",
     "data required for restoring the view state of a single tab\0index of the currently selected tab (1-based)\0state "
     "of the window. 1 is normal, 2 is maximized, 3 is fullscreen, 4 is minimized\0position of the window (can be on "
-    "any monitor)\0width of the favorites / bookmarks sidebar in screen pixels (0 if it wasn't shown)",
+    "any monitor)\0width of the favorites / bookmarks sidebar in screen pixels (0 if it wasn't shown)\0URLs of the "
+    "open in-product browser tabs\0index of the selected in-product browser tab (1-based)\0if true, the in-product "
+    "browser was the active view",
     false};
 
 static const FieldInfo gFILETIMEFields[] = {
@@ -1608,7 +1619,7 @@ static const StructInfo gPointInfo = {
 
 static const FieldInfo gGlobalPrefsFields[] = {
     {(size_t)-1, SettingType::Comment,
-     (intptr_t)"For documentation, see https://www.sumatrapdfreader.org/settings/settings3-7-33.html"},
+     (intptr_t)"For documentation, see https://www.sumatrapdfreader.org/settings/settings3-7-34.html"},
     {(size_t)-1, SettingType::Comment, 0},
     {offsetof(GlobalPrefs, defaultDisplayMode), SettingType::String, (intptr_t)"automatic"},
     {offsetof(GlobalPrefs, defaultZoom), SettingType::String, (intptr_t)"fit page"},

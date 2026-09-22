@@ -2,6 +2,7 @@
    License: GPLv3 */
 
 struct MainWindow;
+struct SessionData;
 enum class TouchPanelMode;
 enum class TouchView;
 
@@ -28,5 +29,7 @@ void LayoutTouchWebView(MainWindow* win, Rect contentRc);
 void DestroyTouchWebView(MainWindow* win);
 void TouchWebGoHome(MainWindow* win);
 void TouchWebToggleBookmark(MainWindow* win);
+void RememberTouchBrowserSession(MainWindow* win, SessionData* data);
+void RestoreTouchBrowserSession(MainWindow* win, const SessionData* data);
 // the night light setting changed: re-tint every tab's page
 void TouchBrowserApplyNightLight(MainWindow* win);

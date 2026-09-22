@@ -27,6 +27,7 @@
 #include "SumatraPDF.h"
 #include "WindowTab.h"
 #include "MainWindow.h"
+#include "Rail.h"
 #include "AppSettings.h"
 #include "AppTools.h"
 #include "Favorites.h"
@@ -357,13 +358,12 @@ bool LoadSettings() {
         migratedDocumentColorsFollowTheme = true;
     }
 
-    // SumatraPDF+ keeps opened documents in FileStates for the Recent view, but
-    // starts each new app session without reopening the prior tabs. Existing
-    // profiles serialized the old RestoreSession=true default, so migrate them
-    // once; after the marker is saved an explicit user change remains honored.
+    // RestoreSession now defaults to false for a new SumatraPDF+ profile. Do
+    // not overwrite a value already present in the settings file, though: it
+    // may be the user's explicit request to reopen tabs. The marker only keeps
+    // this schema transition from making the file dirty on every launch.
     bool migratedRestoreSessionDefault = !gprefs->restoreSessionDefaultMigrated;
     if (migratedRestoreSessionDefault) {
-        gprefs->restoreSession = false;
         gprefs->restoreSessionDefaultMigrated = true;
     }
 
@@ -537,8 +537,13 @@ static SessionData* CloneSessionData(const SessionData* src) {
     dst->windowState = src->windowState;
     dst->windowPos = src->windowPos;
     dst->sidebarDx = src->sidebarDx;
+    dst->browserTabIndex = src->browserTabIndex;
+    dst->browserActive = src->browserActive;
     for (TabState* ts : *src->tabStates) {
         dst->tabStates->Append(CloneTabState(ts));
+    }
+    for (Str url : *src->browserTabs) {
+        dst->browserTabs->Append(str::Dup(url));
     }
     return dst;
 }
@@ -623,12 +628,16 @@ static void RememberSessionState() {
     Vec<SessionData*>* sessionState = gGlobalPrefs->sessionData;
     FreeSessionDataVec(sessionState);
 
-    if (!SettingsRememberOpenedFiles()) {
+    // Recent/history and session restore are separate choices. A user can keep
+    // history off while still asking the app to reopen the tabs that were live
+    // at shutdown, so either preference is enough to maintain SessionData.
+    if (!SettingsRememberOpenedFiles() && !SettingsRestoreSession()) {
         return;
     }
 
     for (auto* win : gWindows) {
         SessionData* windowState = NewSessionData();
+        RememberTouchBrowserSession(win, windowState);
         for (WindowTab* tab : win->Tabs()) {
             if (!tab->filePath) {
                 // home page tab
@@ -659,7 +668,7 @@ static void RememberSessionState() {
             windowState->tabStates->Append(ts);
             DeleteFileState(fs);
         }
-        if (len(*windowState->tabStates) == 0) {
+        if (len(*windowState->tabStates) == 0 && len(*windowState->browserTabs) == 0) {
             FreeSessionData(windowState);
             continue;
         }

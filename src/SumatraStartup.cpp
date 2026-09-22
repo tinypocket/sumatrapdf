@@ -2709,6 +2709,7 @@ ContinueOpenWindow:
         for (SessionData* data : *gInitialSessionData) {
             // create window hidden to avoid flashing the about page
             win = CreateAndShowMainWindow(data, false);
+            RestoreTouchBrowserSession(win, data);
             for (TabState* state : *data->tabStates) {
                 if (len(state->filePath) == 0) {
                     logf("WinMain: skipping RestoreTabOnStartup() because state->filePath is empty\n");
@@ -2747,6 +2748,9 @@ ContinueOpenWindow:
                     selectIdx = firstDocIdx;
                 }
                 TabsSelect(win, selectIdx);
+            }
+            if (data->browserActive) {
+                SetTouchView(win, TouchView::Web);
             }
             if (gGlobalPrefs->lazyLoading) {
                 // trigger loading of the document
