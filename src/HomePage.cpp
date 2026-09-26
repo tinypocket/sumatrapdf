@@ -2620,14 +2620,33 @@ static void DrawTouchFileCardPath(MainWindow* win, HDC hdc, Str filePath, FileSt
     DrawHomeShadow(hdc, card, DpiScale(hdc, 10), pageBg);
     FillHomeRoundRect(hdc, card, DpiScale(hdc, 10), RGB(255, 255, 255), ThemeEdgeColor());
 
+    // The page fills its card. It used to sit inside a 14px white frame, which
+    // put a band of nothing between every thumbnail and its neighbour and made
+    // the grid read as framed pictures rather than a shelf of pages. Clipped to
+    // the card's rounded corners so the bitmap's square ones don't poke out.
     Rect thumbRc = card;
-    thumbRc.Inflate(-DpiScale(hdc, 14), -DpiScale(hdc, 14));
     RenderedBitmap* thumb = explicitThumbnail ? explicitThumbnail : (fs ? LoadThumbnail(fs) : nullptr);
     if (thumb) {
-        Rect dst = FitRectInRect(thumb->GetSize(), thumbRc);
+        Size src = thumb->GetSize();
+        // half cards fill the width and hang off the bottom, so what survives
+        // the clip is the top of the page; full cards fit the page whole
+        Rect dst;
+        if (LibraryHalfCards() && src.dx > 0) {
+            dst = Rect{card.x, card.y, card.dx, (int)((i64)card.dx * src.dy / src.dx)};
+        } else {
+            dst = FitRectInRect(src, thumbRc);
+        }
+        int radius = DpiScale(hdc, 10);
+        HRGN clip = CreateRoundRectRgn(card.x, card.y, card.x + card.dx + 1, card.y + card.dy + 1, radius, radius);
+        // AND, not a plain select: the content pane has its own clip on this DC
+        // and replacing it would let a card paint outside the pane
+        int savedDc = SaveDC(hdc);
+        ExtSelectClipRgn(hdc, clip, RGN_AND);
         BlitThumbnailWarm(thumb, hdc, dst);
+        RestoreDC(hdc, savedDc);
+        DeleteObject(clip);
     } else {
-        FillHomeRoundRect(hdc, thumbRc, DpiScale(hdc, 6), RGB(234, 229, 222));
+        FillHomeRoundRect(hdc, thumbRc, DpiScale(hdc, 10), RGB(234, 229, 222));
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, ThemeWindowDarkerTextColor());
         HdcDrawText(hdc, StrL("page"), thumbRc, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
@@ -2751,6 +2770,21 @@ void SetLibraryCardZoom(int zoom) {
     SaveSettings();
 }
 
+// Half cards show the top of each page, cropped to fill, at half the height:
+// twice as many files on screen and the titles still readable. Full cards show
+// the whole page.
+bool LibraryHalfCards() {
+    return gGlobalPrefs && gGlobalPrefs->libraryHalfCards;
+}
+
+void SetLibraryHalfCards(bool half) {
+    if (!gGlobalPrefs || gGlobalPrefs->libraryHalfCards == half) {
+        return;
+    }
+    gGlobalPrefs->libraryHalfCards = half;
+    SaveSettings();
+}
+
 // a card metric at the current zoom: DpiScale() of the design value, scaled
 static int LibraryScale(HDC hdc, int designDy) {
     return DpiScale(hdc, designDy) * LibraryCardZoom() / 100;
@@ -2758,6 +2792,11 @@ static int LibraryScale(HDC hdc, int designDy) {
 
 static int LibraryScale(HWND hwnd, int designDy) {
     return DpiScale(hwnd, designDy) * LibraryCardZoom() / 100;
+}
+
+// every grid's card height: half of the design height when half cards are on
+static int LibraryCardDy(HDC hdc) {
+    return LibraryScale(hdc, LibraryHalfCards() ? 98 : 196);
 }
 
 static int TouchCardColumns(HWND hwnd, int width) {
@@ -2916,7 +2955,7 @@ static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc
     int pad = DpiScale(hdc, 24);
     int gap = DpiScale(hdc, 20);
     int cardDx = LibraryScale(hdc, 148);
-    int cardDy = LibraryScale(hdc, 196);
+    int cardDy = LibraryCardDy(hdc);
     int cardBlockDy = cardDy + LibraryScale(hdc, 50);
     // No "Currently open" carousel: an open document is still a recent file and
     // appears in the RECENT section like any other, so the carousel only
@@ -3772,6 +3811,9 @@ bool HandleTouchLibraryLink(MainWindow* win, Str url) {
         win->libraryFilesScrollY = 0;
     } else if (str::Eq(url, kLinkLibraryCardSize)) {
         ShowLibraryCardSizeMenu(win);
+    } else if (str::Eq(url, kLinkLibraryCardShape)) {
+        SetLibraryHalfCards(!LibraryHalfCards());
+        win->libraryFilesScrollY = 0; // every row moved; start from the top
     } else if (str::Eq(url, kLinkLibraryHeaderOverflow)) {
         ShowLibraryHeaderOverflow(win);
     } else if (str::Eq(url, kLinkLibrarySearchScopeOpen)) {
@@ -4122,7 +4164,7 @@ static bool TouchLibraryFolderVisible(MainWindow* win, const StrVecWithData<Touc
     int pad = DpiScale(hdc, 24);
     int gap = LibraryScale(hdc, 20);
     int cardDx = LibraryScale(hdc, 148);
-    int cardDy = LibraryScale(hdc, 196);
+    int cardDy = LibraryCardDy(hdc);
     int columns = TouchCardColumns(win->hwndCanvas, rc.dx - leftDx - 2 * pad);
     for (int i = 0; i < len(selectedFiles); i++) {
         int col = i % columns;
@@ -5121,6 +5163,34 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         win->staticLinks.Append(new StaticLink(listView, Str(kLinkLibraryListView), StrL("List view")));
     }
 
+    // Card shape: the whole page, or the top half of it. Sits with the view
+    // controls, since it is the same kind of choice about how the grid looks.
+    {
+        int shapeDy = viewButtonDy;
+        int shapeGap = DpiScale(hdc, 8);
+        Rect shapeBtn{headerActionsLeft - shapeGap - shapeDy, (headerDy - shapeDy) / 2, shapeDy, shapeDy};
+        FillHomeRoundRect(hdc, shapeBtn, DpiScale(hdc, 11), ThemeHotBackgroundColor());
+        bool half = LibraryHalfCards();
+        // a little page: outlined, with its top band filled when half is on
+        int glyphDx = DpiScale(hdc, 13);
+        int glyphDy = DpiScale(hdc, 17);
+        Rect glyph{shapeBtn.x + (shapeBtn.dx - glyphDx) / 2, shapeBtn.y + (shapeBtn.dy - glyphDy) / 2, glyphDx,
+                   glyphDy};
+        // an empty page outline for the whole page; the same outline with its
+        // top band filled for the half
+        COLORREF glyphEdge = half ? ThemeWindowLinkColor() : ThemeWindowDarkerTextColor();
+        FillHomeRoundRect(hdc, glyph, DpiScale(hdc, 2), ThemeHotBackgroundColor(), glyphEdge);
+        if (half) {
+            Rect band = glyph;
+            band.Inflate(-DpiScale(hdc, 2), -DpiScale(hdc, 2));
+            band.dy = band.dy / 2;
+            HdcFillRect(hdc, band, ThemeWindowLinkColor());
+        }
+        Str shapeTip = half ? StrL("Showing the top of each page") : StrL("Showing the whole page");
+        win->staticLinks.Append(new StaticLink(shapeBtn, Str(kLinkLibraryCardShape), shapeTip));
+        headerActionsLeft = shapeBtn.x;
+    }
+
     // Card size, beside the view controls. Pinching the pane sets the same
     // value; this is the way to it without a touch screen. List rows are all
     // one height, so it only means something in the card view.
@@ -5243,7 +5313,7 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
         int filesContentDy = 0;
         int gap = LibraryScale(hdc, 20);
         int cardDx = LibraryScale(hdc, 148);
-        int cardDy = LibraryScale(hdc, 196);
+        int cardDy = LibraryCardDy(hdc);
         int columns = TouchCardColumns(win->hwndCanvas, rc.dx - leftDx - 2 * pad);
         // search results carry a third line under each card / a second line
         // in each row: the folder the match lives in

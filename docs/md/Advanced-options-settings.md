@@ -176,6 +176,11 @@ LibraryPinnedFolders =
 ; folders hidden in the Library view (introduced in version 3.8)
 LibraryHiddenFolders =
 
+; if true, the Library's file cards are half height and show the top of each
+; page cropped to fill, so twice as many fit on screen. If false (the default),
+; a card shows the whole page (introduced in version 3.8)
+LibraryHalfCards = false
+
 ; size of the file cards and folder tiles in the Library, as a percentage.
 ; Changed by pinching the Library with two fingers, or from its view menu.
 ; Clamped to 60 - 200 (introduced in version 3.8)

@@ -977,6 +977,14 @@ const globalPrefs: Field[] = [
   compactArray("LibraryPinnedFolders", Str, null, "folders pinned in the Library view").ver("3.8"),
   compactArray("LibraryHiddenFolders", Str, null, "folders hidden in the Library view").ver("3.8"),
   field(
+    "LibraryHalfCards",
+    Bool,
+    false,
+    "if true, the Library's file cards are half height and show the top of each page " +
+      "cropped to fill, so twice as many fit on screen. If false (the default), a card " +
+      "shows the whole page",
+  ).ver("3.8"),
+  field(
     "LibraryCardZoom",
     Int,
     100,

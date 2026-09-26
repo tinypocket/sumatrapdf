@@ -66,6 +66,8 @@ constexpr const char* kLinkLibraryHeaderOverflow = "<Library,HeaderOverflow>";
 // the card-size button in the header: opens the list of sizes. The same value
 // is what a two-finger pinch on the pane changes.
 constexpr const char* kLinkLibraryCardSize = "<Library,CardSize>";
+// the card-shape button: whole page, or the top half of it
+constexpr const char* kLinkLibraryCardShape = "<Library,CardShape>";
 // the sidebar's search-results "N Files" row: the content pane then shows
 // every file the current query matches, across all folders
 constexpr const char* kLinkLibrarySearchFiles = "<Library,SearchFiles>";
@@ -94,6 +96,9 @@ bool HomePageOnGesture(MainWindow* win, WPARAM wp, LPARAM lp);
 // the Library's card size as a percentage (60 - 200), and setting it
 int LibraryCardZoom();
 void SetLibraryCardZoom(int zoom);
+// the Library's cards show the top half of each page instead of the whole page
+bool LibraryHalfCards();
+void SetLibraryHalfCards(bool half);
 
 // Library hover / press feedback. The canvas reports which link is under the
 // pointer and which is held down; the draw pass paints one overlay for it.
