@@ -2601,6 +2601,37 @@ static TempStr FitPathTailTemp(HDC hdc, Str line, int maxDx, HFONT font) {
     }
 }
 
+// A card's file name over two lines. DT_WORDBREAK only breaks at spaces, and
+// most of these names are a single long token ("September-1st-Stichera.pdf"),
+// so it left them on one truncated line however much room was set aside. Break
+// mid-word when there is nowhere better, on a UTF-8 boundary - plenty of these
+// names are Greek.
+static void DrawTouchCardName(HDC hdc, Str name, Rect rc, HFONT font) {
+    int lineDy = rc.dy / 2;
+    Rect line1{rc.x, rc.y, rc.dx, lineDy};
+    if (HdcMeasureText(hdc, name, font).dx <= rc.dx) {
+        HdcDrawText(hdc, name, line1, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS, font);
+        return;
+    }
+    int fit = len(name);
+    while (fit > 0 && HdcMeasureText(hdc, Str(name.s, fit), font).dx > rc.dx) {
+        fit--;
+        while (fit > 0 && ((u8)name.s[fit] & 0xc0) == 0x80) {
+            fit--; // never split a multi-byte character
+        }
+    }
+    // a space near the end of the line is a nicer break than mid-word
+    for (int i = fit - 1; i > fit * 2 / 3; i--) {
+        if (name.s[i] == ' ') {
+            fit = i + 1;
+            break;
+        }
+    }
+    HdcDrawText(hdc, Str(name.s, fit), line1, DT_SINGLELINE | DT_NOPREFIX, font);
+    Rect line2{rc.x, rc.y + lineDy, rc.dx, lineDy};
+    HdcDrawText(hdc, Str(name.s + fit, len(name) - fit), line2, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS, font);
+}
+
 static void DrawTouchFileCardPath(MainWindow* win, HDC hdc, Str filePath, FileState* fs,
                                   RenderedBitmap* explicitThumbnail, const Rect& card, bool showProgress,
                                   const Rect* linkClip = nullptr, bool twoLineName = false, bool pinnable = false,
@@ -2628,13 +2659,20 @@ static void DrawTouchFileCardPath(MainWindow* win, HDC hdc, Str filePath, FileSt
     RenderedBitmap* thumb = explicitThumbnail ? explicitThumbnail : (fs ? LoadThumbnail(fs) : nullptr);
     if (thumb) {
         Size src = thumb->GetSize();
-        // half cards fill the width and hang off the bottom, so what survives
-        // the clip is the top of the page; full cards fit the page whole
-        Rect dst;
-        if (LibraryHalfCards() && src.dx > 0) {
-            dst = Rect{card.x, card.y, card.dx, (int)((i64)card.dx * src.dy / src.dx)};
-        } else {
-            dst = FitRectInRect(src, thumbRc);
+        // The page covers the card the way a photo thumbnail does: scaled until
+        // both sides are filled and the overflow cropped off, rather than fitted
+        // whole and left with bands of white beside it. Centred across, anchored
+        // at the top, so what a crop takes is the foot of the page and not its
+        // title - and a landscape page keeps its middle rather than one edge.
+        Rect dst = thumbRc;
+        if (src.dx > 0 && src.dy > 0) {
+            int byDx = (int)(((i64)thumbRc.dx * src.dy + src.dx - 1) / src.dx);
+            int byDy = (int)(((i64)thumbRc.dy * src.dx + src.dy - 1) / src.dy);
+            if (byDx >= thumbRc.dy) {
+                dst = Rect{thumbRc.x, thumbRc.y, thumbRc.dx, byDx}; // width fills, height spills
+            } else {
+                dst = Rect{thumbRc.x - (byDy - thumbRc.dx) / 2, thumbRc.y, byDy, thumbRc.dy};
+            }
         }
         int radius = DpiScale(hdc, 10);
         HRGN clip = CreateRoundRectRgn(card.x, card.y, card.x + card.dx + 1, card.y + card.dy + 1, radius, radius);
@@ -2673,9 +2711,12 @@ static void DrawTouchFileCardPath(MainWindow* win, HDC hdc, Str filePath, FileSt
     TempStr name = path::GetBaseNameTemp(filePath);
     Rect nameRc{card.x, card.y + card.dy + DpiScale(hdc, 9), card.dx, DpiScale(hdc, twoLineName ? 38 : 19)};
     SetTextColor(hdc, ThemeWindowTextColor());
-    UINT nameFlags = DT_END_ELLIPSIS | DT_NOPREFIX;
-    nameFlags |= twoLineName ? DT_WORDBREAK : DT_SINGLELINE;
-    HdcDrawText(hdc, name, nameRc, nameFlags, HdcGetUiFont(hdc, 13, FW_SEMIBOLD));
+    HFONT nameFont = HdcGetUiFont(hdc, 13, FW_SEMIBOLD);
+    if (twoLineName) {
+        DrawTouchCardName(hdc, name, nameRc, nameFont);
+    } else {
+        HdcDrawText(hdc, name, nameRc, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX, nameFont);
+    }
 
     i64 size = knownSize == kSizeNotFetched ? HomeFileSizeCached(filePath) : knownSize;
     TempStr meta = size >= 0 ? str::FormatSizeShortTemp(size, nullptr) : str::DupTemp("");
@@ -2741,7 +2782,9 @@ static void DrawTouchFileCard(MainWindow* win, HDC hdc, FileState* fs, const Rec
                               const Rect* linkClip = nullptr) {
     // pinnable: the Recent surface gets the same pin badge the Library grid
     // has, so a file can be pinned (or unpinned) without going to the Library
-    DrawTouchFileCardPath(win, hdc, fs->filePath, fs, nullptr, card, showProgress, linkClip, false, true);
+    // two-line names, as in the folder view: one line truncated most of these
+    // away, and a shelf of "2026-09-20_Sunday_..." tells you nothing
+    DrawTouchFileCardPath(win, hdc, fs->filePath, fs, nullptr, card, showProgress, linkClip, true, true);
 }
 
 // The Library's cards and folder tiles are sized by a zoom percentage the user
@@ -2956,7 +2999,8 @@ static void DrawTouchRecentCards(MainWindow* win, HDC hdc, const Rect& contentRc
     int gap = DpiScale(hdc, 20);
     int cardDx = LibraryScale(hdc, 148);
     int cardDy = LibraryCardDy(hdc);
-    int cardBlockDy = cardDy + LibraryScale(hdc, 50);
+    // room for the second name line, the same step the folder grid uses
+    int cardBlockDy = cardDy + LibraryScale(hdc, 70);
     // No "Currently open" carousel: an open document is still a recent file and
     // appears in the RECENT section like any other, so the carousel only
     // duplicated it and pushed everything else down.
