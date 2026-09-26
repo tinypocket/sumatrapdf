@@ -19,7 +19,10 @@ bool IsHttpRspOk(const HttpRsp*);
 
 bool HttpPost(Str server, int port, Str url, str::Builder* headers, str::Builder* data);
 bool HttpGet(Str url, HttpRsp* rspOut);
-bool HttpGetToFile(Str url, Str destFilePath, const Func1<HttpProgress*>& cbProgress, i64 maxSize = -1);
+// extraHeaders: raw request headers, "Name: value" lines separated by CR LF,
+// for a fetch that has to pass as the session that found the link (a Cookie line)
+bool HttpGetToFile(Str url, Str destFilePath, const Func1<HttpProgress*>& cbProgress, i64 maxSize = -1,
+                   Str extraHeaders = {});
 
 // blocking; extraHeaders is "Name: value" per line (\n or \r\n separated)
 bool HttpPostUrl(Str url, Str contentType, Str extraHeaders, Str body, HttpRsp* rspOut);

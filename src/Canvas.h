@@ -34,4 +34,11 @@ constexpr uint kLinkFollowRecomputeDelayInMs = 300;
 constexpr UINT_PTR kTextSelectCaretTimerID = 12;
 // Debounce for popping up the floating selection toolbar after a selection
 constexpr UINT_PTR kSelectionToolbarShowTimerID = 13;
+// drives Library scroll easing / fling while it is moving
+constexpr UINT_PTR kLibraryScrollTimerID = 14;
+// tap-and-hold on a Recent/Library card opens the same context menu as a
+// right-click (there is no right button on a touchscreen)
+constexpr UINT_PTR kAboutHoldTimerID = 15;
+// drives the Library's hover / press feedback while it is easing
+constexpr UINT_PTR kLibraryFeedbackTimerID = 16;
 constexpr uint kSelectionToolbarShowDelayInMs = 500;

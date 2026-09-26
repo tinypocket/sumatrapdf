@@ -46,6 +46,7 @@
 #include "base/Base.h"
 #include "base/Win.h"
 #include "base/Dpi.h"
+#include "base/Pixmap.h"
 #include "base/Timer.h"
 
 #include "wingui/UIModels.h"
@@ -66,6 +67,8 @@
 #include "TextSearch.h"
 #include "RenderCache.h"
 #include "base/UITask.h"
+#include "base/File.h"
+#include "AppTools.h"
 #include "WindowTab.h"
 #include "MainWindow.h"
 
@@ -310,9 +313,1056 @@ void DisplayModel::GetDisplayState(FileState* fs) {
     }
     fs->rotation = rotation;
     fs->displayR2L = displayR2L;
+    fs->trimTop = manualTrimTop;
+    fs->trimBottom = manualTrimBottom;
 
     str::Free(fs->decryptionKey);
     fs->decryptionKey = engine->decryptionKey.s ? str::Dup(engine->decryptionKey.s) : nullptr;
+}
+
+// how much blank page is left above and below the content when trimming, so a
+// cropped page still reads as a page rather than as text butted against an edge
+constexpr float kSmartMarginPadPt = 6.0f;
+
+// A running header or footer is a line of text that sits by itself at the top
+// or bottom of most pages - a page number, a chapter title, a book title. The
+// engine's content box counts it as content, so smart margins keeps the whole
+// band even though it carries nothing the reader is reading. Detecting it needs
+// more than one page: a single page cannot tell a header apart from the first
+// line of a paragraph.
+
+// One horizontal band of text on a page, in page (unrotated, unzoomed) space.
+struct TextLine {
+    float top = 0.0f;
+    float bottom = 0.0f;
+    // The line's wording, reduced to its letters (lower case) and hashed, so
+    // the same footer on another page gets the same key whatever its page
+    // number or punctuation. A line of digits alone - a page number - gets
+    // kPageNumberKey. 0: nothing to compare (a stray mark, punctuation).
+    u32 key = 0;
+    // while the key is being built
+    u32 hash = 2166136261u;
+    int nLetters = 0;
+    bool hasDigit = false;
+};
+
+constexpr u32 kPageNumberKey = 0x9e3779b9u;
+
+static void AddToLineKey(TextLine& line, int c) {
+    if (c <= 0) {
+        return;
+    }
+    if (c >= '0' && c <= '9') {
+        line.hasDigit = true;
+        return;
+    }
+    if (c >= 0x10000 || !IsCharAlphaW((WCHAR)c)) {
+        return;
+    }
+    WCHAR lower = (WCHAR)(uintptr_t)CharLowerW((LPWSTR)(uintptr_t)(WCHAR)c);
+    line.hash = (line.hash ^ (u32)lower) * 16777619u; // FNV-1a
+    line.nLetters++;
+}
+
+static void FinishLineKey(TextLine& line) {
+    if (line.nLetters >= 2) {
+        line.key = line.hash ? line.hash : 1;
+    } else if (line.nLetters == 0 && line.hasDigit) {
+        line.key = kPageNumberKey;
+    }
+}
+
+// Two candidate bands are "the same header" when they sit at the same height.
+// Wording is deliberately NOT compared: in a book divided into sections the
+// running header carries the section's name, so it reads differently on every
+// sampled page while being the same header throughout.
+static bool SameBand(const TextLine& a, const TextLine& b) {
+    constexpr float kBandTol = 3.0f;
+    return fabsf(a.top - b.top) <= kBandTol && fabsf(a.bottom - b.bottom) <= kBandTol;
+}
+
+// Group a page's per-codepoint boxes into lines. Boxes whose vertical spans
+// overlap belong to the same line; anything smaller than a hair is dropped so
+// stray marks do not become a line of their own.
+static void CollectTextLines(EngineBase* engine, int pageNo, Vec<TextLine>& out) {
+    // the engine caches this, so re-laying out a page does not re-extract it
+    int nCodepoints = 0; // GetTextForPage reports codepoints, one per coords entry
+    Rect* coords = nullptr;
+    Str text = engine->GetTextForPage(pageNo, &nCodepoints, &coords);
+    if (!coords || !text) {
+        return;
+    }
+    int byteIdx = 0; // the text is UTF-8, walked in step with the boxes
+    for (int i = 0; i < nCodepoints; i++) {
+        int c = byteIdx < text.len ? Utf8CodepointNext(text, byteIdx) : 0;
+        Rect r = coords[i];
+        if (r.dy <= 0 || r.dx <= 0) {
+            continue; // spaces and newlines carry an empty box
+        }
+        float top = (float)r.y;
+        float bottom = (float)(r.y + r.dy);
+        TextLine* into = nullptr;
+        for (TextLine& line : out) {
+            // any vertical overlap at all: superscripts and accents ride along
+            if (top < line.bottom && bottom > line.top) {
+                line.top = std::min(line.top, top);
+                line.bottom = std::max(line.bottom, bottom);
+                into = &line;
+                break;
+            }
+        }
+        if (!into) {
+            TextLine line;
+            line.top = top;
+            line.bottom = bottom;
+            out.Append(line);
+            into = &out.Last();
+        }
+        AddToLineKey(*into, c);
+    }
+    for (TextLine& line : out) {
+        FinishLineKey(line);
+    }
+    // sorted top-down, so the first and last entries are the candidate bands
+    VecSort(out, [](const TextLine* a, const TextLine* b) -> int {
+        float d = a->top - b->top;
+        return d < 0 ? -1 : (d > 0 ? 1 : 0);
+    });
+}
+
+// A candidate band has to be separated from the body by a gap noticeably larger
+// than the line spacing in the body itself, or every first line of every
+// paragraph would qualify.
+static float BodyLineGap(const Vec<TextLine>& lines) {
+    if (len(lines) < 3) {
+        return 0.0f;
+    }
+    // the median gap between consecutive body lines, ignoring the two ends
+    Vec<float> gaps;
+    for (int i = 2; i < len(lines) - 1; i++) {
+        gaps.Append(lines[i].top - lines[i - 1].bottom);
+    }
+    if (len(gaps) == 0) {
+        return 0.0f;
+    }
+    VecSort(gaps, [](const float* a, const float* b) -> int {
+        float d = *a - *b;
+        return d < 0 ? -1 : (d > 0 ? 1 : 0);
+    });
+    return gaps[len(gaps) / 2];
+}
+
+// Engine-only, so the background scan can run it off the UI thread.
+static void DetectRunningHeaderFooterIn(EngineBase* engine, float* topOut, float* bottomOut) {
+    *topOut = 0.0f;
+    *bottomOut = 0.0f;
+    int nPages = engine ? engine->PageCount() : 0;
+    if (nPages < 3) {
+        return; // nothing to compare against
+    }
+
+    // sample rather than read every page: text extraction is not cheap
+    constexpr int kMaxSamples = 6;
+    int step = std::max(1, nPages / kMaxSamples);
+    // every page's candidate band, or an empty one where the page had none
+    Vec<TextLine> headerCands;
+    Vec<TextLine> footerCands;
+    int sampled = 0;
+    for (int pageNo = 1; pageNo <= nPages && sampled < kMaxSamples; pageNo += step) {
+        RectF media = engine->PageMediabox(pageNo);
+        if (media.IsEmpty()) {
+            continue;
+        }
+        Vec<TextLine> lines;
+        CollectTextLines(engine, pageNo, lines);
+        if (len(lines) < 4) {
+            continue; // a title page or a plate: not enough body to judge
+        }
+        sampled++;
+        float bodyGap = BodyLineGap(lines);
+        // a header has to stand off by more than one blank body line
+        float minGap = std::max(bodyGap * 1.8f, 6.0f);
+
+        const TextLine& first = lines[0];
+        float firstGap = lines[1].top - first.bottom;
+        // near the top edge, not a heading halfway down the page
+        bool nearTop = (first.top - media.y) < media.dy * 0.14f;
+        // and running-header sized: a section title or a slide heading is set
+        // large, a running header is one small line
+        bool thinTop = (first.bottom - first.top) <= media.dy * 0.06f;
+        if (firstGap >= minGap && nearTop && thinTop) {
+            headerCands.Append(first);
+        }
+
+        const TextLine& last = lines[len(lines) - 1];
+        float lastGap = last.top - lines[len(lines) - 2].bottom;
+        bool nearBottom = (media.y + media.dy - last.bottom) < media.dy * 0.14f;
+        bool thinBottom = (last.bottom - last.top) <= media.dy * 0.06f;
+        if (lastGap >= minGap && nearBottom && thinBottom) {
+            footerCands.Append(last);
+        }
+    }
+    if (sampled < 2) {
+        return;
+    }
+
+    // The band the most pages agree on wins, rather than whichever page
+    // happened to be sampled first - one odd page must not lock out the real
+    // header. "Most pages", not "some", so a lone pull quote or a single
+    // chapter title never crops the whole book.
+    auto modalBand = [](const Vec<TextLine>& cands, int nSampled, TextLine* out) -> bool {
+        int best = 0;
+        for (const TextLine& a : cands) {
+            int n = 0;
+            for (const TextLine& b : cands) {
+                if (SameBand(a, b)) {
+                    n++;
+                }
+            }
+            if (n > best) {
+                best = n;
+                *out = a;
+            }
+        }
+        return best * 2 > nSampled;
+    };
+
+    TextLine band;
+    if (modalBand(headerCands, sampled, &band)) {
+        *topOut = band.bottom - engine->PageMediabox(1).y;
+    }
+    if (modalBand(footerCands, sampled, &band)) {
+        RectF media = engine->PageMediabox(1);
+        *bottomOut = media.y + media.dy - band.top;
+    }
+}
+
+// The synchronous form, for the manual trim dialog's suggestion; layout gets
+// the same result from the background scan instead.
+void DisplayModel::DetectRunningHeaderFooter() const {
+    if (smartHfChecked) {
+        return;
+    }
+    smartHfChecked = true;
+    DetectRunningHeaderFooterIn(engine, &smartHfTopPt, &smartHfBottomPt);
+}
+
+int DisplayModel::PageMarginExpandedEdges(int pageNo) const {
+    for (const MarginExpansion& e : marginExpanded) {
+        if (e.pageNo == pageNo) {
+            return e.edges;
+        }
+    }
+    return 0;
+}
+
+void DisplayModel::SetPageMarginExpanded(int pageNo, int edges, bool expanded) {
+    for (int i = 0; i < len(marginExpanded); i++) {
+        MarginExpansion& e = marginExpanded[i];
+        if (e.pageNo != pageNo) {
+            continue;
+        }
+        e.edges = expanded ? (e.edges | edges) : (e.edges & ~edges);
+        if (e.edges == 0) {
+            marginExpanded.RemoveAt(i);
+        }
+        return;
+    }
+    if (expanded && edges != 0) {
+        marginExpanded.Append({pageNo, edges});
+    }
+}
+
+// the edges this page is actually showing less of than its full height
+int DisplayModel::PageMarginTrimmedEdges(int pageNo) const {
+    if (!gGlobalPrefs->smartMargins) {
+        return 0;
+    }
+    RectF media = PageMediaBox(pageNo);
+    RectF display = PageDisplayBox(pageNo);
+    int edges = 0;
+    if (display.y > media.y + 1.0f) {
+        edges |= kPageEdgeTop;
+    }
+    if (display.y + display.dy < media.y + media.dy - 1.0f) {
+        edges |= kPageEdgeBottom;
+    }
+    return edges;
+}
+
+// The body of one page: the text between a running header and a running footer.
+// Detection says whether this document has them at all; this says whether THIS
+// page carries one, and where its real text starts and ends. Both halves
+// matter: trimming only to the header band would leave the whole gap between
+// the last body line and the footer, and trimming a page that has no header
+// would eat whatever sits above its first line - a plate, a title ornament.
+// A lone line at the very edge of one page, standing off from the rest by a
+// gap no body spacing produces: a source URL under a hymn, a page number, a
+// date line. The document-wide pass needs most sampled pages to agree on a
+// band, and a book whose pages vary in layout (a Menaion, where one page ends
+// with a URL and the next with nothing) never reaches that agreement - so each
+// page is also judged on its own, with stricter thresholds since there is no
+// second page to confirm it against.
+static bool IsLoneEdgeLine(const Vec<TextLine>& lines, int idx, bool atBottom, const RectF& media) {
+    int n = len(lines);
+    if (n < 3 || idx < 0 || idx >= n) {
+        return false;
+    }
+    const TextLine& line = lines[idx];
+    const TextLine& neighbor = atBottom ? lines[idx - 1] : lines[idx + 1];
+    if (atBottom ? idx != n - 1 : idx != 0) {
+        return false;
+    }
+    float gap = atBottom ? line.top - neighbor.bottom : neighbor.top - line.bottom;
+    float bodyGap = BodyLineGap(lines);
+    float minGap = std::max(bodyGap * 2.0f, 8.0f);
+    float edgeDist = atBottom ? (media.y + media.dy - line.bottom) : (line.top - media.y);
+    bool nearEdge = edgeDist < media.dy * 0.12f;
+    bool thin = (line.bottom - line.top) <= media.dy * 0.05f;
+    return gap >= minGap && nearEdge && thin;
+}
+
+// A line that repeats - the same wording at the same height - as the first (or
+// last) line of many pages is a running header (footer), however little it
+// stands off from the body. The band detection above wants a gap wider than
+// the body's line spacing, which a page of music never shows: its text is
+// lyrics, with whole staves between the lines, so a copyright footer 30pt
+// under the last line looked like one more line of lyrics. Wording is compared
+// here, so the pages need not all agree: a quarter of them is enough (and at
+// least two), which also covers footers only on odd or on even pages, and a
+// URL under some hymns of a Menaion but not others.
+struct RepeatedLine {
+    u32 key = 0;
+    float top = 0.0f;
+};
+
+// `lines` holds every page's lines back to back; page i's run from
+// starts[i] to starts[i + 1]
+static void FindRepeatedEdgeLines(const Vec<TextLine>& lines, const Vec<int>& starts, bool atBottom,
+                                  Vec<RepeatedLine>& out) {
+    struct Cand {
+        u32 key;
+        float top;
+        int count;
+    };
+    Vec<Cand> cands;
+    int nPagesWithText = 0;
+    for (int p = 0; p + 1 < len(starts); p++) {
+        int b = starts[p];
+        int e = starts[p + 1];
+        if (e - b < 2) {
+            continue;
+        }
+        nPagesWithText++;
+        const TextLine& l = atBottom ? lines[e - 1] : lines[b];
+        if (l.key == 0) {
+            continue;
+        }
+        bool found = false;
+        for (Cand& c : cands) {
+            if (c.key == l.key && fabsf(c.top - l.top) <= 3.0f) {
+                c.count++;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            cands.Append({l.key, l.top, 1});
+        }
+    }
+    int minPages = std::max(2, (nPagesWithText + 3) / 4);
+    for (const Cand& c : cands) {
+        if (c.count >= minPages) {
+            out.Append({c.key, c.top});
+        }
+    }
+}
+
+static bool IsRepeatedLine(const TextLine& line, const Vec<RepeatedLine>& repeated) {
+    for (const RepeatedLine& r : repeated) {
+        if (r.key == line.key && fabsf(r.top - line.top) <= 3.0f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Engine-only, so the background scan can run it off the UI thread. hfTopPt /
+// hfBottomPt are the document-wide running bands (0 when there are none);
+// repeatedTop / repeatedBottom the lines that repeat word for word at the top /
+// bottom of many pages (FindRepeatedEdgeLines).
+static bool ComputePageBody(EngineBase* engine, int pageNo, const Vec<TextLine>& lines, float hfTopPt, float hfBottomPt,
+                            const Vec<RepeatedLine>& repeatedTop, const Vec<RepeatedLine>& repeatedBottom,
+                            DisplayModel::PageBody* out) {
+    *out = DisplayModel::PageBody();
+    RectF media = engine->PageMediabox(pageNo);
+    if (media.IsEmpty()) {
+        return false;
+    }
+    if (len(lines) < 2) {
+        return false; // no body to speak of: leave this page alone
+    }
+    // a little slack, so a header that sits a point lower on one page than on
+    // the sampled ones is still recognised as the header
+    constexpr float kBandSlack = 2.0f;
+    float headerBottom = media.y + hfTopPt + kBandSlack;
+    float footerTop = media.y + media.dy - hfBottomPt - kBandSlack;
+    int first = -1;
+    int last = -1;
+    for (int i = 0; i < len(lines); i++) {
+        bool isHeader = hfTopPt > 0.0f && lines[i].bottom <= headerBottom;
+        bool isFooter = hfBottomPt > 0.0f && lines[i].top >= footerTop;
+        if (isHeader) {
+            out->hasHeader = true;
+            continue;
+        }
+        if (isFooter) {
+            out->hasFooter = true;
+            continue;
+        }
+        if (first < 0) {
+            first = i;
+        }
+        last = i;
+    }
+    // the lines repeated word for word at the top / bottom of many pages
+    if (!out->hasHeader && first == 0 && IsRepeatedLine(lines[0], repeatedTop)) {
+        out->hasHeader = true;
+        first++;
+    }
+    int n = len(lines);
+    if (!out->hasFooter && last == n - 1 && last > first && IsRepeatedLine(lines[last], repeatedBottom)) {
+        out->hasFooter = true;
+        last--;
+    }
+    // this page's own lone edge lines, where the document-wide bands did not
+    // account for them (or the document has none)
+    if (!out->hasHeader && first >= 0 && IsLoneEdgeLine(lines, first, false, media)) {
+        out->hasHeader = true;
+        first++;
+    }
+    if (!out->hasFooter && last > first && IsLoneEdgeLine(lines, last, true, media)) {
+        out->hasFooter = true;
+        last--;
+    }
+    if (first < 0 || last < first) {
+        return false; // the whole page looked like header/footer: do not crop it
+    }
+    // The body is what the page draws between the header and the footer -
+    // drawings as well as text. Cropping to the text lines alone cut the
+    // staff off the top of a page of music, whose first text is the lyrics
+    // under it.
+    float regionTop = media.y;
+    float regionBottom = media.y + media.dy;
+    for (int i = 0; i < first; i++) {
+        regionTop = std::max(regionTop, lines[i].bottom + 0.5f);
+    }
+    for (int i = last + 1; i < n; i++) {
+        regionBottom = std::min(regionBottom, lines[i].top - 0.5f);
+    }
+    if (regionBottom <= regionTop) {
+        return false;
+    }
+    RectF region{media.x, regionTop, media.dx, regionBottom - regionTop};
+    RectF body = engine->PageContentBoxWithin(pageNo, region);
+    if (body.IsEmpty()) {
+        return false;
+    }
+    float limitTop = regionTop;
+    float limitBottom = regionBottom;
+    // A rule under a header (over a footer) goes with it: a thin drawing on
+    // its own at the edge of the body, with a clear gap before what follows.
+    // Kept as body it held the crop at the rule, and the padding around the
+    // body brought half the header's text back into view.
+    // The strip is generous because a stroked line's box is padded for its
+    // joins; it only counts if no text line falls in it, so a small first line
+    // of text is never taken for a rule.
+    constexpr float kRuleDy = 8.0f;
+    constexpr float kRuleGap = 2.0f;
+    if (out->hasHeader) {
+        float ruleBottom = body.y + kRuleDy;
+        float bodyBottom = body.y + body.dy;
+        bool noText = lines[first].top >= ruleBottom;
+        RectF rest =
+            engine->PageContentBoxWithin(pageNo, RectF{media.x, ruleBottom, media.dx, bodyBottom - ruleBottom});
+        if (noText && !rest.IsEmpty() && rest.y >= ruleBottom + kRuleGap) {
+            limitTop = ruleBottom;
+            body = RectF{body.x, rest.y, body.dx, bodyBottom - rest.y};
+        }
+    }
+    if (out->hasFooter) {
+        float ruleTop = body.y + body.dy - kRuleDy;
+        bool noText = lines[last].bottom <= ruleTop;
+        RectF rest = engine->PageContentBoxWithin(pageNo, RectF{media.x, body.y, media.dx, ruleTop - body.y});
+        if (noText && !rest.IsEmpty() && rest.y + rest.dy <= ruleTop - kRuleGap) {
+            limitBottom = ruleTop;
+            body.dy = rest.y + rest.dy - body.y;
+        }
+    }
+    out->top = body.y;
+    out->bottom = body.y + body.dy;
+    out->limitTop = limitTop;
+    out->limitBottom = limitBottom;
+    return true;
+}
+
+// --- scanned pages ----------------------------------------------------------
+// A scanned book is one image per page, and the image covers the whole page:
+// what the page draws says nothing about where its margins end, and there is
+// no text to read either. The page is rendered small (a few milliseconds) and
+// the ink is found in the pixels instead.
+
+// the size the page is rendered at to look for ink; enough to see a line of
+// text, small enough to be cheap on a book of hundreds of pages
+constexpr float kInkScanDpi = 24.0f;
+// a row counts as inked when this much of its width is darker than the paper
+constexpr float kInkRowFraction = 0.01f;
+
+static bool ComputeInkBox(EngineBase* engine, int pageNo, const RectF& media, RectF* out) {
+    if (media.IsEmpty()) {
+        return false;
+    }
+    RenderPageArgs args(pageNo, kInkScanDpi / 72.0f, 0);
+    Pixmap* pix = engine->RenderPage(args);
+    if (!pix || !pix->data || pix->width < 8 || pix->height < 8) {
+        FreePixmap(pix);
+        return false;
+    }
+    int w = pix->width;
+    int h = pix->height;
+    int bpp = PixmapBytesPerPixel(pix->format);
+    // the paper's own shade, so a grey or yellowed scan is not all "ink":
+    // the brightness nine tenths of the pixels are below
+    Vec<u8> lum;
+    VecReserve(lum, w * h);
+    for (int y = 0; y < h; y++) {
+        const u8* row = pix->data + (size_t)y * pix->stride;
+        for (int x = 0; x < w; x++) {
+            const u8* p = row + (size_t)x * bpp;
+            lum.Append((u8)((p[0] * 29 + p[1] * 150 + p[2] * 77) >> 8)); // BGR
+        }
+    }
+    Vec<u8> sorted = lum;
+    VecSort(sorted, [](const u8* a, const u8* b) -> int { return (int)*a - (int)*b; });
+    int paper = sorted[(int)(len(sorted) * 0.9)];
+    int threshold = std::max(24, paper - 48);
+    int minDark = std::max(2, (int)(w * kInkRowFraction));
+
+    int top = -1;
+    int bottom = -1;
+    int left = w;
+    int right = -1;
+    for (int y = 0; y < h; y++) {
+        int dark = 0;
+        int rowLeft = w;
+        int rowRight = -1;
+        for (int x = 0; x < w; x++) {
+            if (lum[y * w + x] < threshold) {
+                dark++;
+                rowLeft = std::min(rowLeft, x);
+                rowRight = std::max(rowRight, x);
+            }
+        }
+        if (dark >= minDark) {
+            if (top < 0) {
+                top = y;
+            }
+            bottom = y;
+            left = std::min(left, rowLeft);
+            right = std::max(right, rowRight);
+        }
+    }
+    FreePixmap(pix);
+    if (top < 0 || bottom <= top) {
+        return false; // a blank page: leave it alone
+    }
+    // one pixel of slack, so a stroke's faint edge is not clipped
+    float sx = media.dx / (float)w;
+    float sy = media.dy / (float)h;
+    float y0 = media.y + std::max(0, top - 1) * sy;
+    float y1 = media.y + std::min(h, bottom + 2) * sy;
+    float x0 = media.x + std::max(0, left - 1) * sx;
+    float x1 = media.x + std::min(w, right + 2) * sx;
+    *out = RectF{x0, y0, std::max(1.0f, x1 - x0), std::max(1.0f, y1 - y0)};
+    return true;
+}
+
+// --- background smart-margin scan ------------------------------------------
+// Text extraction for every page of a long book takes many seconds, which used
+// to happen inside the first layout, on the UI thread. The scan does it on a
+// worker: the document-wide bands first (when enabled), then each page's body.
+// Results land on the UI thread in one batch, the layout is redone once with
+// the view held in place, and progress reaches the window through the
+// controller callback. A model that went away meanwhile is recognised by its
+// absence from gLiveDisplayModels; a scan made stale by a prefs change by its
+// generation.
+static Vec<DisplayModel*> gLiveDisplayModels;
+
+struct SmartMarginScan {
+    DisplayModel* dm = nullptr;
+    int gen = 0;
+    EngineBase* engine = nullptr; // held with a ref for the scan's duration
+    bool detectRunningBands = false;
+    int nPages = 0;
+    float hfTopPt = 0.0f;
+    float hfBottomPt = 0.0f;
+    Vec<DisplayModel::PageBodyCache> results;
+};
+
+struct SmartMarginProgress {
+    DisplayModel* dm = nullptr;
+    int gen = 0;
+    int done = 0;
+    int total = 0;
+};
+
+// Reading every page of a 600-page scan takes tens of seconds, and nothing
+// about the result changes until the file does - so the scan's output is kept
+// next to the settings, keyed by the document's path, size and timestamp. A
+// stale or foreign file simply misses and the scan runs as before. The ⋯ menu's
+// "Rescan margins" deletes the entry (ForgetSmartMarginCache).
+constexpr u32 kSmartCacheMagic = 0x314d5343; // "CSM1"
+constexpr u32 kSmartCacheVersion = 1;
+
+struct SmartMarginCacheHeader {
+    u32 magic;
+    u32 version;
+    u32 entrySize; // sizeof(PageBodyCache): a layout change invalidates the file
+    i32 nPages;
+    u32 flags; // bit 0: the running-header/footer pass was part of the scan
+    u32 pathHash;
+    i64 fileSize;
+    u64 fileTime;
+    float hfTopPt;
+    float hfBottomPt;
+};
+
+static u64 SmartCachePathHash(Str path) {
+    u64 h = 1469598103934665603ull;
+    for (int i = 0; i < path.len; i++) {
+        // the path is matched case-insensitively, as the filesystem does
+        char c = path.s[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = (char)(c - 'A' + 'a');
+        }
+        h = (h ^ (u8)c) * 1099511628211ull;
+    }
+    return h;
+}
+
+static TempStr SmartCachePathTemp(Str docPath) {
+    if (docPath.len == 0) {
+        return {};
+    }
+    TempStr dir = GetPathInAppDataDirTemp(StrL("smartmargins"));
+    if (!dir) {
+        return {};
+    }
+    if (!dir::Exists(dir) && !dir::Create(dir)) {
+        return {};
+    }
+    TempStr name = fmt("%016llx.bin", (unsigned long long)SmartCachePathHash(docPath));
+    return path::JoinTemp(dir, name);
+}
+
+static void SmartCacheFileKey(Str docPath, i64* sizeOut, u64* timeOut) {
+    *sizeOut = file::GetSize(docPath);
+    FILETIME ft = file::GetModificationTime(docPath);
+    *timeOut = ((u64)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+}
+
+static bool LoadSmartMarginCache(SmartMarginScan* s) {
+    Str docPath = s->engine->FilePath();
+    TempStr cachePath = SmartCachePathTemp(docPath);
+    if (!cachePath) {
+        return false;
+    }
+    Str data = file::ReadFile(cachePath);
+    if (!data.s) {
+        return false;
+    }
+    defer {
+        str::Free(data);
+    };
+    SmartMarginCacheHeader h;
+    int entries = s->nPages;
+    i64 want = (i64)sizeof(h) + (i64)entries * (i64)sizeof(DisplayModel::PageBodyCache);
+    if (data.len != want) {
+        return false;
+    }
+    memcpy(&h, data.s, sizeof(h));
+    i64 fileSize = 0;
+    u64 fileTime = 0;
+    SmartCacheFileKey(docPath, &fileSize, &fileTime);
+    u32 flags = s->detectRunningBands ? 1 : 0;
+    bool ok = h.magic == kSmartCacheMagic && h.version == kSmartCacheVersion &&
+              h.entrySize == (u32)sizeof(DisplayModel::PageBodyCache) && h.nPages == entries && h.flags == flags &&
+              h.pathHash == (u32)SmartCachePathHash(docPath) && h.fileSize == fileSize && h.fileTime == fileTime;
+    if (!ok) {
+        return false;
+    }
+    s->hfTopPt = h.hfTopPt;
+    s->hfBottomPt = h.hfBottomPt;
+    const u8* p = (const u8*)data.s + sizeof(h);
+    for (int i = 0; i < entries; i++) {
+        DisplayModel::PageBodyCache e;
+        memcpy(&e, p + (size_t)i * sizeof(e), sizeof(e));
+        s->results.Append(e);
+    }
+    return true;
+}
+
+static void SaveSmartMarginCache(SmartMarginScan* s) {
+    Str docPath = s->engine->FilePath();
+    TempStr cachePath = SmartCachePathTemp(docPath);
+    if (!cachePath || len(s->results) != s->nPages) {
+        return;
+    }
+    SmartMarginCacheHeader h{};
+    h.magic = kSmartCacheMagic;
+    h.version = kSmartCacheVersion;
+    h.entrySize = (u32)sizeof(DisplayModel::PageBodyCache);
+    h.nPages = s->nPages;
+    h.flags = s->detectRunningBands ? 1 : 0;
+    h.pathHash = (u32)SmartCachePathHash(docPath);
+    SmartCacheFileKey(docPath, &h.fileSize, &h.fileTime);
+    h.hfTopPt = s->hfTopPt;
+    h.hfBottomPt = s->hfBottomPt;
+    size_t entryBytes = (size_t)s->nPages * sizeof(DisplayModel::PageBodyCache);
+    size_t total = sizeof(h) + entryBytes;
+    u8* buf = AllocArray<u8>((int)total);
+    if (!buf) {
+        return;
+    }
+    memcpy(buf, &h, sizeof(h));
+    for (int i = 0; i < s->nPages; i++) {
+        memcpy(buf + sizeof(h) + (size_t)i * sizeof(DisplayModel::PageBodyCache), &s->results[i],
+               sizeof(DisplayModel::PageBodyCache));
+    }
+    file::WriteFile(cachePath, Str((char*)buf, (int)total));
+    free(buf);
+}
+
+// the ⋯ menu's "Rescan margins": drop what was remembered for this document
+void ForgetSmartMarginCache(Str docPath) {
+    TempStr cachePath = SmartCachePathTemp(docPath);
+    if (cachePath) {
+        file::Delete(cachePath);
+    }
+}
+
+static bool SmartScanIsCurrent(DisplayModel* dm, int gen) {
+    return gLiveDisplayModels.Contains(dm) && dm->smartScanGen == gen;
+}
+
+static void SmartMarginScanProgressUi(SmartMarginProgress* p) {
+    if (SmartScanIsCurrent(p->dm, p->gen) && p->dm->cb) {
+        p->dm->cb->SmartMarginScanProgress(p->dm, p->done, p->total);
+    }
+    delete p;
+}
+
+static void SmartMarginScanFinishedUi(SmartMarginScan* s) {
+    DisplayModel* dm = s->dm;
+    if (SmartScanIsCurrent(dm, s->gen)) {
+        dm->smartScanRunning = false;
+        dm->smartHfChecked = true;
+        dm->smartHfTopPt = s->hfTopPt;
+        dm->smartHfBottomPt = s->hfBottomPt;
+        dm->pageBodies.Reset();
+        for (int i = 0; i < len(s->results); i++) {
+            const DisplayModel::PageBodyCache& r = s->results[i];
+            dm->pageBodies.Append(r);
+            PageInfo* pi = dm->GetPageInfo(i + 1);
+            if (pi && pi->contentBox.IsEmpty()) {
+                pi->contentBox = r.contentBox;
+            }
+        }
+        // bitmaps rendered before the crop was known are of the untrimmed
+        // page and would be blitted as-is into the trimmed slots
+        gRenderCache->FreeForDisplayModel(dm);
+        ScrollState state = dm->GetScrollState();
+        dm->Relayout(dm->GetZoomVirtual(), dm->GetRotation());
+        dm->SetScrollState(state);
+        if (dm->cb) {
+            dm->cb->SmartMarginScanProgress(dm, s->nPages, s->nPages);
+            dm->cb->Repaint();
+        }
+    }
+    s->engine->Release();
+    delete s;
+}
+
+static void PostSmartMarginProgress(SmartMarginScan* s, int done, int total) {
+    auto* p = new SmartMarginProgress();
+    p->dm = s->dm;
+    p->gen = s->gen;
+    p->done = done;
+    p->total = total;
+    uitask::Post(MkFunc0<SmartMarginProgress>(SmartMarginScanProgressUi, p), "SmartMarginScanProgress");
+}
+
+static void SmartMarginScanThread(SmartMarginScan* s) {
+    auto timer = TimeGet();
+    if (LoadSmartMarginCache(s)) {
+        logf("smart margins: %d pages from the cache in %.0f ms\n", s->nPages, TimeSinceInMs(timer));
+        PostSmartMarginProgress(s, s->nPages, s->nPages);
+        uitask::Post(MkFunc0<SmartMarginScan>(SmartMarginScanFinishedUi, s), "SmartMarginScanFinished");
+        return;
+    }
+    if (s->detectRunningBands) {
+        DetectRunningHeaderFooterIn(s->engine, &s->hfTopPt, &s->hfBottomPt);
+    }
+    constexpr int kProgressEvery = 20;
+    int total = 2 * s->nPages; // the text of every page, then every page's body
+    // Every page's text lines first: the repeated header / footer lines can
+    // only be told once all of them are known.
+    Vec<TextLine> allLines;
+    Vec<int> starts;
+    for (int pageNo = 1; pageNo <= s->nPages; pageNo++) {
+        starts.Append(len(allLines));
+        Vec<TextLine> lines;
+        CollectTextLines(s->engine, pageNo, lines);
+        for (const TextLine& l : lines) {
+            allLines.Append(l);
+        }
+        if (pageNo % kProgressEvery == 0) {
+            PostSmartMarginProgress(s, pageNo, total);
+        }
+    }
+    starts.Append(len(allLines));
+    Vec<RepeatedLine> repeatedTop;
+    Vec<RepeatedLine> repeatedBottom;
+    if (s->detectRunningBands) {
+        FindRepeatedEdgeLines(allLines, starts, false, repeatedTop);
+        FindRepeatedEdgeLines(allLines, starts, true, repeatedBottom);
+    }
+    for (int pageNo = 1; pageNo <= s->nPages; pageNo++) {
+        Vec<TextLine> lines;
+        for (int i = starts[pageNo - 1]; i < starts[pageNo]; i++) {
+            lines.Append(allLines[i]);
+        }
+        DisplayModel::PageBody body;
+        DisplayModel::PageBodyCache entry;
+        entry.contentBox = s->engine->PageContentBox(pageNo);
+        // A page whose content fills it (a scan: one image, edge to edge) has
+        // told us nothing. Read its pixels instead.
+        RectF media = s->engine->PageMediabox(pageNo);
+        bool fullBleed = !media.IsEmpty() && entry.contentBox.dy >= media.dy * 0.97f;
+        if (fullBleed) {
+            RectF ink;
+            if (ComputeInkBox(s->engine, pageNo, media, &ink) && ink.dy < media.dy * 0.97f) {
+                entry.contentBox = ink;
+            }
+        }
+        if (ComputePageBody(s->engine, pageNo, lines, s->hfTopPt, s->hfBottomPt, repeatedTop, repeatedBottom, &body)) {
+            entry.state = 2;
+            entry.hasHeader = body.hasHeader;
+            entry.hasFooter = body.hasFooter;
+            entry.top = body.top;
+            entry.bottom = body.bottom;
+            entry.limitTop = body.limitTop;
+            entry.limitBottom = body.limitBottom;
+        } else {
+            entry.state = 1;
+        }
+        s->results.Append(entry);
+        if (pageNo % kProgressEvery == 0) {
+            PostSmartMarginProgress(s, s->nPages + pageNo, total);
+        }
+    }
+    logf("smart margins: scanned %d pages in %.0f ms\n", s->nPages, TimeSinceInMs(timer));
+    SaveSmartMarginCache(s);
+    uitask::Post(MkFunc0<SmartMarginScan>(SmartMarginScanFinishedUi, s), "SmartMarginScanFinished");
+}
+
+void DisplayModel::StartSmartMarginScan() const {
+    if (smartScanRunning || !engine) {
+        return;
+    }
+    smartScanRunning = true;
+    auto* s = new SmartMarginScan();
+    s->dm = const_cast<DisplayModel*>(this);
+    s->gen = smartScanGen;
+    s->engine = engine;
+    engine->AddRef();
+    s->detectRunningBands = gGlobalPrefs->smartHeaderFooter;
+    s->nPages = PageCount();
+    RunAsync(MkFunc0<SmartMarginScan>(SmartMarginScanThread, s), "SmartMarginScan");
+}
+
+void DisplayModel::InvalidateSmartMargins() {
+    smartScanGen++;
+    smartScanRunning = false;
+    smartHfChecked = false;
+    pageBodies.Reset();
+    // tiles rendered for the old crop don't fit the new page slots: the page
+    // came out scaled and clipped until a zoom change re-rendered it
+    gRenderCache->FreeForDisplayModel(this);
+}
+
+// From the scan's cache; a page not scanned yet reads as "no band" and kicks
+// the scan off.
+bool DisplayModel::PageBodyBand(int pageNo, PageBody* out) const {
+    *out = PageBody();
+    if (pageNo < 1 || pageNo > len(pageBodies)) {
+        StartSmartMarginScan();
+        return false;
+    }
+    const PageBodyCache& c = pageBodies[pageNo - 1];
+    if (c.state != 2) {
+        return false;
+    }
+    out->top = c.top;
+    out->bottom = c.bottom;
+    out->hasHeader = c.hasHeader;
+    out->hasFooter = c.hasFooter;
+    out->limitTop = c.limitTop;
+    out->limitBottom = c.limitBottom;
+    return true;
+}
+
+// The manual trim is deliberately independent of "smart margins": a scanned
+// book gets nothing from the automatic pass, and asking the reader to turn on a
+// setting that does nothing for their document before they can use the one that
+// does would be perverse.
+RectF DisplayModel::ApplyManualTrim(RectF box, RectF media) const {
+    if (manualTrimTop <= 0.0f && manualTrimBottom <= 0.0f) {
+        return box;
+    }
+    float top = std::max(box.y, media.y + media.dy * manualTrimTop);
+    float bottom = std::min(box.y + box.dy, media.y + media.dy * (1.0f - manualTrimBottom));
+    if (bottom - top < media.dy * 0.05f) {
+        return box; // a trim that would leave a sliver is a mis-set trim
+    }
+    box.y = top;
+    box.dy = bottom - top;
+    return box;
+}
+
+// The automatic detector already knows how to find a running header on a
+// document it can read. Rather than open the manual dialog on nothing, open it
+// on that, and let the reader adjust or clear it. A suggestion carries none of
+// the risk of an automatic crop: it is shown on six pages before it applies.
+bool DisplayModel::SuggestHeaderFooterTrim(float* topOut, float* bottomOut) const {
+    *topOut = 0.0f;
+    *bottomOut = 0.0f;
+    DetectRunningHeaderFooter();
+    float pageDy = PageMediaBox(1).dy;
+    if (pageDy <= 0.0f) {
+        return false;
+    }
+    // a little past the band itself, so the rule that usually sits under a
+    // running header goes with it
+    float pad = kSmartMarginPadPt * 2.0f;
+    if (smartHfTopPt > 0.0f) {
+        *topOut = std::clamp((smartHfTopPt + pad) / pageDy, 0.0f, 0.45f);
+    }
+    if (smartHfBottomPt > 0.0f) {
+        *bottomOut = std::clamp((smartHfBottomPt + pad) / pageDy, 0.0f, 0.45f);
+    }
+    return *topOut > 0.0f || *bottomOut > 0.0f;
+}
+
+void DisplayModel::SetManualTrim(float top, float bottom) {
+    manualTrimTop = std::clamp(top, 0.0f, 0.45f);
+    manualTrimBottom = std::clamp(bottom, 0.0f, 0.45f);
+}
+
+RectF DisplayModel::PageDisplayBox(int pageNo) const {
+    RectF media = PageMediaBox(pageNo);
+    if (media.IsEmpty()) {
+        return media;
+    }
+    int expanded = PageMarginExpandedEdges(pageNo);
+    if (expanded == kPageEdgesAll) {
+        return media; // user asked for this page's margins back
+    }
+    RectF box = PageTrimmedBox(pageNo, media);
+    // and the edges they asked back one at a time
+    float top = (expanded & kPageEdgeTop) ? media.y : box.y;
+    float bottom = (expanded & kPageEdgeBottom) ? media.y + media.dy : box.y + box.dy;
+    box.y = top;
+    box.dy = bottom - top;
+    return box;
+}
+
+RectF DisplayModel::PageTrimmedBox(int pageNo, RectF media) const {
+    if (!gGlobalPrefs->smartMargins) {
+        return ApplyManualTrim(media, media);
+    }
+    PageInfo* pageInfo = GetPageInfo(pageNo);
+    if (!pageInfo) {
+        return ApplyManualTrim(media, media);
+    }
+    // The content box comes from the background scan along with the text
+    // bands (asking the engine here, for every page of a long book inside one
+    // layout, is what froze the window for many seconds). Until it lands the
+    // page is shown untrimmed; PageBodyBand starts the scan.
+    PageBody body;
+    bool hasBand = PageBodyBand(pageNo, &body);
+    RectF content = pageInfo->contentBox;
+    if (content.IsEmpty()) {
+        return ApplyManualTrim(media, media); // not scanned yet, a blank page, or the engine can't tell
+    }
+    // Trim vertically only. The width is what the zoom is computed from, so
+    // touching it would change how large the text renders - the user asked for
+    // less scrolling, not a different zoom.
+    float top = std::max(media.y, content.y - kSmartMarginPadPt);
+    float bottom = std::min(media.y + media.dy, content.y + content.dy + kSmartMarginPadPt);
+    // The page's own lone edge lines (a source URL, a page number) are part of
+    // plain smart margins; "smart header & footer" adds the document-wide
+    // running bands on top. Both come from the background scan's cache.
+    if (hasBand) {
+        // only crop the side this page actually has a header/footer on:
+        // a page without one may open with a plate or an ornament, and
+        // there is no text line to tell us it is there
+        // the padding stops short of the header / footer it trimmed off
+        if (body.hasHeader) {
+            top = std::max(top, body.top - kSmartMarginPadPt);
+            top = std::max(top, std::min(body.limitTop, body.top));
+        }
+        if (body.hasFooter) {
+            bottom = std::min(bottom, body.bottom + kSmartMarginPadPt);
+            bottom = std::min(bottom, std::max(body.limitBottom, body.bottom));
+        }
+    }
+    // The outer edges of the document are left where they are: the top of the
+    // first page and the bottom of the last. A document opens on its title and
+    // ends part-way down a page, and cropping those two edges to the text blows
+    // what little is there up to the height of a whole page. A single page is
+    // both the first and the last, so it keeps both. The manual trim, asked for
+    // by hand, still applies below.
+    if (pageNo <= 1) {
+        top = media.y;
+    }
+    if (pageNo >= PageCount()) {
+        bottom = media.y + media.dy;
+    }
+    if (bottom <= top) {
+        return ApplyManualTrim(media, media);
+    }
+    RectF box = media;
+    box.y = top;
+    box.dy = bottom - top;
+    return ApplyManualTrim(box, media);
+}
+
+PointF DisplayModel::PageCropOffset(int pageNo, float zoom) const {
+    // Not gated on smartMargins: the manual trim crops the display box too, and
+    // without the matching offset the page is blitted at the wrong place -
+    // content shifted down by exactly the band that was cropped. Comparing the
+    // two boxes below already returns zero when nothing was cropped.
+    RectF media = PageMediaBox(pageNo);
+    RectF display = PageDisplayBox(pageNo);
+    if (media == display) {
+        return PointF();
+    }
+    // Let Transform place both boxes, so this stays correct under rotation:
+    // what is "the top margin" in page space can be any edge on screen.
+    RectF mediaDev = engine->Transform(media, pageNo, zoom, rotation);
+    RectF displayDev = engine->Transform(display, pageNo, zoom, rotation);
+    return PointF(displayDev.x - mediaDev.x, displayDev.y - mediaDev.y);
 }
 
 SizeF DisplayModel::PageSizeAfterRotation(int pageNo, bool fitToContent) const {
@@ -326,6 +1376,11 @@ SizeF DisplayModel::PageSizeAfterRotation(int pageNo, bool fitToContent) const {
         }
     }
 
+    // Deliberately the MEDIA box, not the display box: this size is what the
+    // zoom is calculated from (CalcZoomReal). Feeding it the trimmed height
+    // made fit-page solve for a much shorter page and roughly double the zoom,
+    // which blew the page out past the viewport width. Smart margins changes
+    // how much space a page occupies, never how large it renders.
     RectF pageBox = PageMediaBox(pageNo);
     RectF box = fitToContent ? pageInfo->contentBox : pageBox;
     return engine->Transform(box, pageNo, 1.0, rotation).Size();
@@ -447,6 +1502,7 @@ DisplayModel::DisplayModel(EngineBase* engine, DocControllerCallback* cb) : DocC
     this->engine = engine;
     ReportIf(!engine || engine->PageCount() <= 0);
     engineType = engine->kind;
+    gLiveDisplayModels.Append(this);
 
     SetUiDpi(96);
 
@@ -487,6 +1543,7 @@ void DisplayModel::SetUiDpi(int dpi) {
 
 DisplayModel::~DisplayModel() {
     logf("~DisplayModel: 0x%p\n", this);
+    gLiveDisplayModels.Remove(this);
     pauseRendering = true;
     if (cb) {
         cb->CleanUp(this);
@@ -704,14 +1761,14 @@ float DisplayModel::ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) co
         zoomVirtual = kZoomFitPage;
     }
     if (zoomVirtual != kZoomFitWidth && zoomVirtual != kZoomFitHeight && zoomVirtual != kZoomFitPage &&
-        zoomVirtual != kZoomFitContent) {
+        zoomVirtual != kZoomFitContent && zoomVirtual != kZoomSmartWidth) {
         return zoomVirtual * 0.01f * dpiFactor;
     }
 
     SizeF row;
     int columns = ColumnsFromDisplayMode(GetDisplayMode());
 
-    bool fitToContent = (kZoomFitContent == zoomVirtual);
+    bool fitToContent = kZoomFitContent == zoomVirtual || kZoomSmartWidth == zoomVirtual;
     if (fitToContent && columns > 1) {
         // Fit the content of all the pages in the same row into the visible area
         // (i.e. don't crop inner margins but just the left-most, right-most, etc.)
@@ -756,7 +1813,7 @@ float DisplayModel::ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) co
     float zoomY = (float)areaForPagesDy / row.dy;
     float zoom;
     // NOLINTNEXTLINE(bugprone-branch-clone): distinct fit modes that happen to pick the same axis
-    if (kZoomFitWidth == zoomVirtual) {
+    if (kZoomFitWidth == zoomVirtual || kZoomSmartWidth == zoomVirtual) {
         zoom = zoomX;
     } else if (kZoomFitHeight == zoomVirtual) { // NOLINT(bugprone-branch-clone)
         zoom = zoomY;                           // issue #1714
@@ -846,14 +1903,32 @@ void DisplayModel::CalcZoomReal(float newZoomVirtual) {
         }
         ReportIf(minZoom == (float)HUGE_VAL);
         zoomReal = minZoom;
-    } else if (kZoomFitContent == newZoomVirtual) {
-        float newZoom = ZoomRealFromVirtualForPage(newZoomVirtual, CurrentPageNo());
+    } else if (kZoomFitContent == newZoomVirtual || kZoomSmartWidth == newZoomVirtual) {
+        int currentPage = CurrentPageNo();
+        float newZoom = ZoomRealFromVirtualForPage(newZoomVirtual, currentPage);
+        if (kZoomSmartWidth == newZoomVirtual) {
+            // Smart Width looks at nearby pages and uses the widest inked area.
+            // That keeps ordinary page turns from changing scale because one
+            // page happens to have a slightly different crop or margin.
+            int firstPage = std::max(1, currentPage - 2);
+            int lastPage = std::min(nPages, currentPage + 2);
+            for (int pageNo = firstPage; pageNo <= lastPage; pageNo++) {
+                float pageZoom = ZoomRealFromVirtualForPage(newZoomVirtual, pageNo);
+                if (pageZoom > 0) {
+                    newZoom = std::min(newZoom, pageZoom);
+                }
+            }
+        }
         // limit zooming in to 800% on almost empty pages
         newZoom = std::min(newZoom, 8.0f);
-        // don't zoom in by just a few pixels (throwing away a prerendered page)
-        if (newZoom < zoomReal || zoomReal / newZoom < 0.95 ||
-            zoomReal < ZoomRealFromVirtualForPage(kZoomFitPage, CurrentPageNo())) {
+        if (kZoomSmartWidth == newZoomVirtual) {
             zoomReal = newZoom;
+        } else {
+            // don't zoom in by just a few pixels (throwing away a prerendered page)
+            if (newZoom < zoomReal || zoomReal / newZoom < 0.95 ||
+                zoomReal < ZoomRealFromVirtualForPage(kZoomFitPage, currentPage)) {
+                zoomReal = newZoom;
+            }
         }
         ReportIf(zoomReal < 0.01f);
         for (int pageNo = 1; pageNo <= nPages; pageNo++) {
@@ -901,6 +1976,8 @@ void DisplayModel::Relayout(float newZoomVirtual, int newRotation) {
     }
 
     rotation = NormalizeRotation(newRotation);
+    layoutSmartMargins = gGlobalPrefs->smartMargins;
+    layoutSmartHeaderFooter = gGlobalPrefs->smartHeaderFooter;
 
     bool needHScroll = false;
     bool needVScroll = false;
@@ -925,7 +2002,8 @@ void DisplayModel::Relayout(float newZoomVirtual, int newRotation) {
             if (!layoutPage || !PageShown(pageNo)) {
                 continue;
             }
-            layoutPage->mediaBox = PageMediaBox(pageNo);
+            // the trimmed box, so the blank band is not laid out at all
+            layoutPage->mediaBox = PageDisplayBox(pageNo);
             layoutPage->zoomReal = GetZoomReal(pageNo);
         }
 
@@ -1096,6 +2174,12 @@ Point DisplayModel::CvtToScreen(int pageNo, PointF pt) {
     float zoom = getZoomSafe(this, pageNo, pageInfo);
 
     PointF p = engine->Transform(pt, pageNo, zoom, rotation);
+    // pageOnScreen is sized from the display box, so page-space coordinates
+    // have to lose the trimmed margin too - otherwise selection, links and
+    // search highlights all sit one margin away from what is drawn
+    PointF crop = PageCropOffset(pageNo, zoom);
+    p.x -= crop.x;
+    p.y -= crop.y;
     // don't add the full 0.5 for rounding to account for precision errors
     Rect r = pageInfo->pageOnScreen;
     p.x += 0.499f + (float)r.x;
@@ -1126,6 +2210,10 @@ PointF DisplayModel::CvtFromScreen(Point pt, int pageNo) {
     PointF p = PointF((float)pt.x - 0.499f - (float)r.x, (float)pt.y - 0.499f - (float)r.y);
 
     float zoom = getZoomSafe(this, pageNo, pageInfo);
+    // inverse of the shift applied in CvtToScreen
+    PointF crop = PageCropOffset(pageNo, zoom);
+    p.x += crop.x;
+    p.y += crop.y;
     return engine->Transform(p, pageNo, zoom, rotation, true);
 }
 
@@ -1291,7 +2379,7 @@ void DisplayModel::SetViewPortSize(Size newViewPortSize) {
 
     if (isDocReady) {
         // when fitting to content, let GoToPage do the necessary scrolling
-        if (zoomVirtual != kZoomFitContent) {
+        if (zoomVirtual != kZoomFitContent && zoomVirtual != kZoomSmartWidth) {
             SetScrollState(ss);
         } else {
             GoToPage(ss.page, 0);
@@ -1357,7 +2445,7 @@ void DisplayModel::GoToPage(int pageNo, int scrollY, bool addNavPt, int scrollX)
         /* in single page mode going to another page involves recalculating
            the size of canvas */
         ChangeStartPage(pageNo);
-    } else if (kZoomFitContent == zoomVirtual) {
+    } else if (kZoomFitContent == zoomVirtual || kZoomSmartWidth == zoomVirtual) {
         // make sure that CalcZoomReal uses the correct page to calculate
         // the zoom level for (visibility will be recalculated below anyway)
         for (int i = PageCount(); i > 0; i--) {
@@ -1368,8 +2456,10 @@ void DisplayModel::GoToPage(int pageNo, int scrollY, bool addNavPt, int scrollX)
     // lf("DisplayModel::GoToPage(pageNo=%d, scrollY=%d)", pageNo, scrollY);
     PageInfo* pageInfo = GetPageInfo(pageNo);
 
-    // intentionally ignore scrollX and scrollY when fitting to content
-    if (kZoomFitContent == zoomVirtual) {
+    bool fitContent = kZoomFitContent == zoomVirtual;
+    bool smartWidth = kZoomSmartWidth == zoomVirtual;
+    // intentionally ignore scrollX and scrollY when fitting to inked content
+    if (fitContent || smartWidth) {
         // scroll down to where the actual content starts
         Point start = GetContentStart(pageNo);
         scrollX = start.x;
@@ -1382,7 +2472,32 @@ void DisplayModel::GoToPage(int pageNo, int scrollY, bool addNavPt, int scrollX)
             Point second = GetContentStart(lastPageNo);
             scrollY = std::min(scrollY, second.y);
         }
-        viewPort.x = scrollX + pageInfo->pos.x - windowMargin.left;
+        if (smartWidth) {
+            int columns = ColumnsFromDisplayMode(GetDisplayMode());
+            int lastPageNo = LastPageInARowNo(pageNo, columns, IsBookView(GetDisplayMode()), PageCount());
+            float contentLeft = (float)HUGE_VAL;
+            float contentRight = (float)-HUGE_VAL;
+            for (int rowPageNo = pageNo; rowPageNo <= lastPageNo; rowPageNo++) {
+                PageInfo* rowPageInfo = GetPageInfo(rowPageNo);
+                if (!rowPageInfo) {
+                    // LastPageInARowNo can name a page past the count in
+                    // book/multi-column layouts; GetPageInfo returns null then
+                    continue;
+                }
+                RectF box = GetContentBox(rowPageNo);
+                if (box.IsEmpty()) {
+                    box = RectF(0, 0, (float)rowPageInfo->pos.dx, (float)rowPageInfo->pos.dy);
+                }
+                contentLeft = std::min(contentLeft, rowPageInfo->pos.x + box.x);
+                contentRight = std::max(contentRight, rowPageInfo->pos.x + box.x + box.dx);
+            }
+            int areaDx = viewPort.dx - windowMargin.left - windowMargin.right;
+            int contentDx = (int)(contentRight - contentLeft + 0.5f);
+            int centeredInset = windowMargin.left + std::max(0, areaDx - contentDx) / 2;
+            viewPort.x = (int)(contentLeft + 0.5f) - centeredInset;
+        } else {
+            viewPort.x = scrollX + pageInfo->pos.x - windowMargin.left;
+        }
     } else if (-1 != scrollX) {
         viewPort.x = scrollX;
     } else if (1 == pageNo && IsBookView(GetDisplayMode())) {
@@ -1393,7 +2508,7 @@ void DisplayModel::GoToPage(int pageNo, int scrollY, bool addNavPt, int scrollX)
         viewPort.x = pageInfo->pos.x;
     }
     // make sure to scroll to the correct page
-    if (-1 != scrollX && scrollToNextPage) {
+    if (-1 != scrollX && scrollToNextPage && !smartWidth) {
         viewPort.x += pageInfo->pos.dx;
     }
 
@@ -1711,7 +2826,7 @@ void DisplayModel::SetZoomVirtual(float zoomLevel, Point* fixPt) {
     }
 
     bool scrollToFitPage = kZoomFitPage == zoomLevel || kZoomFitHeight == zoomLevel || kZoomFitContent == zoomLevel ||
-                           kZoomShrinkToFit == zoomLevel;
+                           kZoomSmartWidth == zoomLevel || kZoomShrinkToFit == zoomLevel;
     if (zoomVirtual == zoomLevel && (fixPt || !scrollToFitPage)) {
         return;
     }
@@ -2178,7 +3293,8 @@ void DisplayModel::ScrollTo(int pageNo, RectF rect, float zoom) {
     // FitContent uses CurrentPageNo() for the content box, so switch page first
     // for virtual modes, then apply zoom, then fine-tune scroll.
     bool isVirtualZoom = zoom == kZoomFitPage || zoom == kZoomFitWidth || zoom == kZoomFitHeight ||
-                         zoom == kZoomFitContent || zoom == kZoomShrinkToFit || zoom == kZoomFitByOrientation;
+                         zoom == kZoomFitContent || zoom == kZoomSmartWidth || zoom == kZoomShrinkToFit ||
+                         zoom == kZoomFitByOrientation;
     bool isAbsZoom = zoom > 0;
 
     if (isVirtualZoom) {

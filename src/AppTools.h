@@ -31,7 +31,9 @@ bool IsInstallerOrUninstallerExe();
 
 void DeleteAppTools();
 
-void SetAppDataDir(Str dir);
+// fromCmdLine: the -appdata flag, which keeps the in-app browser's profile in
+// that directory too (see GetWebViewDataDirTemp)
+void SetAppDataDir(Str dir, bool fromCmdLine = false);
 TempStr GetAppDataDirTemp();
 TempStr GetPathInAppDataDirTemp(Str fileName);
 

@@ -37,6 +37,7 @@ static SeqStrings gCommandNames =
     "CmdBookView\0"
     "CmdToggleContinuousView\0"
     "CmdToggleMangaMode\0"
+    "CmdTrimHeaderFooter\0"
     "CmdRotateLeft\0"
     "CmdRotateRight\0"
     "CmdToggleBookmarks\0"
@@ -128,8 +129,10 @@ static SeqStrings gCommandNames =
     "CmdOpenWithPdfDjvuBookmarker\0"
     "CmdOpenWithKnownExternalViewerLast\0"
     "CmdOpenSelectedDocument\0"
+    "CmdOpenSelectedDocumentNewCopy\0"
     "CmdPinSelectedDocument\0"
     "CmdForgetSelectedDocument\0"
+    "CmdShowInLibraryFolder\0"
     "CmdExpandAll\0"
     "CmdCollapseAll\0"
     "CmdSaveEmbeddedFile\0"
@@ -277,6 +280,10 @@ static SeqStrings gCommandNames =
     "CmdDebugToggleDpiOverride\0"
     "CmdToggleImages\0"
     "CmdSelectTextViaKeyboard\0"
+    "CmdToggleTabs\0"
+    "CmdTouchSidebarDensityCondensed\0"
+    "CmdTouchSidebarDensityNormal\0"
+    "CmdTouchSidebarDensityExpanded\0"
     "CmdNone\0"
     "\0";
 
@@ -303,6 +310,7 @@ static i32 gCommandIds[] = {
     CmdBookView,
     CmdToggleContinuousView,
     CmdToggleMangaMode,
+    CmdTrimHeaderFooter,
     CmdRotateLeft,
     CmdRotateRight,
     CmdToggleBookmarks,
@@ -394,8 +402,10 @@ static i32 gCommandIds[] = {
     CmdOpenWithPdfDjvuBookmarker,
     CmdOpenWithKnownExternalViewerLast,
     CmdOpenSelectedDocument,
+    CmdOpenSelectedDocumentNewCopy,
     CmdPinSelectedDocument,
     CmdForgetSelectedDocument,
+    CmdShowInLibraryFolder,
     CmdExpandAll,
     CmdCollapseAll,
     CmdSaveEmbeddedFile,
@@ -543,6 +553,10 @@ static i32 gCommandIds[] = {
     CmdDebugToggleDpiOverride,
     CmdToggleImages,
     CmdSelectTextViaKeyboard,
+    CmdToggleTabs,
+    CmdTouchSidebarDensityCondensed,
+    CmdTouchSidebarDensityNormal,
+    CmdTouchSidebarDensityExpanded,
     CmdNone,
 };
 
@@ -569,6 +583,7 @@ SeqStrings gCommandDescriptions =
     "Book View\0"
     "Toggle Continuous View\0"
     "Toggle Manga Mode\0"
+    "Trim Headers & Footers...\0"
     "Rotate Left\0"
     "Rotate Right\0"
     "Toggle Bookmarks\0"
@@ -660,8 +675,10 @@ SeqStrings gCommandDescriptions =
     "Open With Pdf&Djvu Bookmarker\0"
     "don't use\0"
     "Open Selected Document\0"
+    "Open Another Copy\0"
     "Pin Selected Document\0"
     "Remove Selected Document From History\0"
+    "Show In Library Folder\0"
     "Expand All\0"
     "Collapse All\0"
     "Save Embedded File...\0"
@@ -809,6 +826,10 @@ SeqStrings gCommandDescriptions =
     "Debug: Toggle DPI Override\0"
     "Toggle Show Images\0"
     "Select Text With Keyboard\0"
+    "Show Tabs\0"
+    "Sidebar Rows: Condensed\0"
+    "Sidebar Rows: Normal\0"
+    "Sidebar Rows: Expanded\0"
     "Do nothing\0"
     "\0";
 // clang-format on

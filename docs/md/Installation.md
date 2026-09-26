@@ -4,11 +4,11 @@ SumatraPDF is distributed in several forms. Pick the one that matches how you wa
 
 ## Download flavors
 
-| Flavor | What you get | Best for |
-| --- | --- | --- |
-| **Installer** (`SumatraPDF-<ver>-install.exe`) | Installs to `%LOCALAPPDATA%\SumatraPDF` (or `%PROGRAMFILES%` with `-all-users`), registers file associations, optional preview handler | Most users |
-| **Portable** (`SumatraPDF-<ver>.exe` downloaded as `SumatraPDF-<ver>.zip`) | Single self-contained `.exe` — no separate `libsumatrapdf.dll`, settings live next to the exe | USB stick, custom folder, no installer |
-| **Extract only** (`-x`) | Unpack files without installing | IT scripts, inspection |
+| Flavor                                                                     | What you get                                                                                                                                        | Best for                               |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| **Installer** (`SumatraPDF-<ver>-install.exe`)                             | Installs to `%LOCALAPPDATA%\SumatraPDF+` (or `%PROGRAMFILES%\SumatraPDF+` with `-all-users`), registers file associations, optional preview handler | Most users                             |
+| **Portable** (`SumatraPDF-<ver>.exe` downloaded as `SumatraPDF-<ver>.zip`) | Single self-contained `.exe` — no separate `libsumatrapdf.dll`, settings live next to the exe                                                       | USB stick, custom folder, no installer |
+| **Extract only** (`-x`)                                                    | Unpack files without installing                                                                                                                     | IT scripts, inspection                 |
 
 Download from [sumatrapdfreader.org](https://www.sumatrapdfreader.org/download-free-pdf-viewer) or [pre-release](https://www.sumatrapdfreader.org/prerelease).
 
@@ -22,13 +22,13 @@ SumatraPDF-<ver>-install.exe -install -silent
 
 Common options — full list in [Installer cmd-line arguments](Installer-cmd-line-arguments.md):
 
-| Option | Meaning |
-| --- | --- |
-| `-d <dir>` | Install directory |
-| `-all-users` | Install to `%PROGRAMFILES%\SumatraPDF` for all users (**ver 3.4+**) |
-| `-with-preview` | Register PDF preview in File Explorer |
-| `-with-filter` | Register Windows Search PDF filter |
-| `-log` | Write log to `%LOCALAPPDATA%\sumatra-install-log.txt` |
+| Option          | Meaning                                                              |
+| --------------- | -------------------------------------------------------------------- |
+| `-d <dir>`      | Install directory                                                    |
+| `-all-users`    | Install to `%PROGRAMFILES%\SumatraPDF+` for all users (**ver 3.4+**) |
+| `-with-preview` | Register PDF preview in File Explorer                                |
+| `-with-filter`  | Register Windows Search PDF filter                                   |
+| `-log`          | Write log to `%LOCALAPPDATA%\sumatra-install-log.txt`                |
 
 ## Extract without installing
 
@@ -36,14 +36,37 @@ Common options — full list in [Installer cmd-line arguments](Installer-cmd-lin
 SumatraPDF-64-install.exe -x -d "C:\Temp\Sumatra"
 ```
 
-Extracts `SumatraPDF.exe`, `libsumatrapdf.dll`, `sumatrapdf-tool.exe`, etc. into the target directory. Does **not** register file associations. Recent builds do not create Start Menu / desktop shortcuts when extracting only.
+Extracts `SumatraPDF+.exe`, `libsumatrapdf.dll`, `sumatrapdf-tool.exe`, etc. into the target directory. Does **not** register file associations. Recent builds do not create Start Menu / desktop shortcuts when extracting only.
+
+## Private updates over a LAN or Tailscale
+
+Set `UpdateFeedURL` in Advanced Settings to make an installed private build use your own update manifest instead of the public SumatraPDF feed:
+
+```
+UpdateFeedURL = https://pdf-updates.example-tailnet.ts.net/sumatrapdf/update.txt
+```
+
+The endpoint returns the same small text format as the public updater:
+
+```
+[SumatraPDF]
+Latest: 90002
+Installer64: https://pdf-updates.example-tailnet.ts.net/sumatrapdf/SumatraPDF+-private-64-install.exe
+InstallerArm64: https://pdf-updates.example-tailnet.ts.net/sumatrapdf/SumatraPDF+-private-arm64-install.exe
+```
+
+`Latest` must compare newer than the installed build. The installer URLs must use the same scheme, host, and port as `UpdateFeedURL`. Updates also retain SumatraPDF's Authenticode protection: the downloaded installer must be signed by the same signer as the running executable. Sign the initial deployment and every later installer with the same code-signing certificate.
+
+Run `bun cmd/package-sumatrapdf-plus.ts` to build x64 and ARM64 installers, portable executables, and `SHA256SUMS.txt` under `out/packages`. Each installer carries a small app-only executable in its payload; the installed `SumatraPDF+.exe` does not retain the compressed installer payload. The portable executable is a separate static build and is not an installer.
+
+A practical setup is to serve this directory with Tailscale Serve (HTTPS) or an internal HTTPS server, update the installer files first, and replace `update.txt` last. This fork installs as **SumatraPDF+**, with a separate executable, settings directory, shortcut, uninstall entry, and registry identity so it can coexist with the official build. The remote machine checks the feed at startup and shows an **Update** button beside the tabs when a newer version is available; **Help / Check for Updates** remains available for an immediate manual check.
 
 ## Portable vs installed settings
 
-| | Portable | Installed |
-| --- | --- | --- |
-| Settings file | Same folder as `.exe` | `%LOCALAPPDATA%\SumatraPDF\SumatraPDF-settings.txt` |
-| Thumbnail cache | `sumatrapdfcache` next to exe | `%LOCALAPPDATA%\SumatraPDF\sumatrapdfcache` |
+|                 | Portable                      | Installed                                            |
+| --------------- | ----------------------------- | ---------------------------------------------------- |
+| Settings file   | Same folder as `.exe`         | `%LOCALAPPDATA%\SumatraPDF+\SumatraPDF-settings.txt` |
+| Thumbnail cache | `sumatrapdfcache` next to exe | `%LOCALAPPDATA%\SumatraPDF+\sumatrapdfcache`         |
 
 Override with `-appdata <directory>` — see [Command-line arguments](Command-line-arguments.md) and [How we store settings](How-we-store-settings.md).
 
@@ -63,11 +86,11 @@ Through **3.6** the engine DLL was named `libmupdf.dll`; from **3.7** it is `lib
 
 When upgrading, the installer renames existing DLLs aside before writing new ones. That can fail if Windows still has the old file open:
 
-| File | Often locked by |
-| --- | --- |
-| **PdfFilter.dll** | **Windows Search** (`SearchIndexer.exe`, `SearchFilterHost.exe`) after PDF IFilter registration |
-| **PdfPreview.dll** | **File Explorer** preview pane / `dllhost.exe` / `prevhost.exe` |
-| **libsumatrapdf.dll** | Running **SumatraPDF**, Explorer preview, or Search filter hosts |
+| File                  | Often locked by                                                                                 |
+| --------------------- | ----------------------------------------------------------------------------------------------- |
+| **PdfFilter.dll**     | **Windows Search** (`SearchIndexer.exe`, `SearchFilterHost.exe`) after PDF IFilter registration |
+| **PdfPreview.dll**    | **File Explorer** preview pane / `dllhost.exe` / `prevhost.exe`                                 |
+| **libsumatrapdf.dll** | Running **SumatraPDF**, Explorer preview, or Search filter hosts                                |
 
 Typical Windows errors during install: **32** (sharing violation / file in use), **5** (access denied on replace/delete).
 
@@ -81,12 +104,12 @@ Typical Windows errors during install: **32** (sharing violation / file in use),
 
 ### What you can do
 
-1. **Close** all SumatraPDF windows and other PDF apps  
-2. **Close** Explorer windows that show a **PDF preview** pane (or turn off the preview pane)  
+1. **Close** all SumatraPDF windows and other PDF apps
+2. **Close** Explorer windows that show a **PDF preview** pane (or turn off the preview pane)
 3. Temporarily **stop Windows Search**:
-   - `Win+R` → `services.msc` → **Windows Search** → Stop  
-   - Or elevated: `net stop WSearch`  
-4. Run the installer again (as admin for “all users” under Program Files)  
+   - `Win+R` → `services.msc` → **Windows Search** → Stop
+   - Or elevated: `net stop WSearch`
+4. Run the installer again (as admin for “all users” under Program Files)
 5. After install, start Windows Search again if you stopped it (`net start WSearch`)
 
 If the install still fails, reboot and run the installer **before** opening PDFs or browsing folders with preview enabled.

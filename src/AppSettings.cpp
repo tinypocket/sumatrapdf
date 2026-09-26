@@ -23,9 +23,11 @@
 #include "SumatraConfig.h"
 #include "FileHistory.h"
 #include "GlobalPrefs.h"
+#include "TouchMetrics.h"
 #include "SumatraPDF.h"
 #include "WindowTab.h"
 #include "MainWindow.h"
+#include "Rail.h"
 #include "AppSettings.h"
 #include "AppTools.h"
 #include "Favorites.h"
@@ -356,6 +358,15 @@ bool LoadSettings() {
         migratedDocumentColorsFollowTheme = true;
     }
 
+    // RestoreSession now defaults to false for a new SumatraPDF+ profile. Do
+    // not overwrite a value already present in the settings file, though: it
+    // may be the user's explicit request to reopen tabs. The marker only keeps
+    // this schema transition from making the file dirty on every launch.
+    bool migratedRestoreSessionDefault = !gprefs->restoreSessionDefaultMigrated;
+    if (migratedRestoreSessionDefault) {
+        gprefs->restoreSessionDefaultMigrated = true;
+    }
+
     // takes effect for PDFs loaded after this (startup, and on settings reload)
     EngineMupdfSetDisableJavaScript(gGlobalPrefs->disableJavaScript);
     EngineMupdfSetAllowExternalImages(gGlobalPrefs->allowExternalImages);
@@ -428,7 +439,7 @@ bool LoadSettings() {
     setMin(gprefs->tocDy, 0);
     setMin(gprefs->treeFontSize, 0);
     if (gprefs->toolbarSize == 0) {
-        gprefs->toolbarSize = 18; // same as the ToolbarSize default in gen-settings.ts
+        gprefs->toolbarSize = kTopBarIconDy; // touch-sized icon; see TouchMetrics.h
     }
     setMinMax(gprefs->toolbarSize, 8, 64);
     setMinMax(gprefs->annotations.freeTextOpacity, 0, 100);
@@ -497,7 +508,8 @@ bool LoadSettings() {
     ApplySettingsToOpenWindows();
     bool readAloudVoiceCleared = ApplyReadAloudVoiceFromSettings();
 
-    bool needsSave = !file::Exists(settingsPath) || readAloudVoiceCleared || migratedDocumentColorsFollowTheme;
+    bool needsSave = !file::Exists(settingsPath) || readAloudVoiceCleared || migratedDocumentColorsFollowTheme ||
+                     migratedRestoreSessionDefault;
     if (needsSave) {
         SaveSettings();
     }
@@ -525,8 +537,13 @@ static SessionData* CloneSessionData(const SessionData* src) {
     dst->windowState = src->windowState;
     dst->windowPos = src->windowPos;
     dst->sidebarDx = src->sidebarDx;
+    dst->browserTabIndex = src->browserTabIndex;
+    dst->browserActive = src->browserActive;
     for (TabState* ts : *src->tabStates) {
         dst->tabStates->Append(CloneTabState(ts));
+    }
+    for (Str url : *src->browserTabs) {
+        dst->browserTabs->Append(str::Dup(url));
     }
     return dst;
 }
@@ -611,12 +628,16 @@ static void RememberSessionState() {
     Vec<SessionData*>* sessionState = gGlobalPrefs->sessionData;
     FreeSessionDataVec(sessionState);
 
-    if (!SettingsRememberOpenedFiles()) {
+    // Recent/history and session restore are separate choices. A user can keep
+    // history off while still asking the app to reopen the tabs that were live
+    // at shutdown, so either preference is enough to maintain SessionData.
+    if (!SettingsRememberOpenedFiles() && !SettingsRestoreSession()) {
         return;
     }
 
     for (auto* win : gWindows) {
         SessionData* windowState = NewSessionData();
+        RememberTouchBrowserSession(win, windowState);
         for (WindowTab* tab : win->Tabs()) {
             if (!tab->filePath) {
                 // home page tab
@@ -647,7 +668,7 @@ static void RememberSessionState() {
             windowState->tabStates->Append(ts);
             DeleteFileState(fs);
         }
-        if (len(*windowState->tabStates) == 0) {
+        if (len(*windowState->tabStates) == 0 && len(*windowState->browserTabs) == 0) {
             FreeSessionData(windowState);
             continue;
         }
@@ -929,19 +950,37 @@ HFONT GetAppBiggerFont(HWND hwnd) {
     return GetAppBiggerFontForDpi(DpiGet(hwnd));
 }
 
+static int GetTreeFontSizeForDpi(int dpi) {
+    int fntSize = gGlobalPrefs->treeFontSize;
+    if (fntSize >= kMinFontSize) {
+        return fntSize; // user's explicit choice wins
+    }
+    // The touch chrome's 52px rows want 4a's 15px body; the system menu font
+    // (~12px) leaves them looking sparse. DPI-scale it like the row height.
+    if (gGlobalPrefs->touchChrome) {
+        return MulDiv(kPanelRowFontSize, dpi, USER_DEFAULT_SCREEN_DPI);
+    }
+    fntSize = gGlobalPrefs->uIFontSize;
+    if (fntSize < kMinFontSize) {
+        fntSize = GetAppMenuFontSizeForDpi(dpi);
+    }
+    return fntSize;
+}
+
+// the configured tree font at an explicit FW_* weight (e.g. FW_SEMIBOLD for
+// redesigned headings, which want 600 rather than the bold variant's 700)
+HFONT GetAppTreeFontWeight(HWND hwnd, int weight) {
+    int dpi = DpiGet(hwnd);
+    return GetUserGuiFontWeight(gGlobalPrefs->treeFontName, GetTreeFontSizeForDpi(dpi), weight, false);
+}
+
 HFONT GetAppTreeFontExForDpi(int dpi, bool bold, bool italic) {
     int idx = (bold ? 1 : 0) | (italic ? 2 : 0);
     UiFontsAtDpi* fonts = GetUiFontsAtDpi(dpi);
     if (fonts->treeFontEx[idx]) {
         return fonts->treeFontEx[idx];
     }
-    int fntSize = gGlobalPrefs->treeFontSize;
-    if (fntSize < kMinFontSize) {
-        fntSize = gGlobalPrefs->uIFontSize;
-    }
-    if (fntSize < kMinFontSize) {
-        fntSize = GetAppMenuFontSizeForDpi(dpi);
-    }
+    int fntSize = GetTreeFontSizeForDpi(dpi);
     Str fntNameUser = gGlobalPrefs->treeFontName;
     fonts->treeFontEx[idx] = GetUserGuiFontEx(fntNameUser, fntSize, bold, italic);
     return fonts->treeFontEx[idx];

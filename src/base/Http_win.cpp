@@ -140,7 +140,7 @@ Error:
 constexpr const int kBufSize = 256 * 1024;
 
 // Download content of a url to a file
-bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbProgress, i64 maxSize) {
+bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbProgress, i64 maxSize, Str extraHeaders) {
     logf("HttpGetToFile: url: '%s', file: '%s'\n", urlA, destFilePath);
     bool ok = false;
     HINTERNET hReq = nullptr, hInet = nullptr;
@@ -148,6 +148,7 @@ bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbPro
     DWORD headerBuffSize = sizeof(DWORD);
     DWORD statusCode = 0;
     WCHAR* url = CWStrTemp(urlA);
+    WCHAR* headersW = nullptr;
     char* buf = nullptr;
 
     HttpProgress progress{};
@@ -171,7 +172,17 @@ bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbPro
         goto Exit;
     }
 
-    hReq = InternetOpenUrlW(hInet, url, nullptr, 0, 0, 0);
+    headersW = len(extraHeaders) > 0 ? CWStrTemp(extraHeaders) : nullptr;
+    {
+        // The caller's headers can carry the cookies of a signed-in browser
+        // session (the in-app browser's downloads). WinINet adds cookies from
+        // its own store to every request unless told not to, and those replaced
+        // the caller's: a members-only download arrived signed out and came back
+        // as the site's sign-in page. NO_COOKIES keeps the caller's header as
+        // the only cookies sent, and keeps the site's cookies out of the store.
+        DWORD reqFlags = headersW ? INTERNET_FLAG_NO_COOKIES : 0;
+        hReq = InternetOpenUrlW(hInet, url, headersW, headersW ? (DWORD)-1L : 0, reqFlags, 0);
+    }
     if (!hReq) {
         goto Exit;
     }

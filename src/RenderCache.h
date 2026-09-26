@@ -188,6 +188,8 @@ struct RenderCache {
     COLORREF textColor = 0;
     COLORREF backgroundColor = 0;
     COLORREF linkColor = 0;
+    // night light strength applied to every rendered tile, 0 = off
+    int nightLight = 0;
     // bumped by UpdateDocumentColors when page render colors / the PDF
     // document color mode change; renders started under an older epoch are
     // discarded instead of cached

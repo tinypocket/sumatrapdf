@@ -64,6 +64,30 @@ void DeleteThumbnailForFile(Str filePath) {
     logf("DeleteThumbnailForFile: file::Remove('%s') %s\n", thumbPath, Str(status));
 }
 
+// Reads the cached png for filePath. Safe to call from a background thread
+// (only file i/o and GDI+ decoding). Returns nullptr when there is no cached
+// thumbnail or the document was modified after it was made.
+RenderedBitmap* LoadThumbnailForFile(Str filePath) {
+    if (len(filePath) == 0) {
+        return nullptr;
+    }
+    TempStr bmpPath = GetThumbnailPathTemp(filePath);
+    if (!bmpPath || !file::Exists(bmpPath)) {
+        return nullptr;
+    }
+    FILETIME bmpTime = file::GetModificationTime(bmpPath);
+    FILETIME fileTime = file::GetModificationTime(filePath);
+    if (FileTimeDiffInSecs(fileTime, bmpTime) > 0) {
+        return nullptr;
+    }
+    RenderedBitmap* bmp = LoadRenderedBitmap(bmpPath);
+    if (!bmp || bmp->GetSize().IsEmpty()) {
+        delete bmp;
+        return nullptr;
+    }
+    return bmp;
+}
+
 RenderedBitmap* LoadThumbnail(FileState* fs) {
     if (!fs || len(fs->filePath) == 0) {
         return nullptr;
@@ -122,12 +146,13 @@ void SetThumbnail(FileState* fs, RenderedBitmap* bmp) {
     SaveThumbnail(fs);
 }
 
-void SaveThumbnail(FileState* fs) {
-    if (!fs || !fs->thumbnail || len(fs->filePath) == 0) {
+// Writes thumbnail as the cached png for filePath. Safe to call from a
+// background thread; the bitmap stays owned by the caller.
+void SaveThumbnailForFile(Str filePath, RenderedBitmap* thumbnail) {
+    if (!thumbnail || len(filePath) == 0) {
         return;
     }
-
-    TempStr thumbnailPath = GetThumbnailPathTemp(fs->filePath);
+    TempStr thumbnailPath = GetThumbnailPathTemp(filePath);
     if (!thumbnailPath) {
         return;
     }
@@ -137,20 +162,22 @@ void SaveThumbnail(FileState* fs) {
     // reported success but the directory was gone when we looked.
     int err = 0;
     if (!dir::CreateForFile(thumbnailPath, &err)) {
-        logf("SaveThumbnail: dir::CreateForFile('%s') failed, err=%d, file path: '%s'\n", thumbnailPath, err,
-             fs->filePath);
+        logf("SaveThumbnail: dir::CreateForFile('%s') failed, err=%d, file path: '%s'\n", thumbnailPath, err, filePath);
         return;
     }
     ReportIfFast(!str::EndsWithI(thumbnailPath, StrL(".png")));
 
-    RenderedBitmap* thumbnail = fs->thumbnail;
-    if (!thumbnail) {
-        return;
-    }
     Gdiplus::Bitmap bmp(thumbnail->GetBitmap(), nullptr);
     CLSID tmpClsid = GetGdiPlusEncoderClsid(L"image/png");
     WCHAR* pathW = CWStrTemp(thumbnailPath);
     bmp.Save(pathW, &tmpClsid, nullptr);
+}
+
+void SaveThumbnail(FileState* fs) {
+    if (!fs || !fs->thumbnail || len(fs->filePath) == 0) {
+        return;
+    }
+    SaveThumbnailForFile(fs->filePath, fs->thumbnail);
 }
 
 void RemoveThumbnail(FileState* fs) {
