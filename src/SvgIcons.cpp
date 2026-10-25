@@ -372,6 +372,31 @@ static const char* gIconContrast =
   <path d="M12 3 a 9 9 0 0 1 0 18 z" fill="currentColor" stroke="none" />
 </svg>)";
 
+// Smart Width's two margins. Both draw the page's edges as two bars; the
+// arrows stop well short of them for the roomier margin and run up against them
+// for the tight one, so the button itself says which is on.
+static const char* gIconSmartWidthMargin =
+    R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="1.7" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="0" y="0" width="24" height="24" stroke="none"></rect>
+  <path d="M2 5v14" />
+  <path d="M22 5v14" />
+  <path d="M10 9l-3 3l3 3" />
+  <path d="M7 12h4" />
+  <path d="M14 9l3 3l-3 3" />
+  <path d="M17 12h-4" />
+</svg>)";
+
+static const char* gIconSmartWidthTight =
+    R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="1.7" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="0" y="0" width="24" height="24" stroke="none"></rect>
+  <path d="M2 5v14" />
+  <path d="M22 5v14" />
+  <path d="M7 9l-3 3l3 3" />
+  <path d="M4 12h6" />
+  <path d="M17 9l3 3l-3 3" />
+  <path d="M20 12h-6" />
+</svg>)";
+
 // must match order in enum class TbIcon
 // clang-format off
 static const char* gIcons[] = {
@@ -417,6 +442,8 @@ static const char* gIcons[] = {
     gIconWeb,
     gIconMoon,
     gIconContrast,
+    gIconSmartWidthMargin,
+    gIconSmartWidthTight,
 };
 // clang-format on
 

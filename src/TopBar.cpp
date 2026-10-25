@@ -709,8 +709,11 @@ static TempStr ZoomTextTemp(MainWindow* win) {
     if (!ctrl) {
         return str::DupTemp("");
     }
-    if (ctrl->GetZoomVirtual() == kZoomSmartWidth) {
+    if (ctrl->GetZoomVirtual() == kZoomSmartWidthMargin) {
         return str::DupTemp("Smart Width");
+    }
+    if (ctrl->GetZoomVirtual() == kZoomSmartWidth) {
+        return str::DupTemp("Smart Width Tight");
     }
     float zoom = ctrl->GetZoomVirtual(true);
     return fmt("%d%%", (int)(zoom + 0.5f));
@@ -718,6 +721,23 @@ static TempStr ZoomTextTemp(MainWindow* win) {
 
 // the view-mode buttons show which mode the document is in, the way the
 // redesign tints the active one
+// The icon a slot shows right now. Smart Width cycles through two margins
+// before going back to the regular zoom, and its button draws whichever is on:
+// edge bars with the arrows stopping short of them for the roomier margin,
+// running up against them for the tight one.
+static TbIcon SlotIconNow(MainWindow* win, const TopBarSlot& slot) {
+    if (slot.cmdId == kTopBarSmartWidth && win && win->ctrl) {
+        float zoom = win->ctrl->GetZoomVirtual();
+        if (zoom == kZoomSmartWidthMargin) {
+            return TbIcon::SmartWidthMargin;
+        }
+        if (zoom == kZoomSmartWidth) {
+            return TbIcon::SmartWidthTight;
+        }
+    }
+    return slot.icon;
+}
+
 static bool IsSlotActive(MainWindow* win, const TopBarSlot& slot) {
     // dark-mode toggles reflect global/theme state, not the document controller
     switch (slot.cmdId) {
@@ -733,7 +753,7 @@ static bool IsSlotActive(MainWindow* win, const TopBarSlot& slot) {
     DisplayMode mode = ctrl->GetDisplayMode();
     switch (slot.cmdId) {
         case kTopBarSmartWidth:
-            return ctrl->GetZoomVirtual() == kZoomSmartWidth;
+            return IsSmartWidthZoom(ctrl->GetZoomVirtual());
         case CmdSinglePageView:
             return IsSingle(mode);
         case CmdToggleContinuousView:
@@ -2292,7 +2312,7 @@ void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT*) {
                 }
                 int ix = r.x + ((r.dx - iconDy) / 2);
                 int iy = r.y + ((r.dy - iconDy) / 2);
-                ImageList_Draw(iml, (int)slot.icon, hdc, ix, iy, ILD_NORMAL);
+                ImageList_Draw(iml, (int)SlotIconNow(win, slot), hdc, ix, iy, ILD_NORMAL);
                 break;
             }
         }
@@ -2361,7 +2381,7 @@ void TopBarWnd::BeginEdit(bool page) {
     if (!win || !win->ctrl) {
         return;
     }
-    if (!page && win->ctrl->GetZoomVirtual() == kZoomSmartWidth) {
+    if (!page && IsSmartWidthZoom(win->ctrl->GetZoomVirtual())) {
         float manualZoom = win->ctrl->GetZoomVirtual(true);
         win->ctrl->SetZoomVirtual(manualZoom, nullptr);
     }
@@ -2827,11 +2847,11 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             if (slot.cmdId == kTopBarPageEdit) {
                 BeginEdit(true);
             } else if (slot.cmdId == kTopBarZoomEdit) {
-                if (win->ctrl->GetZoomVirtual() == kZoomSmartWidth) {
+                if (IsSmartWidthZoom(win->ctrl->GetZoomVirtual())) {
                     // Re-run Smart Width against the current page. SetZoomVirtual
                     // deliberately relayouts fit modes even when the virtual
                     // zoom value is unchanged.
-                    win->ctrl->SetZoomVirtual(kZoomSmartWidth, nullptr);
+                    win->ctrl->SetZoomVirtual(win->ctrl->GetZoomVirtual(), nullptr);
                     HwndInvalidate(win->hwndCanvas, false);
                 } else {
                     BeginEdit(false);
@@ -2843,11 +2863,29 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             } else if (slot.cmdId == kTopBarOverflow) {
                 ShowOverflowMenu(slotRects[idx]);
             } else if (slot.cmdId == kTopBarSmartWidth) {
-                if (win->ctrl->GetZoomVirtual() == kZoomSmartWidth) {
-                    float manualZoom = win->ctrl->GetZoomVirtual(true);
-                    win->ctrl->SetZoomVirtual(manualZoom, nullptr);
-                } else {
+                // three taps: the roomier margin, the tight one, then back to the
+                // zoom the reader had before. Freezing Smart Width's own scale on
+                // the way out made the third tap look like it did nothing.
+                float zoom = win->ctrl->GetZoomVirtual();
+                DisplayModel* dm = win->AsFixed();
+                if (zoom == kZoomSmartWidthMargin) {
                     win->ctrl->SetZoomVirtual(kZoomSmartWidth, nullptr);
+                } else if (zoom == kZoomSmartWidth) {
+                    float back = dm ? dm->zoomBeforeSmartWidth : 0.0f;
+                    if (!IsValidZoom(back) || IsSmartWidthZoom(back)) {
+                        // opened in Smart Width: nothing to go back to, so keep
+                        // the size on screen and just stop fitting
+                        back = win->ctrl->GetZoomVirtual(true);
+                    }
+                    if (dm) {
+                        dm->zoomBeforeSmartWidth = 0.0f;
+                    }
+                    win->ctrl->SetZoomVirtual(back, nullptr);
+                } else {
+                    if (dm) {
+                        dm->zoomBeforeSmartWidth = zoom;
+                    }
+                    win->ctrl->SetZoomVirtual(kZoomSmartWidthMargin, nullptr);
                 }
                 HwndSetFocus(hwnd);
                 HwndInvalidate(hwnd, false);

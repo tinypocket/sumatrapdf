@@ -1761,14 +1761,14 @@ float DisplayModel::ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) co
         zoomVirtual = kZoomFitPage;
     }
     if (zoomVirtual != kZoomFitWidth && zoomVirtual != kZoomFitHeight && zoomVirtual != kZoomFitPage &&
-        zoomVirtual != kZoomFitContent && zoomVirtual != kZoomSmartWidth) {
+        zoomVirtual != kZoomFitContent && !IsSmartWidthZoom(zoomVirtual)) {
         return zoomVirtual * 0.01f * dpiFactor;
     }
 
     SizeF row;
     int columns = ColumnsFromDisplayMode(GetDisplayMode());
 
-    bool fitToContent = kZoomFitContent == zoomVirtual || kZoomSmartWidth == zoomVirtual;
+    bool fitToContent = kZoomFitContent == zoomVirtual || IsSmartWidthZoom(zoomVirtual);
     if (fitToContent && columns > 1) {
         // Fit the content of all the pages in the same row into the visible area
         // (i.e. don't crop inner margins but just the left-most, right-most, etc.)
@@ -1805,6 +1805,9 @@ float DisplayModel::ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) co
 
     int areaForPagesDx = viewPort.dx - windowMargin.left - windowMargin.right;
     int areaForPagesDy = viewPort.dy - windowMargin.top - windowMargin.bottom;
+    if (zoomVirtual == kZoomSmartWidthMargin) {
+        areaForPagesDx -= 2 * MulDiv(24, uiDpi, 96);
+    }
     if (areaForPagesDx <= 0 || areaForPagesDy <= 0) {
         return 0;
     }
@@ -1813,7 +1816,7 @@ float DisplayModel::ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) co
     float zoomY = (float)areaForPagesDy / row.dy;
     float zoom;
     // NOLINTNEXTLINE(bugprone-branch-clone): distinct fit modes that happen to pick the same axis
-    if (kZoomFitWidth == zoomVirtual || kZoomSmartWidth == zoomVirtual) {
+    if (kZoomFitWidth == zoomVirtual || IsSmartWidthZoom(zoomVirtual)) {
         zoom = zoomX;
     } else if (kZoomFitHeight == zoomVirtual) { // NOLINT(bugprone-branch-clone)
         zoom = zoomY;                           // issue #1714
@@ -1903,10 +1906,10 @@ void DisplayModel::CalcZoomReal(float newZoomVirtual) {
         }
         ReportIf(minZoom == (float)HUGE_VAL);
         zoomReal = minZoom;
-    } else if (kZoomFitContent == newZoomVirtual || kZoomSmartWidth == newZoomVirtual) {
+    } else if (kZoomFitContent == newZoomVirtual || IsSmartWidthZoom(newZoomVirtual)) {
         int currentPage = CurrentPageNo();
         float newZoom = ZoomRealFromVirtualForPage(newZoomVirtual, currentPage);
-        if (kZoomSmartWidth == newZoomVirtual) {
+        if (IsSmartWidthZoom(newZoomVirtual)) {
             // Smart Width looks at nearby pages and uses the widest inked area.
             // That keeps ordinary page turns from changing scale because one
             // page happens to have a slightly different crop or margin.
@@ -1921,7 +1924,7 @@ void DisplayModel::CalcZoomReal(float newZoomVirtual) {
         }
         // limit zooming in to 800% on almost empty pages
         newZoom = std::min(newZoom, 8.0f);
-        if (kZoomSmartWidth == newZoomVirtual) {
+        if (IsSmartWidthZoom(newZoomVirtual)) {
             zoomReal = newZoom;
         } else {
             // don't zoom in by just a few pixels (throwing away a prerendered page)
@@ -2360,12 +2363,54 @@ void DisplayModel::RenderVisibleParts() {
     }
 }
 
+// Smart Width is a fit mode, and fit modes scroll to where the page's content
+// starts when they are applied: right when a document opens, wrong for a tap on
+// the button half-way down a page (or the pane opening, or the tablet turning),
+// which threw the reader back to the top of the page. The line at the top of the
+// view is noted before the zoom changes and put back at the top afterwards; the
+// horizontal centring Smart Width does is left alone.
+struct ReadingAnchor {
+    int page = kInvalidPageNo;
+    PointF pt;
+};
+
+static ReadingAnchor NoteReadingAnchor(DisplayModel* dm) {
+    ReadingAnchor a;
+    if (dm->viewPort.dx <= 0 || dm->viewPort.dy <= 0) {
+        return a;
+    }
+    // the middle of the top edge: in a gap between pages this still finds the
+    // nearest page, and the point simply lies outside it
+    Point topMid{dm->viewPort.dx / 2, 0};
+    int page = dm->GetPageNextToPoint(topMid);
+    if (!dm->ValidPageNo(page)) {
+        return a;
+    }
+    a.page = page;
+    a.pt = dm->CvtFromScreen(topMid, page);
+    return a;
+}
+
+static void RestoreReadingAnchor(DisplayModel* dm, const ReadingAnchor& a) {
+    if (!dm->ValidPageNo(a.page)) {
+        return;
+    }
+    Point now = dm->CvtToScreen(a.page, a.pt);
+    if (now.y != 0) {
+        dm->ScrollYBy(now.y, false);
+    }
+}
+
 void DisplayModel::SetViewPortSize(Size newViewPortSize) {
     ScrollState ss;
+    ReadingAnchor anchor;
 
     bool isDocReady = ValidPageNo(startPage) && zoomReal != 0;
     if (isDocReady) {
         ss = GetScrollState();
+        if (IsSmartWidthZoom(zoomVirtual)) {
+            anchor = NoteReadingAnchor(this);
+        }
     }
 
     totalViewPortSize = newViewPortSize;
@@ -2379,10 +2424,12 @@ void DisplayModel::SetViewPortSize(Size newViewPortSize) {
 
     if (isDocReady) {
         // when fitting to content, let GoToPage do the necessary scrolling
-        if (zoomVirtual != kZoomFitContent && zoomVirtual != kZoomSmartWidth) {
+        if (zoomVirtual != kZoomFitContent && !IsSmartWidthZoom(zoomVirtual)) {
             SetScrollState(ss);
         } else {
             GoToPage(ss.page, 0);
+            // a resize (the pane, the tablet turning) keeps the reader's place
+            RestoreReadingAnchor(this, anchor);
         }
     } else {
         RecalcVisibleParts();
@@ -2445,7 +2492,7 @@ void DisplayModel::GoToPage(int pageNo, int scrollY, bool addNavPt, int scrollX)
         /* in single page mode going to another page involves recalculating
            the size of canvas */
         ChangeStartPage(pageNo);
-    } else if (kZoomFitContent == zoomVirtual || kZoomSmartWidth == zoomVirtual) {
+    } else if (kZoomFitContent == zoomVirtual || IsSmartWidthZoom(zoomVirtual)) {
         // make sure that CalcZoomReal uses the correct page to calculate
         // the zoom level for (visibility will be recalculated below anyway)
         for (int i = PageCount(); i > 0; i--) {
@@ -2457,7 +2504,7 @@ void DisplayModel::GoToPage(int pageNo, int scrollY, bool addNavPt, int scrollX)
     PageInfo* pageInfo = GetPageInfo(pageNo);
 
     bool fitContent = kZoomFitContent == zoomVirtual;
-    bool smartWidth = kZoomSmartWidth == zoomVirtual;
+    bool smartWidth = IsSmartWidthZoom(zoomVirtual);
     // intentionally ignore scrollX and scrollY when fitting to inked content
     if (fitContent || smartWidth) {
         // scroll down to where the actual content starts
@@ -2826,7 +2873,7 @@ void DisplayModel::SetZoomVirtual(float zoomLevel, Point* fixPt) {
     }
 
     bool scrollToFitPage = kZoomFitPage == zoomLevel || kZoomFitHeight == zoomLevel || kZoomFitContent == zoomLevel ||
-                           kZoomSmartWidth == zoomLevel || kZoomShrinkToFit == zoomLevel;
+                           IsSmartWidthZoom(zoomLevel) || kZoomShrinkToFit == zoomLevel;
     if (zoomVirtual == zoomLevel && (fixPt || !scrollToFitPage)) {
         return;
     }
@@ -2844,6 +2891,13 @@ void DisplayModel::SetZoomVirtual(float zoomLevel, Point* fixPt) {
         }
     }
 
+    // switching into Smart Width, or between its two margins, keeps the line
+    // that was at the top of the view at the top (see NoteReadingAnchor)
+    ReadingAnchor anchor;
+    if (IsSmartWidthZoom(zoomLevel) && !fixPt && ValidPageNo(startPage) && zoomReal != 0) {
+        anchor = NoteReadingAnchor(this);
+    }
+
     if (scrollToFitPage) {
         ss.page = CurrentPageNo();
         // SetScrollState's first call to GoToPage will already scroll to fit
@@ -2853,6 +2907,7 @@ void DisplayModel::SetZoomVirtual(float zoomLevel, Point* fixPt) {
     // lf("DisplayModel::SetZoomVirtual() zoomLevel=%.6f", _zoomLevel);
     Relayout(zoomLevel, rotation);
     SetScrollState(ss);
+    RestoreReadingAnchor(this, anchor);
 
     if (fixPt) {
         // scroll so that the fix point remains in the same screen location after zooming
@@ -3293,7 +3348,7 @@ void DisplayModel::ScrollTo(int pageNo, RectF rect, float zoom) {
     // FitContent uses CurrentPageNo() for the content box, so switch page first
     // for virtual modes, then apply zoom, then fine-tune scroll.
     bool isVirtualZoom = zoom == kZoomFitPage || zoom == kZoomFitWidth || zoom == kZoomFitHeight ||
-                         zoom == kZoomFitContent || zoom == kZoomSmartWidth || zoom == kZoomShrinkToFit ||
+                         zoom == kZoomFitContent || IsSmartWidthZoom(zoom) || zoom == kZoomShrinkToFit ||
                          zoom == kZoomFitByOrientation;
     bool isAbsZoom = zoom > 0;
 

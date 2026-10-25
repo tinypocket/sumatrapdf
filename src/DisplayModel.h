@@ -176,6 +176,9 @@ struct DisplayModel : DocController {
     // the smart-margin prefs the current layout was computed with; a tab
     // whose layout predates a toggle is relaid out when it is shown again
     bool layoutSmartMargins = false;
+    // the zoom the reader had before the Smart Width button's first tap, which
+    // its third tap goes back to (0 when there is none to go back to)
+    float zoomBeforeSmartWidth = 0.0f;
     bool layoutSmartHeaderFooter = false;
     // Manual header/footer trim, as a fraction of each page's height. Set in
     // the "Trim headers & footers" dialog and remembered per document. Unlike

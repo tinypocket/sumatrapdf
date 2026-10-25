@@ -47,6 +47,9 @@ enum class TbIcon {
     Web,
     Moon,
     Contrast,
+    // Smart Width's two margins, drawn on its button while it is on
+    SmartWidthMargin,
+    SmartWidthTight,
     kMax
 };
 

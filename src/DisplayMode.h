@@ -6,6 +6,7 @@ bool IsContinuous(DisplayMode mode);
 bool IsFacing(DisplayMode mode);
 bool IsBookView(DisplayMode mode);
 bool IsValidZoom(float zoomLevel);
+bool IsSmartWidthZoom(float zoomLevel);
 
 Str DisplayModeToString(DisplayMode mode);
 DisplayMode DisplayModeFromString(Str s, DisplayMode defVal);

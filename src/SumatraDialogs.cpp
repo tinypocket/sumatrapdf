@@ -574,6 +574,14 @@ TempStr ZoomLevelStr(float zoom) {
     if (zoom == kZoomFitByOrientation) {
         return _TRA("Fit by Orientation");
     }
+    // the same names the top bar's zoom readout uses; without these the zoom
+    // notification printed the sentinel value itself, "Zoom: -8%"
+    if (zoom == kZoomSmartWidthMargin) {
+        return "Smart Width";
+    }
+    if (zoom == kZoomSmartWidth) {
+        return "Smart Width Tight";
+    }
     if (zoom == 0) {
         return "-";
     }

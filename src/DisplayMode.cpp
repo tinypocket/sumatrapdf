@@ -28,6 +28,10 @@ bool IsBookView(DisplayMode mode) {
     return DisplayMode::BookView == mode || DisplayMode::ContinuousBookView == mode;
 }
 
+bool IsSmartWidthZoom(float zoom) {
+    return zoom == kZoomSmartWidth || zoom == kZoomSmartWidthMargin;
+}
+
 bool IsValidZoom(float zoom) {
     if ((kZoomMin - 0.01f <= zoom) && (zoom <= kZoomMax + 0.01f)) {
         return true;
@@ -50,7 +54,7 @@ bool IsValidZoom(float zoom) {
     if (kZoomFitByOrientation == zoom) {
         return true;
     }
-    if (kZoomSmartWidth == zoom) {
+    if (IsSmartWidthZoom(zoom)) {
         return true;
     }
     return false;
@@ -110,6 +114,12 @@ float ZoomFromString(Str s, float defVal) {
     if (str::EqIS(s, StrL("smart width"))) {
         return kZoomSmartWidth;
     }
+    if (str::EqIS(s, StrL("smart width tight"))) {
+        return kZoomSmartWidth;
+    }
+    if (str::EqIS(s, StrL("smart width margin"))) {
+        return kZoomSmartWidthMargin;
+    }
     float zoom;
     if (!str::IsNull(str::Parse(s, "%f", &zoom)) && IsValidZoom(zoom)) {
         return zoom;
@@ -146,6 +156,8 @@ void ZoomToString(Str* dst, float zoom, FileState* fileState) {
         str::ReplaceWithCopy(dst, "fit by orientation");
     } else if (kZoomSmartWidth == zoom) {
         str::ReplaceWithCopy(dst, "smart width");
+    } else if (kZoomSmartWidthMargin == zoom) {
+        str::ReplaceWithCopy(dst, "smart width margin");
     } else {
         str::ReplaceWithCopy(dst, fmt("%g", zoom));
     }
