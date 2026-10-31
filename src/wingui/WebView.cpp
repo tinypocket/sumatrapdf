@@ -495,9 +495,13 @@ class webview2_navigation_starting_handler : public ICoreWebView2NavigationStart
         if (!url) {
             return S_OK;
         }
+        // remembered for the main-document check in WebResourceResponseReceived;
+        // a redirect fires NavigationStarting again, so this tracks the chain
+        str::ReplaceWithCopy(&m_wnd->pendingNavUrl, url);
         bool allow = m_wnd->events.navigationStarting(m_wnd->events.ctx, url, false);
         if (!allow) {
             args->put_Cancel(TRUE);
+            str::FreePtr(&m_wnd->pendingNavUrl);
         }
         return S_OK;
     }
@@ -545,6 +549,7 @@ class webview2_navigation_completed_handler : public ICoreWebView2NavigationComp
         if (uri) {
             CoTaskMemFree(uri);
         }
+        str::FreePtr(&m_wnd->pendingNavUrl);
         if (url) {
             m_wnd->events.navigationCompleted(m_wnd->events.ctx, url, success != FALSE);
         }
@@ -590,6 +595,83 @@ class webview2_history_changed_handler : public ICoreWebView2HistoryChangedEvent
     ULONG m_refCount = 1;
 };
 
+class webview2_document_title_changed_handler : public ICoreWebView2DocumentTitleChangedEventHandler {
+  public:
+    explicit webview2_document_title_changed_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
+    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    ULONG STDMETHODCALLTYPE Release() {
+        ULONG n = --m_refCount;
+        if (n == 0) {
+            delete this;
+        }
+        return n;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, LPVOID* ppv) {
+        if (!ppv) {
+            return E_POINTER;
+        }
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == __uuidof(ICoreWebView2DocumentTitleChangedEventHandler)) {
+            *ppv = static_cast<ICoreWebView2DocumentTitleChangedEventHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* sender, IUnknown* /*args*/) {
+        if (!sender || !m_wnd || !m_wnd->events.documentTitleChanged) {
+            return S_OK;
+        }
+        WCHAR* title = nullptr;
+        if (FAILED(sender->get_DocumentTitle(&title)) || !title) {
+            return S_OK;
+        }
+        TempStr s = ToUtf8Temp(title);
+        CoTaskMemFree(title);
+        m_wnd->events.documentTitleChanged(m_wnd->events.ctx, s);
+        return S_OK;
+    }
+
+  private:
+    WebviewWnd* m_wnd = nullptr;
+    ULONG m_refCount = 1;
+};
+
+class webview2_dom_content_loaded_handler : public ICoreWebView2DOMContentLoadedEventHandler {
+  public:
+    explicit webview2_dom_content_loaded_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
+    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    ULONG STDMETHODCALLTYPE Release() {
+        ULONG n = --m_refCount;
+        if (n == 0) {
+            delete this;
+        }
+        return n;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, LPVOID* ppv) {
+        if (!ppv) {
+            return E_POINTER;
+        }
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == __uuidof(ICoreWebView2DOMContentLoadedEventHandler)) {
+            *ppv = static_cast<ICoreWebView2DOMContentLoadedEventHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* /*sender*/, ICoreWebView2DOMContentLoadedEventArgs* /*args*/) {
+        if (m_wnd && m_wnd->events.domContentLoaded) {
+            m_wnd->events.domContentLoaded(m_wnd->events.ctx);
+        }
+        return S_OK;
+    }
+
+  private:
+    WebviewWnd* m_wnd = nullptr;
+    ULONG m_refCount = 1;
+};
+
 class webview2_new_window_handler : public ICoreWebView2NewWindowRequestedEventHandler {
   public:
     explicit webview2_new_window_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
@@ -627,6 +709,92 @@ class webview2_new_window_handler : public ICoreWebView2NewWindowRequestedEventH
         if (url) {
             m_wnd->events.navigationStarting(m_wnd->events.ctx, url, true);
         }
+        return S_OK;
+    }
+
+  private:
+    WebviewWnd* m_wnd = nullptr;
+    ULONG m_refCount = 1;
+};
+
+// Reports the Content-Type of a TOP-LEVEL document response. WebResourceResponseReceived
+// fires for every request the page makes, so the main document has to be picked
+// out: Chromium tags a top-level navigation with "Sec-Fetch-Dest: document",
+// and as a fallback (no Sec-Fetch headers on some schemes) we accept a response
+// whose URI is the one the webview is navigating to.
+class webview2_response_received_handler : public ICoreWebView2WebResourceResponseReceivedEventHandler {
+  public:
+    explicit webview2_response_received_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
+    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    ULONG STDMETHODCALLTYPE Release() {
+        ULONG n = --m_refCount;
+        if (n == 0) {
+            delete this;
+        }
+        return n;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, LPVOID* ppv) {
+        if (!ppv) {
+            return E_POINTER;
+        }
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == __uuidof(ICoreWebView2WebResourceResponseReceivedEventHandler)) {
+            *ppv = static_cast<ICoreWebView2WebResourceResponseReceivedEventHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* /*sender*/,
+                                     ICoreWebView2WebResourceResponseReceivedEventArgs* args) {
+        if (!args || !m_wnd || !m_wnd->events.mainDocumentResponse) {
+            return S_OK;
+        }
+        ICoreWebView2WebResourceRequest* req = nullptr;
+        if (FAILED(args->get_Request(&req)) || !req) {
+            return S_OK;
+        }
+        bool isMainDoc = false;
+        ICoreWebView2HttpRequestHeaders* reqHeaders = nullptr;
+        if (SUCCEEDED(req->get_Headers(&reqHeaders)) && reqHeaders) {
+            WCHAR* dest = nullptr;
+            if (SUCCEEDED(reqHeaders->GetHeader(L"Sec-Fetch-Dest", &dest)) && dest) {
+                isMainDoc = wstr::EqI(WStr(dest), WStrL(L"document"));
+                CoTaskMemFree(dest);
+            }
+            reqHeaders->Release();
+        }
+        WCHAR* uri = nullptr;
+        req->get_Uri(&uri);
+        req->Release();
+        TempStr url = uri ? UrlForWebViewEvent(WStr(uri), m_wnd->resourceUriPrefix) : TempStr();
+        if (uri) {
+            CoTaskMemFree(uri);
+        }
+        if (!url) {
+            return S_OK;
+        }
+        if (!isMainDoc && m_wnd->pendingNavUrl) {
+            isMainDoc = str::EqI(url, m_wnd->pendingNavUrl);
+        }
+        if (!isMainDoc) {
+            return S_OK;
+        }
+        TempStr contentType;
+        ICoreWebView2WebResourceResponseView* resp = nullptr;
+        if (SUCCEEDED(args->get_Response(&resp)) && resp) {
+            ICoreWebView2HttpResponseHeaders* headers = nullptr;
+            if (SUCCEEDED(resp->get_Headers(&headers)) && headers) {
+                WCHAR* ct = nullptr;
+                if (SUCCEEDED(headers->GetHeader(L"Content-Type", &ct)) && ct) {
+                    contentType = ToUtf8Temp(WStr(ct));
+                    CoTaskMemFree(ct);
+                }
+                headers->Release();
+            }
+            resp->Release();
+        }
+        m_wnd->events.mainDocumentResponse(m_wnd->events.ctx, url, contentType ? contentType : StrL(""));
         return S_OK;
     }
 
@@ -1073,6 +1241,30 @@ void WebviewWnd::FailInit() {
     HwndDestroyWindowSafe(&hwnd);
 }
 
+void WebviewWnd::SetBackgroundColor(COLORREF col) {
+    backgroundColor = col;
+    ApplyBackgroundColor();
+}
+
+void WebviewWnd::ApplyBackgroundColor() {
+    if (!controller) {
+        return; // OnControllerReady applies it
+    }
+    ICoreWebView2Controller2* controller2 = nullptr;
+    HRESULT hr = controller->QueryInterface(IID_PPV_ARGS(&controller2));
+    if (FAILED(hr) || !controller2) {
+        return;
+    }
+    // {A, R, G, B}
+    COREWEBVIEW2_COLOR bg{0, 0, 0, 0};
+    if (opaqueBackground) {
+        COLORREF c = backgroundColor == kColorUnset ? RGB(255, 255, 255) : backgroundColor;
+        bg = COREWEBVIEW2_COLOR{255, GetRValue(c), GetGValue(c), GetBValue(c)};
+    }
+    controller2->put_DefaultBackgroundColor(bg);
+    controller2->Release();
+}
+
 void WebviewWnd::SetControllerVisible(bool visible) {
     if (visible == isVisible) {
         if ((visible && !isSuspended) || (!visible && isSuspended)) {
@@ -1125,13 +1317,7 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
     isVisible = false;
     controller->put_IsVisible(FALSE);
 
-    ICoreWebView2Controller2* controller2 = nullptr;
-    HRESULT bgHr = controller->QueryInterface(IID_PPV_ARGS(&controller2));
-    if (SUCCEEDED(bgHr) && controller2) {
-        COREWEBVIEW2_COLOR bg = {0, 0, 0, 0};
-        controller2->put_DefaultBackgroundColor(bg);
-        controller2->Release();
-    }
+    ApplyBackgroundColor();
 
     if (!allowExternalDrop) {
         ICoreWebView2Controller4* controller4 = nullptr;
@@ -1160,11 +1346,21 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
     ICoreWebView2Settings* settings = nullptr;
     HRESULT hr = webview->get_Settings(&settings);
     if (hr == S_OK && settings) {
-        settings->put_AreDefaultContextMenusEnabled(FALSE);
+        settings->put_AreDefaultContextMenusEnabled(enableBrowserChrome ? TRUE : FALSE);
         settings->put_AreDevToolsEnabled(FALSE);
-        settings->put_AreDefaultScriptDialogsEnabled(FALSE);
+        settings->put_AreDefaultScriptDialogsEnabled(enableBrowserChrome ? TRUE : FALSE);
         settings->put_IsStatusBarEnabled(FALSE);
-        settings->put_IsZoomControlEnabled(FALSE);
+        settings->put_IsZoomControlEnabled(enableBrowserChrome ? TRUE : FALSE);
+        // WebView2's own password autosave + general autofill (ICoreWebView2Settings4).
+        // Stored in this control's dataDir, not the user's Edge profile.
+        if (enableAutofill) {
+            ICoreWebView2Settings4* settings4 = nullptr;
+            if (SUCCEEDED(settings->QueryInterface(IID_PPV_ARGS(&settings4))) && settings4) {
+                settings4->put_IsGeneralAutofillEnabled(TRUE);
+                settings4->put_IsPasswordAutosaveEnabled(TRUE);
+                settings4->Release();
+            }
+        }
         settings->Release();
     }
 
@@ -1203,6 +1399,40 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
             auto* handler = new webview2_history_changed_handler(this);
             webview->add_HistoryChanged(handler, &token);
             handler->Release();
+        }
+    }
+
+    if (events.documentTitleChanged) {
+        auto* handler = new webview2_document_title_changed_handler(this);
+        ::EventRegistrationToken token = {};
+        webview->add_DocumentTitleChanged(handler, &token);
+        handler->Release();
+    }
+
+    // WebResourceResponseReceived is on ICoreWebView2_2 (a later interface than
+    // the one we hold), so it has to be queried for; an older runtime simply
+    // doesn't deliver the event and the host falls back to URL-based detection.
+    if (events.domContentLoaded) {
+        ICoreWebView2_2* wv2 = nullptr;
+        if (SUCCEEDED(webview->QueryInterface(IID_PPV_ARGS(&wv2))) && wv2) {
+            auto* handler = new webview2_dom_content_loaded_handler(this);
+            ::EventRegistrationToken token = {};
+            wv2->add_DOMContentLoaded(handler, &token);
+            handler->Release();
+            wv2->Release();
+        }
+    }
+
+    if (events.mainDocumentResponse) {
+        ICoreWebView2_2* wv2 = nullptr;
+        if (SUCCEEDED(webview->QueryInterface(IID_PPV_ARGS(&wv2))) && wv2) {
+            auto* handler = new webview2_response_received_handler(this);
+            ::EventRegistrationToken token = {};
+            if (FAILED(wv2->add_WebResourceResponseReceived(handler, &token))) {
+                logf("WebviewWnd: add_WebResourceResponseReceived failed\n");
+            }
+            handler->Release();
+            wv2->Release();
         }
     }
 
@@ -1530,6 +1760,19 @@ void WebviewWnd::Navigate(Str url) {
     webview->Navigate(ws);
 }
 
+TempStr WebviewWnd::GetDocumentTitle() const {
+    if (!webview) {
+        return {};
+    }
+    WCHAR* title = nullptr;
+    if (FAILED(webview->get_DocumentTitle(&title)) || !title) {
+        return {};
+    }
+    TempStr res = ToUtf8Temp(WStr(title));
+    CoTaskMemFree(title);
+    return res;
+}
+
 void WebviewWnd::GoBack() {
     if (webview) {
         webview->GoBack();
@@ -1832,6 +2075,11 @@ static Microsoft::WRL::ComPtr<CoreWebView2EnvironmentOptions> CreateOfflineEnvir
         L"--disable-features=AutofillServerCommunication,MediaRouter,OptimizationHints,Translate,"
         L"CertificateTransparencyComponentUpdater "
         L"--metrics-recording-only "
+#if defined(DEBUG)
+        // debug builds: a DevTools port on localhost, to look inside a page
+        // that misbehaves in the in-app browser from outside the app
+        L"--remote-debugging-port=9223 "
+#endif
         L"--no-pings");
     return options;
 }
@@ -2009,6 +2257,7 @@ WebviewWnd::~WebviewWnd() {
         controller = nullptr;
     }
     str::Free(dataDir);
+    str::Free(pendingNavUrl);
     wstr::Free(userDataFolder);
     wstr::Free(resourceUriPrefix);
 }
@@ -2020,6 +2269,7 @@ WebviewWnd::~WebviewWnd() {
 WebviewWnd::WebviewWnd() = default;
 WebviewWnd::~WebviewWnd() {
     str::Free(dataDir);
+    str::Free(pendingNavUrl);
     wstr::Free(userDataFolder);
     wstr::Free(resourceUriPrefix);
 }
@@ -2049,6 +2299,9 @@ void WebviewWnd::OnProcessFailed(WebViewProcessFailure) {}
 void WebviewWnd::Navigate(Str) {}
 void WebviewWnd::RegisterForwardingDropTarget() {}
 void WebviewWnd::RevokeForwardingDropTarget() {}
+TempStr WebviewWnd::GetDocumentTitle() const {
+    return {};
+}
 void WebviewWnd::GoBack() {}
 void WebviewWnd::GoForward() {}
 void WebviewWnd::SetZoomPercent(int) {}
@@ -2071,9 +2324,100 @@ void WebviewWnd::FailInit() {}
 void WebviewWnd::QueuePendingOp(PendingWebViewOp::Kind, Str, int) {}
 void WebviewWnd::FlushPendingOps() {}
 void WebviewWnd::SetControllerVisible(bool) {}
+void WebviewWnd::SetBackgroundColor(COLORREF) {}
+void WebviewWnd::ApplyBackgroundColor() {}
 void WebviewWnd::OnBrowserMessage(Str) {}
 LRESULT WebviewWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     return WndProcDefault(hwnd, msg, wparam, lparam);
 }
 void WebviewWnd::UpdateWebviewSize() {}
 #endif // !_MSC_VER
+
+// --- cookies for an out-of-webview download -----------------------------------
+
+struct webview2_get_cookies_handler : public ICoreWebView2GetCookiesCompletedHandler {
+    LONG m_refCount = 1;
+    Func1<Str> m_cb;
+
+    explicit webview2_get_cookies_handler(const Func1<Str>& cb) : m_cb(cb) {}
+    virtual ~webview2_get_cookies_handler() = default;
+
+    ULONG STDMETHODCALLTYPE AddRef() { return InterlockedIncrement(&m_refCount); }
+    ULONG STDMETHODCALLTYPE Release() {
+        LONG n = InterlockedDecrement(&m_refCount);
+        if (n == 0) {
+            delete this;
+        }
+        return n;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, LPVOID* ppv) {
+        if (!ppv) {
+            return E_POINTER;
+        }
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == __uuidof(ICoreWebView2GetCookiesCompletedHandler)) {
+            *ppv = static_cast<ICoreWebView2GetCookiesCompletedHandler*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(HRESULT res, ICoreWebView2CookieList* list) {
+        str::Builder header;
+        UINT count = 0;
+        if (SUCCEEDED(res) && list && SUCCEEDED(list->get_Count(&count))) {
+            for (UINT i = 0; i < count; i++) {
+                ICoreWebView2Cookie* cookie = nullptr;
+                if (FAILED(list->GetValueAtIndex(i, &cookie)) || !cookie) {
+                    continue;
+                }
+                WCHAR* name = nullptr;
+                WCHAR* value = nullptr;
+                cookie->get_Name(&name);
+                cookie->get_Value(&value);
+                if (name && value) {
+                    if (header.IsEmpty()) {
+                        header.Append(StrL("Cookie: "));
+                    } else {
+                        header.Append(StrL("; "));
+                    }
+                    header.Append(ToUtf8Temp(WStr(name)));
+                    header.AppendChar('=');
+                    header.Append(ToUtf8Temp(WStr(value)));
+                }
+                if (name) {
+                    CoTaskMemFree(name);
+                }
+                if (value) {
+                    CoTaskMemFree(value);
+                }
+                cookie->Release();
+            }
+        }
+        if (!header.IsEmpty()) {
+            header.Append(StrL("\r\n"));
+        }
+        m_cb.Call(ToStrTemp(header));
+        return S_OK;
+    }
+};
+
+void WebviewWnd::GetCookieHeaderAsync(Str url, const Func1<Str>& cb) {
+    ICoreWebView2_2* wv2 = nullptr;
+    if (webview && SUCCEEDED(webview->QueryInterface(IID_PPV_ARGS(&wv2))) && wv2) {
+        ICoreWebView2CookieManager* mgr = nullptr;
+        HRESULT hr = wv2->get_CookieManager(&mgr);
+        wv2->Release();
+        if (SUCCEEDED(hr) && mgr) {
+            auto* handler = new webview2_get_cookies_handler(cb);
+            WCHAR* urlW = CWStrTemp(url);
+            hr = mgr->GetCookies(urlW, handler);
+            handler->Release();
+            mgr->Release();
+            if (SUCCEEDED(hr)) {
+                return;
+            }
+        }
+    }
+    cb.Call(Str{});
+}

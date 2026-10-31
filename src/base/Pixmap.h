@@ -62,6 +62,11 @@ Pixmap* PixmapFromRenderedBitmap(RenderedBitmap* rb);
 RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px);
 void RecolorPixmap(Pixmap* px, COLORREF textColor, COLORREF bgColor, COLORREF linkColor = 0,
                    Vec<Rect>* skipRects = nullptr);
+// Night light, as a display's night mode does it: blue turned well down and
+// green a little, red untouched. A multiply, so black stays black and white
+// paper turns warm. strength 0 (off) .. 100 (warmest).
+void WarmPixmap(Pixmap* px, int strength);
+COLORREF WarmColor(COLORREF c, int strength);
 
 // frees a DIB-section-backed Pixmap's native handles (and its pixels).
 void FreePixmapNativeBitmap(Pixmap* p);

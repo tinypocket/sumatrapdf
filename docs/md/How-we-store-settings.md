@@ -4,7 +4,7 @@
 
 Persisted data is stored in `SumatraPDF-settings.txt` file.
 
-In portable version the file is stored in the same directory as SumatraPDF executable. In non-portable version, it's in `%LOCALAPPDATA%\SumatraPDF` directory.
+In portable version the file is stored in the same directory as the SumatraPDF+ executable. In non-portable version, it's in `%LOCALAPPDATA%\SumatraPDF+` directory.
 
 Starting with version 1.6 we also persist thumbnails for "Frequently read" list. They are stored in subdirectory `sumatrapdfcache` as `.png` files.
 
@@ -41,11 +41,11 @@ Some settings apply only after restarting SumatraPDF:
 
 ### Session restore
 
-| Setting | Effect |
-| --- | --- |
-| `RestoreSession = true` | On startup, reopen tabs and window layout from `SessionData` |
-| `RememberOpenedFiles = true` | Track history for Home / `#` command palette |
-| `LazyLoading = true` | When restoring session, load tab content only when the tab is selected |
+| Setting                      | Effect                                                                 |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| `RestoreSession = true`      | On startup, reopen tabs and window layout from `SessionData`           |
+| `RememberOpenedFiles = true` | Track history for Home / `#` command palette                           |
+| `LazyLoading = true`         | When restoring session, load tab content only when the tab is selected |
 
 `-for-testing` skips restore and does not save settings.
 

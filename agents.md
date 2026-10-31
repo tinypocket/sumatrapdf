@@ -24,6 +24,8 @@ For .ts / .js / .json / .md files, the equivalent is `bunx prettier --write <fil
 
 Never commit changes automatically. Always wait for explicit command to commit changes.
 
+Releasing the SumatraPDF+ fork ("bump" = commit, version bump, build, package, smoke test, push, publish) is written up in `docs/release-process.md`. Build and package with `bun cmd/package-sumatrapdf-plus.ts` rather than invoking msbuild four times by hand.
+
 When committing a fix for a GitHub issue, include `(fixes #<issue-no>)` at the end of the commit message.
 
 When committing work done with AI assistance, append the user prompt(s) that produced the change at the very end of the commit message as a single line: `prompt: ...`. If there were multiple prompts, squash them into one concise line. Record the substantive request only — omit meta-instructions such as "commit", "push", "check work", or "verify".

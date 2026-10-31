@@ -1041,6 +1041,16 @@ bool PreTranslateMessage(MSG& msg) {
     if (!shouldProcess) {
         return false;
     }
+    // Ctrl+A selects everything in a text box, wherever it is. A single-line
+    // EDIT has no Ctrl+A of its own (it beeps), and in the main window the key
+    // is the document's Select All, which only a couple of boxes passed on.
+    // Consuming the key down also keeps the stray Ctrl+A character (and its
+    // beep) from being generated.
+    if (msg.message == WM_KEYDOWN && msg.wParam == 'A' && IsCtrlPressed() && !IsAltPressed() && !IsShiftPressed() &&
+        HwndIsTextBox(msg.hwnd)) {
+        EditSelectAll(msg.hwnd);
+        return true;
+    }
     for (HWND hwnd = msg.hwnd; hwnd != nullptr; hwnd = ::GetParent(hwnd)) {
         auto* wnd = WndListFindByHwnd(hwnd);
         if (wnd && wnd->PreTranslateMessage(msg)) {

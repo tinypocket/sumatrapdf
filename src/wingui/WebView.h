@@ -37,6 +37,19 @@ struct WebViewEvents {
     bool (*navigationStarting)(void* ctx, Str url, bool newWindow) = nullptr;
     void (*navigationCompleted)(void* ctx, Str url, bool success) = nullptr;
     void (*historyChanged)(void* ctx, bool canGoBack, bool canGoForward) = nullptr;
+    // the page's document title changed (fires on load and on any later change).
+    // The in-product browser labels its tabs with it.
+    void (*documentTitleChanged)(void* ctx, Str title) = nullptr;
+    // The HTTP response for a TOP-LEVEL document navigation arrived (headers
+    // only; the body is still streaming). `contentType` is the raw Content-Type
+    // header, "" when the server sent none. This is the only reliable way to
+    // learn that a URL with no file extension is really a PDF - by the time the
+    // page has loaded, WebView2's built-in Edge PDF viewer is already showing
+    // it. Fires before the document renders, so the host can take over.
+    void (*mainDocumentResponse)(void* ctx, Str url, Str contentType) = nullptr;
+    // the top-level document has been parsed (DOMContentLoaded), so its first
+    // paint is at most a frame or two away
+    void (*domContentLoaded)(void* ctx) = nullptr;
     // maps an accelerator key press inside the webview to an app command id to
     // post (WM_COMMAND) to the top-level window, or 0 to leave it to the
     // webview, or kWebViewForwardKey to re-post the key itself. Lets the host
@@ -97,6 +110,9 @@ struct WebviewWnd : Wnd {
     HWND Create(const CreateWebViewArgs&);
 
     void Eval(Str js);
+    // the color a page with no background of its own is shown on (opaque
+    // webviews only); kColorUnset for white
+    void SetBackgroundColor(COLORREF col);
     void SetHtml(Str html);
     void Init(Str js);
     int AddInitScript(Str js);
@@ -118,6 +134,11 @@ struct WebviewWnd : Wnd {
     void RebuildBindScript();
     void GoBack();
     void GoForward();
+    // the document's current title (""/empty when there is none). WebView2 only
+    // raises documentTitleChanged when the title CHANGES, so a reload of the
+    // same page never re-reports it - a host that dropped its copy on
+    // navigationStarting has to ask for it again once the load completes.
+    TempStr GetDocumentTitle() const;
     void SetZoomPercent(int zoom);
     int GetZoomPercent() const;
     bool CanGoBack() const;
@@ -129,11 +150,17 @@ struct WebviewWnd : Wnd {
     void RevokeForwardingDropTarget();
     bool Embed(WebViewMsgCb& cb);
     void OnControllerReady(ICoreWebView2Controller* controller);
+    // The browser profile's cookies for url as one "Cookie: a=b; c=d\r\n"
+    // request header line, delivered asynchronously on the UI thread ({} when
+    // there are none or the runtime is too old). A download made outside the
+    // webview needs these to pass as the logged-in session.
+    void GetCookieHeaderAsync(Str url, const Func1<Str>& cb);
     void OnProcessFailed(WebViewProcessFailure kind);
     void FailInit();
     void QueuePendingOp(PendingWebViewOp::Kind kind, Str text, int token = 0);
     void FlushPendingOps();
     void SetControllerVisible(bool visible);
+    void ApplyBackgroundColor();
 
     virtual void OnBrowserMessage(Str msg);
 
@@ -164,10 +191,27 @@ struct WebviewWnd : Wnd {
     bool hasLastBounds = false;
     WStr userDataFolder;
     WStr resourceUriPrefix;
+    // URI of the top-level navigation currently in flight, kept only so
+    // WebResourceResponseReceived can recognise the main document's response
+    // when Chromium's Sec-Fetch-Dest header isn't there to say so
+    Str pendingNavUrl;
     WebViewResourceProvider resourceProvider;
     WebViewEvents events;
     bool forwardAppAccelerators = true;
     bool allowClipboardRead = false;
+    // in-product browser: turn on WebView2's own password autosave + autofill
+    // (stored in dataDir, separate from the user's Edge profile) and browser
+    // chrome (default context menus). Off for the manual / AI-chat webviews.
+    bool enableAutofill = false;
+    bool enableBrowserChrome = false;
+    // Paint white behind the page, as a browser does, instead of the default
+    // transparent background. A page that draws no background of its own - an
+    // empty page a site sent back after a sign-in - otherwise showed whatever
+    // was on screen behind the control: the Library, in the in-app browser.
+    bool opaqueBackground = false;
+    // with opaqueBackground, the color instead of white (the in-app browser's
+    // night light); change it with SetBackgroundColor
+    COLORREF backgroundColor = kColorUnset;
     // when false, WebView2 won't claim external (file) drops, so they fall
     // through to the host window's drop target (e.g. to open the file)
     bool allowExternalDrop = true;

@@ -142,7 +142,7 @@ TempStr GetExistingInstallationDirTemp() {
         return gCachedExistingInstallationDir;
     }
     log("GetExistingInstallationDir()\n");
-    TempStr regPathUninst = GetRegPathUninstTemp(kAppName);
+    TempStr regPathUninst = GetRegPathUninstTemp(kAppRegistryName);
     TempStr dir = LoggedReadRegStr2Temp(regPathUninst, "InstallLocation");
     if (!dir) {
         return {};
@@ -253,7 +253,7 @@ void GetPreviousInstallInfo(PreviousInstallationInfo* info) {
     }
     info->searchFilterInstalled = IsSearchFilterInstalled();
     info->previewInstalled = IsPreviewInstalled();
-    TempStr regPathUninst = GetRegPathUninstTemp(kAppName);
+    TempStr regPathUninst = GetRegPathUninstTemp(kAppRegistryName);
     TempStr dirLM = LoggedReadRegStrTemp(HKEY_LOCAL_MACHINE, regPathUninst, "InstallLocation");
     TempStr dirCU = LoggedReadRegStrTemp(HKEY_CURRENT_USER, regPathUninst, "InstallLocation");
     if (dirLM && dirCU) {

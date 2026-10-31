@@ -10,6 +10,7 @@
 #include "wingui/UIModels.h"
 
 #include "Settings.h"
+#include "DisplayMode.h"
 #include "DocController.h"
 #include "DocProperties.h"
 #include "EngineBase.h"
@@ -305,8 +306,22 @@ static void DocPropertiesTest() {
     utassert(PropFromName("bogusPropName") == DocProp::None);
 }
 
+static void SmartWidthZoomTest() {
+    utassert(IsSmartWidthZoom(kZoomSmartWidth));
+    utassert(IsSmartWidthZoom(kZoomSmartWidthMargin));
+    utassert(!IsSmartWidthZoom(kZoomFitWidth));
+    utassert(ZoomFromString(StrL("smart width margin"), kInvalidZoom) == kZoomSmartWidthMargin);
+    utassert(ZoomFromString(StrL("smart width tight"), kInvalidZoom) == kZoomSmartWidth);
+
+    Str serialized;
+    ZoomToString(&serialized, kZoomSmartWidthMargin, nullptr);
+    utassert(str::Eq(serialized, StrL("smart width margin")));
+    str::Free(serialized);
+}
+
 void SumatraPDF_UnitTests() {
     DocPropertiesTest();
+    SmartWidthZoomTest();
     parseCommandsTest();
     colorTest();
     BenchRangeTest();

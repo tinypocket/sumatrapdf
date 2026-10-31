@@ -25,6 +25,8 @@
 #include "Accelerators.h"
 #include "SvgIcons.h"
 #include "Toolbar.h"
+#include "TableOfContents.h"
+#include "TopBar.h"
 #include "SearchAndDDE.h"
 #include "FindBar.h"
 #include "FindWindow.h"
@@ -91,7 +93,7 @@ static TempStr FindBarButtonTooltip(int cmd) {
         case CmdFindToggleMatchWholeWord:
             return AppendCmdAccel(_TRA("Match Whole Word"), cmd);
         case kFindBarPinCmdId:
-            return _TRA("Open in a window");
+            return gGlobalPrefs->touchChrome ? str::DupTemp("Open in pane") : _TRA("Open in a window");
         case kFindBarCloseCmdId:
             return _TRA("Close");
     }
@@ -398,6 +400,10 @@ bool FindBarWnd::OnCommand(WPARAM wparam, LPARAM /*lparam*/) {
             FindToggleMatchWholeWord(win);
             return true;
         case kFindBarPinCmdId:
+            if (IsTouchChrome(win) && win->AsFixed()) {
+                OpenTouchSearchPanel(win); // the pane is the touch chrome's big find UI
+                return true;
+            }
             ToggleFloatingFindUI(win); // pop out into the floating window
             return true;
         case kFindBarCloseCmdId:
@@ -503,10 +509,20 @@ void ShowFindBar(MainWindow* win) {
 }
 
 void HideFindBar(MainWindow* win) {
-    // drop the cached results: they belong to this search/document and must not
-    // be shown or navigated into after the find UI is reopened (e.g. on another
-    // tab, which would carry the previous document's page/glyph coordinates)
-    ClearFindMatches(win);
+    // The touch chrome's Search panel renders win->findMatches inline and is
+    // not part of the find bar, so it keeps owning the results when the find
+    // bar goes away: closing the bar (Esc / the X) must not empty a panel the
+    // user is still looking at. Leaving a document is handled by the callers
+    // that mean it -- SaveCurrentWindowTab() / CloseTab() drop the results
+    // explicitly, and so does InvalidateFindForDocumentChange().
+    bool keepResults = IsTouchSearchPanelVisible(win);
+    if (!keepResults) {
+        // drop the cached results: they belong to this search/document and must
+        // not be shown or navigated into after the find UI is reopened (e.g. on
+        // another tab, which would carry the previous document's page/glyph
+        // coordinates)
+        ClearFindMatches(win);
+    }
     if (win->ctrl) {
         // remove in-page find highlights in a chm / markdown webview
         // (no-op for other document types and the IE backend)
@@ -514,9 +530,11 @@ void HideFindBar(MainWindow* win) {
     }
     // drop the active TextSearch hit so closing find clears the highlight;
     // F3 still works (FindNext re-searches) and paints the new hit (#5802)
-    if (DisplayModel* dm = win->AsFixed()) {
-        if (dm->textSearch) {
-            dm->textSearch->Reset();
+    if (!keepResults) {
+        if (DisplayModel* dm = win->AsFixed()) {
+            if (dm->textSearch) {
+                dm->textSearch->Reset();
+            }
         }
     }
     if (IsFindWindowVisible(win)) {
@@ -532,6 +550,24 @@ void HideFindBar(MainWindow* win) {
     ScheduleRepaint(win, 0);
 }
 
+// Hide the find UI because the document behind it is going away (tab switch,
+// tab close). Unlike plain HideFindBar() this always drops the cached matches:
+// their page/glyph coordinates belong to the document being left, so no UI --
+// including the touch chrome's Search panel, which HideFindBar() deliberately
+// leaves populated -- may keep showing or navigating into them.
+void HideFindBarForDocumentChange(MainWindow* win) {
+    HideFindBar(win);
+    ClearFindMatches(win);
+    if (DisplayModel* dm = win->AsFixed()) {
+        if (dm->textSearch) {
+            dm->textSearch->Reset();
+        }
+    }
+    if (IsTouchSearchPanelVisible(win) && win->hwndTocBox) {
+        HwndInvalidate(win->hwndTocBox, false);
+    }
+}
+
 // note: the floating window is not anchored to the search icon, so "visible"
 // here means specifically the compact bar (used to reposition it on move)
 bool IsFindBarVisible(MainWindow* win) {
@@ -539,7 +575,9 @@ bool IsFindBarVisible(MainWindow* win) {
 }
 
 bool IsFindUIVisible(MainWindow* win) {
-    return IsFindBarVisible(win) || IsFindWindowVisible(win);
+    // the touch Search pane is a find UI too: its matches are painted on the
+    // page like the bar's, and a tapped result shows up where it is
+    return IsFindBarVisible(win) || IsFindWindowVisible(win) || IsTouchSearchPanelVisible(win);
 }
 
 void FocusFindEditSelectAll(MainWindow* win) {

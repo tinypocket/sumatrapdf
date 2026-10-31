@@ -77,6 +77,10 @@ CmdFindPrevSel,Shift + Ctrl + F3,Find Previous Selection,
 
 ```commands
 Command IDs,Keyboard shortcuts,Command Palette,Notes
+CmdToggleTabs,,Show Tabs,"Show document tabs in the title bar; available in the View menu, ver 3.7+"
+CmdTouchSidebarDensityCondensed,,Sidebar Rows: Condensed,"Use 34px rows in touch sidebars, ver 3.8+"
+CmdTouchSidebarDensityNormal,,Sidebar Rows: Normal,"Use 40px rows in touch sidebars, ver 3.8+"
+CmdTouchSidebarDensityExpanded,,Sidebar Rows: Expanded,"Use 52px rows in touch sidebars, ver 3.8+"
 CmdBookView,Ctrl + 8,Book View,
 CmdFacingView,Ctrl + 7,Facing View,
 CmdInvertColors,Shift + I,Invert Colors,was `i` before 3.6

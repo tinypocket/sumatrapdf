@@ -325,6 +325,13 @@ void PaintTransparentRectangles(HDC hdc, Rect screenRc, Vec<Rect>& rects, COLORR
     screenRc.Inflate(pad, pad);
     for (int i = 0; i < len(rects); i++) {
         Rect rc = rects[i];
+        // A page off screen has an empty rect. Padded, it became a tiny square
+        // at the canvas's corner that passed the intersection below - one per
+        // page, so after Select All on a long document every repaint outlined
+        // the union of a thousand overlapping squares (a fifth of a second).
+        if (rc.IsEmpty()) {
+            continue;
+        }
         if (pad > 0) {
             rc.Inflate(pad, pad);
         }
