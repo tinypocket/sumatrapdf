@@ -1146,6 +1146,7 @@ static void TbUpdateNavButtons(TouchBrowser* tb) {
     tb->canGoBack = wv && wv->CanGoBack();
     tb->canGoForward = wv && wv->CanGoForward();
     TbRedrawChrome(tb);
+    RepaintCaptionNavButtons(tb->win);
 }
 
 static void TbNavigationCompleted(void* ctx, Str url, bool /*success*/) {
@@ -1217,20 +1218,30 @@ static void TbDocTakeoverNow(TbDocTakeoverReq* req) {
             // ...and get out of Edge's viewer, back to the page the link was on
             WebviewWnd* wv = tab->webView;
             TouchBrowser* tb = win->touchBrowser;
-            bool goBack = wv && wv->CanGoBack();
+            // The response usually arrives before the document's navigation
+            // commits, while the page the link was on is still the current
+            // history entry: going back then went one page too far (the page
+            // before the link's). Cancelling the load keeps the link's page.
+            bool committed = tab->url && str::EqI(tab->url, url);
+            bool stop = wv && !committed && wv->CanGoBack();
+            bool goBack = wv && !stop && wv->CanGoBack();
             // A link with target=_blank opened this tab just for the document:
             // there is no page to go back to, and sending it to the home page
             // left a stray Google tab. It is closed instead - but only after
             // the tab the link was on is back in front, because the download
             // takes the site's cookies from the active tab's webview, and the
             // webview of a tab being closed never answers.
-            bool closeTab = !goBack && len(tb->tabs) > 1;
+            bool closeTab = !goBack && !stop && len(tb->tabs) > 1;
             if (closeTab) {
                 int idx = tb->tabs.Find(tab);
                 TbActivateTab(tb, idx > 0 ? idx - 1 : idx + 1);
             }
             TbStartDocDownload(win, url, ext);
-            if (goBack) {
+            if (stop) {
+                wv->Stop();
+                // still on the link's page, which is not a document
+                TbClearDocPage(tab);
+            } else if (goBack) {
                 wv->GoBack();
             } else if (closeTab) {
                 TbCloseTab(tab);
@@ -1290,6 +1301,7 @@ static void TbHistoryChanged(void* ctx, bool canBack, bool canFwd) {
     tb->canGoBack = canBack;
     tb->canGoForward = canFwd;
     TbRedrawChrome(tb);
+    RepaintCaptionNavButtons(tb->win);
 }
 
 static void TbOnBack(TouchBrowser* tb) {
@@ -4578,4 +4590,47 @@ void DestroyTouchWebView(MainWindow* win) {
     delete tb->favMgr;
     delete tb->scrim;
     delete tb;
+}
+
+void* TouchBrowserActiveTabId(MainWindow* win) {
+    if (!win || !win->touchBrowser) {
+        return nullptr;
+    }
+    return TbActiveTab(win->touchBrowser);
+}
+
+bool TouchBrowserHasTab(MainWindow* win, void* tabId) {
+    if (!win || !win->touchBrowser || !tabId) {
+        return false;
+    }
+    return win->touchBrowser->tabs.Find((TbTab*)tabId) >= 0;
+}
+
+void TouchBrowserActivateTabById(MainWindow* win, void* tabId) {
+    if (!win || !win->touchBrowser || !tabId) {
+        return;
+    }
+    TouchBrowser* tb = win->touchBrowser;
+    int idx = tb->tabs.Find((TbTab*)tabId);
+    if (idx >= 0 && idx != tb->activeTab) {
+        TbActivateTab(tb, idx);
+    }
+}
+
+bool TouchBrowserCanNavigate(MainWindow* win, int dir) {
+    if (!win || !win->touchBrowser) {
+        return false;
+    }
+    return dir < 0 ? win->touchBrowser->canGoBack : win->touchBrowser->canGoForward;
+}
+
+void TouchBrowserNavigate(MainWindow* win, int dir) {
+    if (!win || !win->touchBrowser) {
+        return;
+    }
+    if (dir < 0) {
+        TbOnBack(win->touchBrowser);
+    } else {
+        TbOnForward(win->touchBrowser);
+    }
 }

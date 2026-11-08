@@ -423,6 +423,7 @@ static void SetToolbarButtonToolTipByIdx(HWND hwnd, int idx, int cmdId, Str s) {
 // TODO: this is called too often
 // TODO: also set checked state instead of calling SetToolbarButtonCheckedState() all over
 void ToolbarUpdateStateForWindow(MainWindow* win, bool setButtonsVisibility) {
+    RepaintCaptionNavButtons(win);
     HWND hwnd = win->hwndToolbar;
     int n = TotalButtonsCount();
     for (int i = 0; i < n; i++) {

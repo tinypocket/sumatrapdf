@@ -64,6 +64,8 @@ enum CaptionButtons {
     CB_MENU,
     CB_UPDATE,
     CB_SYSTEM_MENU,
+    CB_NAV_BACK,
+    CB_NAV_FORWARD,
     CB_BTN_COUNT
 };
 
@@ -74,6 +76,7 @@ struct ButtonInfo {
     bool pressed = false;
     bool inactive = false;
     bool visible = true;
+    bool navEnabled = false; // CB_NAV_BACK / CB_NAV_FORWARD: history has somewhere to go
     ButtonInfo() = default;
 };
 
@@ -218,6 +221,19 @@ struct MainWindow {
 
     // the in-product web browser shown for TouchView::Web (see SimpleBrowserWindow.cpp)
     TouchBrowser* touchBrowser = nullptr;
+    // Back / Forward across places, not just within one document: a browser
+    // tab, the Library, a document tab. See NoteNavPlace in SumatraPDF.cpp.
+    struct NavPlace {
+        TouchView view = TouchView::Library;
+        WindowTab* tab = nullptr; // TouchView::Doc
+        void* webTab = nullptr;   // TouchView::Web: the browser tab (TbTab*)
+        int enterNavIdx = -1;     // the document's navHistoryIdx when we arrived
+        int leaveNavIdx = -1;     // ... and when we last left it
+    };
+    Vec<NavPlace> navPlaces;
+    int navPlaceIdx = -1;
+    // set while Back / Forward switch places, so the switch isn't recorded as a new one
+    bool navPlaceMoving = false;
     // the last non-document view the user was in (Library / Web), so
     // closing the last document returns to where they came from
     TouchView lastNonDocView = TouchView::Library;

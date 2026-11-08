@@ -6802,6 +6802,7 @@ static void FrameUpdateUi(MainWindow* win) {
     if (IsTouchChrome(win)) {
         ShowOrHideToolbar(win);
     }
+    NoteNavPlace(win);
     bool updateToolbars = ui.updateToolbars;
     int sidebarDx = ui.sidebarDx;
     ui.updateToolbars = false;
@@ -10800,15 +10801,13 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             break;
 
         case CmdNavigateBack:
-            if (ctrl) {
-                ctrl->Navigate(-1);
-            }
+            NavigateAcrossPlaces(win, -1);
+            RepaintCaptionNavButtons(win);
             break;
 
         case CmdNavigateForward:
-            if (ctrl) {
-                ctrl->Navigate(1);
-            }
+            NavigateAcrossPlaces(win, 1);
+            RepaintCaptionNavButtons(win);
             break;
 
         case CmdToggleZoom:
@@ -11268,6 +11267,12 @@ static void HandleCaptionClick(MainWindow* win, int btnIdx) {
         case CB_SYSTEM_MENU:
             OpenSystemMenu(win);
             break;
+        case CB_NAV_BACK:
+            HwndSendCommand(win->hwndFrame, CmdNavigateBack);
+            break;
+        case CB_NAV_FORWARD:
+            HwndSendCommand(win->hwndFrame, CmdNavigateForward);
+            break;
     }
 }
 
@@ -11291,10 +11296,252 @@ bool UseSlimCaption(MainWindow* win) {
     return !SettingsUseTabs();
 }
 
+// Window-wide Back / Forward (touch chrome). The history is of places - a
+// browser tab, the Library, a document tab - so following a link in the
+// browser that opens a PDF can be undone with Back, which returns to the
+// browser. Within a place, Back / Forward first step through that place's own
+// history (the document's jumps, the browser tab's pages); only past its end
+// do they move to the previous / next place. A document's own history is
+// bounded by where it was when we arrived, so an older trail of jumps from an
+// earlier visit doesn't come first.
+
+constexpr int kMaxNavPlaces = 64;
+
+static int DocNavIdx(WindowTab* tab) {
+    DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
+    return dm ? dm->navHistoryIdx : -1;
+}
+
+static bool CurrentNavPlace(MainWindow* win, MainWindow::NavPlace& p) {
+    if (!IsTouchChrome(win)) {
+        return false;
+    }
+    p = {};
+    p.view = win->touchView == TouchView::Home ? TouchView::Library : win->touchView;
+    if (p.view == TouchView::Doc) {
+        WindowTab* tab = win->CurrentTab();
+        if (!tab || tab->IsNonDocumentTab()) {
+            return false;
+        }
+        p.tab = tab;
+    } else if (p.view == TouchView::Web) {
+        p.webTab = TouchBrowserActiveTabId(win);
+    }
+    return true;
+}
+
+static bool IsSameNavPlace(const MainWindow::NavPlace& a, const MainWindow::NavPlace& b) {
+    return a.view == b.view && a.tab == b.tab && a.webTab == b.webTab;
+}
+
+static bool IsNavPlaceValid(MainWindow* win, const MainWindow::NavPlace& p) {
+    if (p.view == TouchView::Doc) {
+        return win->GetTabIdx(p.tab) >= 0;
+    }
+    if (p.view == TouchView::Web) {
+        return !p.webTab || TouchBrowserHasTab(win, p.webTab);
+    }
+    return true;
+}
+
+// drops places whose tab has since been closed
+static void PruneNavPlaces(MainWindow* win) {
+    for (int i = len(win->navPlaces) - 1; i >= 0; i--) {
+        if (!IsNavPlaceValid(win, win->navPlaces[i])) {
+            win->navPlaces.RemoveAt(i);
+            if (i <= win->navPlaceIdx) {
+                win->navPlaceIdx--;
+            }
+        }
+    }
+    int n = len(win->navPlaces);
+    win->navPlaceIdx = n == 0 ? -1 : limitValue(win->navPlaceIdx, 0, n - 1);
+}
+
+// records the place on screen if it differs from the current history entry;
+// called on every UI update, which every way of changing place goes through
+void NoteNavPlace(MainWindow* win) {
+    if (!win || win->navPlaceMoving) {
+        return;
+    }
+    MainWindow::NavPlace cur;
+    if (!CurrentNavPlace(win, cur)) {
+        return;
+    }
+    PruneNavPlaces(win);
+    int idx = win->navPlaceIdx;
+    if (idx >= 0) {
+        MainWindow::NavPlace& last = win->navPlaces[idx];
+        if (IsSameNavPlace(last, cur)) {
+            return;
+        }
+        // the browser has just one view: a Web entry made before it had a tab
+        // is this tab
+        if (last.view == TouchView::Web && cur.view == TouchView::Web && !last.webTab) {
+            last.webTab = cur.webTab;
+            return;
+        }
+        if (last.view == TouchView::Doc) {
+            last.leaveNavIdx = DocNavIdx(last.tab);
+        }
+        // a new place: anything ahead of here can no longer be gone Forward to
+        win->navPlaces.RemoveAt(idx + 1, len(win->navPlaces) - idx - 1);
+    }
+    cur.enterNavIdx = DocNavIdx(cur.tab);
+    win->navPlaces.Append(cur);
+    if (len(win->navPlaces) > kMaxNavPlaces) {
+        win->navPlaces.RemoveAt(0);
+    }
+    win->navPlaceIdx = len(win->navPlaces) - 1;
+    RepaintCaptionNavButtons(win);
+}
+
+// the place `dir` steps away from the current one, skipping closed tabs; -1 if none
+static int AdjacentNavPlace(MainWindow* win, int dir) {
+    for (int i = win->navPlaceIdx + dir; i >= 0 && i < len(win->navPlaces); i += dir) {
+        if (IsNavPlaceValid(win, win->navPlaces[i])) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// can Back (dir < 0) / Forward (dir > 0) step within the current place?
+static bool CanNavigateWithinPlace(MainWindow* win, int dir) {
+    if (win->touchView == TouchView::Web) {
+        return TouchBrowserCanNavigate(win, dir);
+    }
+    if (win->touchView != TouchView::Doc || !win->ctrl || !win->ctrl->CanNavigate(dir)) {
+        return false;
+    }
+    int idx = win->navPlaceIdx;
+    if (idx < 0 || idx >= len(win->navPlaces) || win->navPlaces[idx].tab != win->CurrentTab()) {
+        return true;
+    }
+    const MainWindow::NavPlace& p = win->navPlaces[idx];
+    int navIdx = DocNavIdx(p.tab);
+    if (navIdx < 0) {
+        return true; // not a fixed-layout document: its whole history is ours
+    }
+    if (dir < 0) {
+        return p.enterNavIdx < 0 || navIdx > p.enterNavIdx;
+    }
+    // with a place ahead, only the jumps undone since we came back here
+    return AdjacentNavPlace(win, 1) < 0 || navIdx < p.leaveNavIdx;
+}
+
+bool CanNavigateAcrossPlaces(MainWindow* win, int dir) {
+    if (!IsTouchChrome(win)) {
+        return win->ctrl && win->ctrl->CanNavigate(dir);
+    }
+    return CanNavigateWithinPlace(win, dir) || AdjacentNavPlace(win, dir) >= 0;
+}
+
+static void GoToNavPlace(MainWindow* win, int idx) {
+    MainWindow::NavPlace& from = win->navPlaces[win->navPlaceIdx];
+    if (from.view == TouchView::Doc) {
+        from.leaveNavIdx = DocNavIdx(from.tab);
+    }
+    MainWindow::NavPlace to = win->navPlaces[idx];
+    win->navPlaceIdx = idx;
+    win->navPlaceMoving = true;
+    if (to.view == TouchView::Doc) {
+        if (win->touchView != TouchView::Doc) {
+            // leaves the browser / Library properly (hides the webview)
+            SetTouchView(win, TouchView::Doc);
+        }
+        SetTouchDocumentTab(win, win->GetTabIdx(to.tab));
+    } else {
+        SetTouchView(win, to.view);
+        if (to.view == TouchView::Web) {
+            TouchBrowserActivateTabById(win, to.webTab);
+        }
+    }
+    win->navPlaceMoving = false;
+    RepaintCaptionNavButtons(win);
+}
+
+void NavigateAcrossPlaces(MainWindow* win, int dir) {
+    if (!IsTouchChrome(win)) {
+        if (win->ctrl) {
+            win->ctrl->Navigate(dir);
+        }
+        return;
+    }
+    NoteNavPlace(win);
+    if (CanNavigateWithinPlace(win, dir)) {
+        if (win->touchView == TouchView::Web) {
+            TouchBrowserNavigate(win, dir);
+        } else {
+            win->ctrl->Navigate(dir);
+        }
+        RepaintCaptionNavButtons(win);
+        return;
+    }
+    int idx = AdjacentNavPlace(win, dir);
+    if (idx >= 0) {
+        GoToNavPlace(win, idx);
+    }
+}
+
+// Back / Forward sit right after the hamburger, left of the tabs, whenever a
+// document is open in the touch chrome. They stay put (just dimmed) on the
+// Library tab so the tab strip doesn't shift when switching tabs.
+static bool ShowCaptionNavButtons(MainWindow* win) {
+    if (!IsTouchChrome(win)) {
+        return false;
+    }
+    for (WindowTab* tab : win->Tabs()) {
+        if (!tab->IsNonDocumentTab()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool CaptionNavButtonEnabled(MainWindow* win, int btnIdx) {
+    return CanNavigateAcrossPlaces(win, btnIdx == CB_NAV_BACK ? -1 : 1);
+}
+
+// lays out Back then Forward in reading order, starting at x (LTR) or ending
+// at x (RTL); returns the width they took
+static int LayoutCaptionNavButtons(MainWindow* win, int x, int y, int dx, int dy, bool isRtl) {
+    if (!ShowCaptionNavButtons(win)) {
+        return 0;
+    }
+    int ids[2] = {CB_NAV_BACK, CB_NAV_FORWARD};
+    for (int i = 0; i < 2; i++) {
+        int bx = isRtl ? x - (i + 1) * dx : x + i * dx;
+        win->captionBtn[ids[i]].rect = {bx, y, dx, dy};
+        win->captionBtn[ids[i]].visible = true;
+    }
+    return 2 * dx;
+}
+
+// called when the navigation history may have changed (page change, tab switch)
+void RepaintCaptionNavButtons(MainWindow* win) {
+    if (!win || !win->hwndFrame) {
+        return;
+    }
+    for (int i : {CB_NAV_BACK, CB_NAV_FORWARD}) {
+        ButtonInfo& bi = win->captionBtn[i];
+        if (!bi.visible) {
+            continue;
+        }
+        bool enabled = CaptionNavButtonEnabled(win, i);
+        if (bi.navEnabled != enabled) {
+            bi.navEnabled = enabled;
+            HwndInvalidateRect(win->hwndFrame, bi.rect, false);
+        }
+    }
+}
+
 void RelayoutCaption(MainWindow* win) {
     for (int i = CB_BTN_FIRST; i < CB_BTN_COUNT; i++) {
         win->captionBtn[i].id = i;
     }
+    win->captionBtn[CB_NAV_BACK].visible = false;
+    win->captionBtn[CB_NAV_FORWARD].visible = false;
     Rect rc = win->captionRect;
     bool maximized = IsZoomed(win->hwndFrame);
     bool showingMenuBar = IsShowingMenuBarRebar(win);
@@ -11326,6 +11573,7 @@ void RelayoutCaption(MainWindow* win) {
         win->captionBtn[CB_MENU].rect = {x, rc.y, titleDy, titleDy};
         win->captionBtn[CB_MENU].visible = true;
         x += titleDy;
+        x += LayoutCaptionNavButtons(win, x, rc.y, titleDy, titleDy, false);
 
         right -= btnDx;
         win->captionBtn[CB_CLOSE].rect = {right, rc.y, btnDx, titleDy};
@@ -11559,6 +11807,7 @@ void RelayoutCaption(MainWindow* win) {
             right -= tabDy;
             win->captionBtn[CB_MENU].rect = {right, tabY, tabDy, tabDy};
             win->captionBtn[CB_MENU].visible = true;
+            right -= LayoutCaptionNavButtons(win, right, tabY, tabDy, tabDy, true);
             if (showUpdate) {
                 right -= updateDx;
                 win->captionBtn[CB_UPDATE].rect = {right, tabY, updateDx, tabDy};
@@ -11599,6 +11848,9 @@ void RelayoutCaption(MainWindow* win) {
             win->captionBtn[CB_MENU].visible = true;
             rc.x += tabDy;
             rc.dx -= tabDy;
+            int navDx = LayoutCaptionNavButtons(win, rc.x, tabY, tabDy, tabDy, false);
+            rc.x += navDx;
+            rc.dx -= navDx;
 
             if (showUpdate) {
                 rc.dx -= updateDx;
@@ -11631,6 +11883,8 @@ void RelayoutCaption(MainWindow* win) {
 
     UpdateTabWidth(win);
 
+    win->captionBtn[CB_NAV_BACK].navEnabled = CaptionNavButtonEnabled(win, CB_NAV_BACK);
+    win->captionBtn[CB_NAV_FORWARD].navEnabled = CaptionNavButtonEnabled(win, CB_NAV_FORWARD);
     for (int i = CB_BTN_FIRST; i < CB_BTN_COUNT; i++) {
         if (win->captionBtn[i].visible) {
             HwndInvalidateRect(win->hwndFrame, win->captionBtn[i].rect, false);
@@ -11820,6 +12074,47 @@ static void DrawCaptionButton(MainWindow* win, HDC hdc, ButtonInfo* bi) {
         SetTextColor(hdc, fg);
         HdcDrawText(hdc, _TRA("Update"), label, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
                     HdcGetUiFont(hdc, 12, FW_SEMIBOLD));
+    } else if (button == CB_NAV_BACK || button == CB_NAV_FORWARD) {
+        SolidBrush bgBrNav(GdiRgbFromCOLORREF(captionBg));
+        gfx.FillRectangle(&bgBrNav, rButton.x, rButton.y, rButton.dx, rButton.dy);
+        bool enabled = bi->navEnabled;
+        if (enabled && (stateId == CBS_HOT || stateId == CBS_PUSHED)) {
+            COLORREF hotBg = AccentColor(captionBg, stateId == CBS_PUSHED ? 40 : 20);
+            int inset = DpiScale(win->hwndFrame, 4);
+            Rect chip = rButton;
+            chip.Inflate(-inset, -inset);
+            int d = DpiScale(win->hwndFrame, 12);
+            Gdiplus::GraphicsPath chipPath;
+            chipPath.AddArc(chip.x, chip.y, d, d, 180.0f, 90.0f);
+            chipPath.AddArc(chip.x + chip.dx - d, chip.y, d, d, 270.0f, 90.0f);
+            chipPath.AddArc(chip.x + chip.dx - d, chip.y + chip.dy - d, d, d, 0.0f, 90.0f);
+            chipPath.AddArc(chip.x, chip.y + chip.dy - d, d, d, 90.0f, 90.0f);
+            chipPath.CloseFigure();
+            SolidBrush chipBr(GdiRgbFromCOLORREF(hotBg));
+            gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            gfx.FillPath(&chipBr, &chipPath);
+        }
+        u8 r, g, b;
+        UnpackColor(ThemeWindowTextColor(), r, g, b);
+        // dimmed when there's nowhere to go, like a disabled toolbar button
+        u8 alpha = enabled ? 255 : 80;
+        gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        float lineWidth = (float)DpiScale(win->hwndFrame, 18) / 10.0f;
+        Pen p(Color(alpha, r, g, b), lineWidth);
+        p.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
+        p.SetLineJoin(Gdiplus::LineJoinRound);
+        // a shaft with a chevron head, pointing back (left) or forward
+        bool pointLeft = (button == CB_NAV_BACK) != IsUIRtl();
+        float half = (float)DpiScale(win->hwndFrame, 7);
+        float head = (float)DpiScale(win->hwndFrame, 5);
+        float cx = (float)rc.x + (float)rc.dx / 2.0f;
+        float cy = (float)rc.y + (float)rc.dy / 2.0f;
+        float tipX = pointLeft ? cx - half : cx + half;
+        float tailX = pointLeft ? cx + half : cx - half;
+        float backX = pointLeft ? tipX + head : tipX - head;
+        Gdiplus::PointF chevron[3] = {{backX, cy - head}, {tipX, cy}, {backX, cy + head}};
+        gfx.DrawLine(&p, tipX, cy, tailX, cy);
+        gfx.DrawLines(&p, chevron, 3);
     } else if (button == CB_SYSTEM_MENU) {
         SolidBrush bgBrSys(GdiRgbFromCOLORREF(captionBg));
         gfx.FillRectangle(&bgBrSys, rButton.x, rButton.y, rButton.dx, rButton.dy);

@@ -28,6 +28,13 @@ bool IsTouchBrowserUrlEdit(MainWindow* win, HWND hwnd);
 void LayoutTouchWebView(MainWindow* win, Rect contentRc);
 void DestroyTouchWebView(MainWindow* win);
 void TouchWebGoHome(MainWindow* win);
+// the window-wide Back / Forward (see NoteNavPlace) step through the browser's
+// own history and switch between its tabs through these
+void* TouchBrowserActiveTabId(MainWindow* win);
+bool TouchBrowserHasTab(MainWindow* win, void* tabId);
+void TouchBrowserActivateTabById(MainWindow* win, void* tabId);
+bool TouchBrowserCanNavigate(MainWindow* win, int dir);
+void TouchBrowserNavigate(MainWindow* win, int dir);
 void TouchWebToggleBookmark(MainWindow* win);
 void RememberTouchBrowserSession(MainWindow* win, SessionData* data);
 void RestoreTouchBrowserSession(MainWindow* win, const SessionData* data);

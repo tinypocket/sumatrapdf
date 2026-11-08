@@ -1785,6 +1785,12 @@ void WebviewWnd::GoForward() {
     }
 }
 
+void WebviewWnd::Stop() {
+    if (webview) {
+        webview->Stop();
+    }
+}
+
 void WebviewWnd::SetZoomPercent(int zoom) {
     if (controller) {
         double factor = (double)zoom / 100.0;
@@ -2304,6 +2310,7 @@ TempStr WebviewWnd::GetDocumentTitle() const {
 }
 void WebviewWnd::GoBack() {}
 void WebviewWnd::GoForward() {}
+void WebviewWnd::Stop() {}
 void WebviewWnd::SetZoomPercent(int) {}
 int WebviewWnd::GetZoomPercent() const {
     return 100;

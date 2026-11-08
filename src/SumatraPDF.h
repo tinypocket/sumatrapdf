@@ -18,6 +18,11 @@ void CreateThumbnailFromFileAsync(Str filePath, int pageNo, const Func1<Rendered
 struct MainWindow;
 // true when the caption is the redesign's slim title strip rather than tabs
 bool UseSlimCaption(MainWindow*);
+void RepaintCaptionNavButtons(MainWindow*);
+// window-wide Back / Forward across browser tabs, the Library and documents
+void NoteNavPlace(MainWindow*);
+bool CanNavigateAcrossPlaces(MainWindow*, int dir);
+void NavigateAcrossPlaces(MainWindow*, int dir);
 
 constexpr int kFrameResizeHitTest = 5;
 
