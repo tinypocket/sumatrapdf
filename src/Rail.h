@@ -1,0 +1,43 @@
+/* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
+   License: GPLv3 */
+
+struct MainWindow;
+struct SessionData;
+enum class TouchPanelMode;
+enum class TouchView;
+
+// The icon rail and its five mutually-exclusive 4a panel modes.
+
+void CreateRail(MainWindow*);
+void DestroyRail(MainWindow*);
+void UpdateRailForWindow(MainWindow*);
+void UpdateRailAfterThemeChange(MainWindow*);
+int GetRailDx(MainWindow*);
+bool IsRailVisible(MainWindow*);
+void SetTouchPanelMode(MainWindow*, TouchPanelMode);
+void SetTouchView(MainWindow*, TouchView);
+void SetTouchSidebarCollapsed(MainWindow*, bool collapsed);
+void SetTouchDocumentTab(MainWindow*, int tabIndex);
+
+// in-product web browser shown for TouchView::Web (defined in SimpleBrowserWindow.cpp)
+void ShowTouchWebView(MainWindow* win, bool show);
+// Ctrl+L in the in-app browser: focus the address field with the whole address
+// selected (SimpleBrowserWindow.cpp)
+void TouchBrowserFocusAddressBar(MainWindow* win);
+bool IsTouchBrowserUrlEdit(MainWindow* win, HWND hwnd);
+void LayoutTouchWebView(MainWindow* win, Rect contentRc);
+void DestroyTouchWebView(MainWindow* win);
+void TouchWebGoHome(MainWindow* win);
+// the window-wide Back / Forward (see NoteNavPlace) step through the browser's
+// own history and switch between its tabs through these
+// browser tabs by serial (unique for the process, never reused); 0 = none
+int TouchBrowserActiveTabSerial(MainWindow* win);
+bool TouchBrowserHasTab(MainWindow* win, int serial);
+void TouchBrowserActivateTabBySerial(MainWindow* win, int serial);
+bool TouchBrowserCanNavigate(MainWindow* win, int dir);
+void TouchBrowserNavigate(MainWindow* win, int dir);
+void TouchWebToggleBookmark(MainWindow* win);
+void RememberTouchBrowserSession(MainWindow* win, SessionData* data);
+void RestoreTouchBrowserSession(MainWindow* win, const SessionData* data);
+// the night light setting changed: re-tint every tab's page
+void TouchBrowserApplyNightLight(MainWindow* win);

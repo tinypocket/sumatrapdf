@@ -354,3 +354,104 @@ CLSID GetGdiPlusEncoderClsid(WStr format) {
     }
     return null;
 }
+
+// --- anti-aliased shapes -----------------------------------------------------
+
+void SetSmoothPixelAligned(Gdiplus::Graphics& gfx) {
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    // integer coordinates on pixel edges: a shape from x to x+dx covers pixels
+    // x..x+dx-1 exactly, and its straight edges land on whole pixels
+    gfx.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+}
+
+static Gdiplus::Color GdipColor(COLORREF c) {
+    return Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c));
+}
+
+static void AddRoundRectPathF(Gdiplus::GraphicsPath& path, float x, float y, float dx, float dy, float radius) {
+    float d = std::min(radius * 2.0f, std::min(dx, dy));
+    if (d <= 1.0f) {
+        path.AddRectangle(Gdiplus::RectF(x, y, dx, dy));
+        return;
+    }
+    path.AddArc(x, y, d, d, 180.0f, 90.0f);
+    path.AddArc(x + dx - d, y, d, d, 270.0f, 90.0f);
+    path.AddArc(x + dx - d, y + dy - d, d, d, 0.0f, 90.0f);
+    path.AddArc(x, y + dy - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+}
+
+void AddRoundRectPath(Gdiplus::GraphicsPath& path, const Rect& r, int radius) {
+    AddRoundRectPathF(path, (float)r.x, (float)r.y, (float)r.dx, (float)r.dy, (float)radius);
+}
+
+// An outline `width` pixels wide along the inside of `r`. The pen straddles its
+// path, so the path runs half a pen width in; drawn as one band, a thin border
+// keeps its weight around the curves (two stacked fills anti-alias both of its
+// edges separately and the band goes pale).
+static void StrokeInside(Gdiplus::Graphics& gfx, const Rect& r, int radius, COLORREF col, int width) {
+    float hw = (float)width / 2.0f;
+    Gdiplus::GraphicsPath path;
+    AddRoundRectPathF(path, (float)r.x + hw, (float)r.y + hw, (float)r.dx - (float)width, (float)r.dy - (float)width,
+                      std::max(0.0f, (float)radius - hw));
+    Gdiplus::Pen pen(GdipColor(col), (Gdiplus::REAL)width);
+    gfx.DrawPath(&pen, &path);
+}
+
+void FillRoundRectAA(Gdiplus::Graphics& gfx, const Rect& r, int radius, COLORREF fill, COLORREF border, int borderDx) {
+    if (r.dx <= 0 || r.dy <= 0) {
+        return;
+    }
+    Gdiplus::GraphicsPath path;
+    AddRoundRectPath(path, r, radius);
+    Gdiplus::SolidBrush br(GdipColor(fill));
+    gfx.FillPath(&br, &path);
+    bool hasBorder = border != kColorUnset && border != fill && borderDx > 0;
+    if (hasBorder && r.dx > 2 * borderDx && r.dy > 2 * borderDx) {
+        StrokeInside(gfx, r, radius, border, borderDx);
+    }
+}
+
+void FillRoundRectAA(HDC hdc, const Rect& r, int radius, COLORREF fill, COLORREF border, int borderDx) {
+    Gdiplus::Graphics gfx(hdc);
+    SetSmoothPixelAligned(gfx);
+    FillRoundRectAA(gfx, r, radius, fill, border, borderDx);
+}
+
+void StrokeRoundRectAA(HDC hdc, const Rect& r, int radius, COLORREF col, int width) {
+    if (r.dx <= 0 || r.dy <= 0 || width <= 0) {
+        return;
+    }
+    Gdiplus::Graphics gfx(hdc);
+    SetSmoothPixelAligned(gfx);
+    StrokeInside(gfx, r, radius, col, width);
+}
+
+void FillEllipseAA(HDC hdc, const Rect& r, COLORREF fill) {
+    if (r.dx <= 0 || r.dy <= 0) {
+        return;
+    }
+    Gdiplus::Graphics gfx(hdc);
+    SetSmoothPixelAligned(gfx);
+    Gdiplus::SolidBrush br(GdipColor(fill));
+    gfx.FillEllipse(&br, r.x, r.y, r.dx, r.dy);
+}
+
+void DrawPolylineAA(HDC hdc, const Point* pts, int nPts, COLORREF col, int width) {
+    if (nPts < 2 || width <= 0) {
+        return;
+    }
+    Gdiplus::Graphics gfx(hdc);
+    // centred on the pixels the points name, as a GDI pen draws: no half-pixel
+    // offset here, or a line would straddle two rows
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::Pen pen(GdipColor(col), (Gdiplus::REAL)width);
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    Vec<Gdiplus::Point> gp;
+    for (int i = 0; i < nPts; i++) {
+        gp.Append(Gdiplus::Point(pts[i].x, pts[i].y));
+    }
+    gfx.DrawLines(&pen, gp.LendData(), nPts);
+}

@@ -25,6 +25,9 @@ struct LabelWithCloseWnd : Wnd {
     Size GetIdealSize();
 
     int cmdId = 0;
+    // when false, no close button is drawn or hit-tested (the panel is toggled
+    // elsewhere, e.g. the icon rail)
+    bool showClose = true;
 
     Rect closeBtnPos{};
 

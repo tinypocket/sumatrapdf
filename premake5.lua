@@ -1385,8 +1385,10 @@ workspace "SumatraPDF"
       "..\\bin\\MakeLZSA.exe ..\\.work\\translations.txt.lzsa ..\\.work\\translations.txt:translations.txt",
     }
 
-  -- a dll version where most functionality is in libsumatrapdf.dll
-  project "SumatraPDF"
+  -- Shared configuration for the small DLL-backed application executable.
+  -- SumatraPDF-app deliberately has no embedded installer archive; SumatraPDF
+  -- adds that resource below and is the separate installer executable.
+  local function configure_sumatrapdf_dll_app()
     dll_app_objdir()
     dll_linker_intermediates()
     kind "WindowedApp"
@@ -1458,8 +1460,6 @@ workspace "SumatraPDF"
 
     disablewarnings { "4819" }
 
-    resdefines { "INSTALL_PAYLOAD_ZIP=.\\%{cfg.targetdir}\\InstallerData.dat" }
-
     files { "src/MuPDF_Exports.cpp" }
 
     -- MarkdownToc / Archive.cpp / ChmFile use cmark + libarchive + unrar +
@@ -1484,20 +1484,12 @@ workspace "SumatraPDF"
     -- a DLL planted next to the exe can't be side-loaded. doesn't affect
     -- delay-loaded libsumatrapdf.dll which LoadLibsumatrapdf() loads by full path
     linkoptions { "/DEPENDENTLOADFLAG:0x800" }
-    dependson { "PdfFilter", "PdfPreview", "test_util", "sumatrapdf-tool" }
     -- translations are not checked in; seed an empty .work/translations.txt when
     -- missing so CI (no APPTRANSLATOR secret) can still pack the RC resource.
     prebuildcommands {
       "if not exist ..\\.work mkdir ..\\.work",
       "if not exist ..\\.work\\translations.txt type nul > ..\\.work\\translations.txt",
       "..\\bin\\MakeLZSA.exe ..\\.work\\translations.txt.lzsa ..\\.work\\translations.txt:translations.txt",
-    }
-    -- Only pack InstallerData.dat when missing. Signed release builds create it
-    -- after signtool (so the archive holds signed DLLs); a rebuild of
-    -- libsumatrapdf deletes InstallerData.dat so regular builds are not stuck
-    -- with a stale pack.
-    prebuildcommands {
-      "cd %{cfg.targetdir} & if not exist InstallerData.dat ..\\..\\bin\\MakeLZSA.exe InstallerData.dat libsumatrapdf.dll:libsumatrapdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe",
     }
     -- /INFERASANLIBS pulls in the *dynamic* ASan runtime, so
     -- clang_rt.asan_dynamic-x86_64.dll must sit next to the exe or it
@@ -1510,6 +1502,32 @@ workspace "SumatraPDF"
         'copy /y "$(VCToolsInstallDir)bin\\Hostx64\\x64\\clang_rt.asan_dynamic-x86_64.dll" "$(OutDir)"'
       }
     filter {}
+  end
+
+  project "SumatraPDF-app"
+    configure_sumatrapdf_dll_app()
+    -- A changed app-only executable must be repacked into the installer on the
+    -- next SumatraPDF build even when libsumatrapdf.dll itself did not change.
+    for_each_out_config(function(platform, config, outDir)
+      filter { platform, config }
+      postbuildcommands {
+        "if exist ..\\" .. outDir:gsub("/", "\\") .. "\\InstallerData.dat del /f /q ..\\" .. outDir:gsub("/", "\\") .. "\\InstallerData.dat",
+      }
+    end)
+    filter {}
+
+  -- Installer executable. It carries the app-only EXE and supporting DLLs in
+  -- InstallerData.dat, but the installed SumatraPDF+.exe is the app-only file.
+  project "SumatraPDF"
+    configure_sumatrapdf_dll_app()
+    resdefines { "INSTALL_PAYLOAD_ZIP=.\\%{cfg.targetdir}\\InstallerData.dat" }
+    dependson { "PdfFilter", "PdfPreview", "test_util", "sumatrapdf-tool", "SumatraPDF-app" }
+    -- Only pack InstallerData.dat when missing. Signed release builds create it
+    -- after signtool (so the archive holds signed binaries); rebuilds of either
+    -- libsumatrapdf or SumatraPDF-app delete it to prevent a stale payload.
+    prebuildcommands {
+      "cd %{cfg.targetdir} & if not exist InstallerData.dat ..\\..\\bin\\MakeLZSA.exe InstallerData.dat SumatraPDF-app.exe:SumatraPDF+.exe libsumatrapdf.dll:libsumatrapdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe",
+    }
 
   -- Visual Studio solution folders (NestedProjects). Assigned after project
   -- declarations so we don't have to reorder the large project blocks above.

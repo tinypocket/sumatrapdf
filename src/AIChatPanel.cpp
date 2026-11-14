@@ -30,6 +30,7 @@
 #include "Theme.h"
 #include "DarkModeSubclass.h"
 #include "resource.h"
+#include "Version.h"
 
 #include "AIChatCommon.h"
 #include "AIChatPanel.h"
@@ -875,8 +876,8 @@ static void EnsureWebViewReady(MainWindow* win) {
     auto* webView = new WebviewWnd();
     TempStr localAppData = GetSpecialFolderTemp(CSIDL_LOCAL_APPDATA);
     // use unique data dir per process to avoid locking conflicts
-    webView->dataDir =
-        str::Dup(fmt("%s\\SumatraPDF\\%s_%d", localAppData, p->webViewDataDirPrefix, (int)GetCurrentProcessId()));
+    webView->dataDir = str::Dup(
+        fmt("%s\\%s\\%s_%d", localAppData, StrL(kAppName), p->webViewDataDirPrefix, (int)GetCurrentProcessId()));
     if (!LockDataResource(IDR_CLAUDE_MARKED_JS, &gAIChatMarkedJs)) {
         delete webView;
         return;

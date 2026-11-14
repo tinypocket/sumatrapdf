@@ -7,7 +7,7 @@ enum class UpdateCheck {
 };
 
 void StartAsyncUpdateCheck(MainWindow* win, UpdateCheck updateCheckType);
-// download + install the update surfaced by the pre-release update notification
+bool IsUpdateAvailable();
 void DownloadAndInstallPendingUpdate(MainWindow* win);
 void StartInstallerAutoUpgrade(Str installerPath);
 void UpdateSelfTo(Str path);

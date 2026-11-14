@@ -202,7 +202,10 @@ NextDir:
         it->pattern = path::Join(ws, WStrL(L"*"));
         it->h = FindFirstFileW(it->pattern.s, &it->fd);
         if (!IsValidHandle(it->h)) {
-            goto DidFinish;
+            // an unreadable subdirectory (access denied, a cloud placeholder
+            // that failed to hydrate) must not end the whole recursive walk
+            CloseDirIter(it);
+            goto NextDir;
         }
     } else {
         ok = FindNextFileW(it->h, &it->fd);

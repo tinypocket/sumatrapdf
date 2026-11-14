@@ -49,21 +49,23 @@ static void PaintHDC(LabelWithCloseWnd* w, HDC hdc, const PAINTSTRUCT& ps) {
     // size (within reason)
     bool isRtl = HwndIsRtl(w->hwnd);
     // TODO: make this work in rtl
-    if (!isRtl) {
+    if (!isRtl && w->showClose) {
         x = w->closeBtnPos.x - DpiScale(w->hwnd, kButtonSpaceDx);
         Rect ri(x, 0, cr.dx - x, cr.dy);
         RECT r = ToRECT(ri);
         HdcFillRect(hdc, ToRect(r), br);
     }
-    Point curPos = HwndGetCursorPos(w->hwnd);
-    // TODO: hack
-    UnmirrorRtl(w->hwnd, curPos);
-    DrawCloseButtonArgs args;
-    args.hdc = hdc;
-    args.r = w->closeBtnPos;
-    args.isHover = w->closeBtnPos.Contains(curPos);
-    // args.noMirror = true;
-    DrawCloseButton(args);
+    if (w->showClose) {
+        Point curPos = HwndGetCursorPos(w->hwnd);
+        // TODO: hack
+        UnmirrorRtl(w->hwnd, curPos);
+        DrawCloseButtonArgs args;
+        args.hdc = hdc;
+        args.r = w->closeBtnPos;
+        args.isHover = w->closeBtnPos.Contains(curPos);
+        // args.noMirror = true;
+        DrawCloseButton(args);
+    }
 
     if (w->font) {
         SelectObject(hdc, prevFont);
@@ -159,7 +161,7 @@ void LabelWithCloseWnd::Layout() {
     if (dy > btnDy) {
         y = (dy - btnDy) / 2;
     }
-    closeBtnPos = Rect(x, y, btnDx, btnDy);
+    closeBtnPos = showClose ? Rect(x, y, btnDx, btnDy) : Rect{};
     // logf("closeBtnPos: (%d,%d) size: (%d, %d)\n", x, y, btnDx, btnDy);
     HwndScheduleRepaint(hwnd);
 }
