@@ -27,6 +27,9 @@ void FreeTouchWordIndex(MainWindow*);
 // driving the find (then win->hwndFindEdit is the source, as it always was)
 TempStr TouchSearchPanelQueryTemp(MainWindow*);
 void SetTouchPanelModeAndRestoreSearch(MainWindow*, TouchPanelMode);
+// drops any gesture in flight on the side panel (finger scroll, coast,
+// favorite drag, press highlight); for capture loss and mode switches
+void ResetTouchPanelGesture(MainWindow*);
 int TouchSidebarRowDy();
 // the bookmarks tree's row height, a size down while the pane is narrow
 int TocTreeRowDy(MainWindow*);

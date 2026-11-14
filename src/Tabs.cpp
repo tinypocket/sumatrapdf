@@ -941,6 +941,18 @@ bool SelectTouchHomeTab(MainWindow* win) {
     return true;
 }
 
+bool HasTouchDocumentTab(MainWindow* win) {
+    if (!win) {
+        return false;
+    }
+    for (WindowTab* tab : win->Tabs()) {
+        if (tab && !tab->IsNonDocumentTab()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool SelectTouchDocumentTab(MainWindow* win) {
     if (!win) {
         return false;

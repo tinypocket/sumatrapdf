@@ -3596,6 +3596,34 @@ static void SetTouchPanelPressed(MainWindow* win, Point pt, bool down) {
     HwndInvalidate(win->hwndTocBox, false);
 }
 
+// The panel's gestures are: Idle; a finger Down (maybe a tap) or Scrolling,
+// owned by touchPanelPointerId + touchPanelKs; a coast after release; and a
+// mouse press on a favorite that becomes a reorder Drag once it moves
+// (gFavDrag*). Any of them can be cut short - capture taken by a popup or
+// Alt-Tab, the panel switched to another mode - and each piece must then go
+// back to Idle together, or the next release acts on a gesture nobody made.
+void ResetTouchPanelGesture(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    win->touchPanelPointerId = 0;
+    win->touchPanelPointerMoved = false;
+    win->touchPanelCaughtCoast = false;
+    KsStop(win->touchPanelKs);
+    if (gFavDragWin == win) {
+        ResetFavDrag();
+        if (win->hwndTocBox && GetCapture() == win->hwndTocBox) {
+            ReleaseCapture();
+        }
+    }
+    if (gPanelPressWin == win) {
+        SetTouchPanelPressed(win, Point{}, false);
+    }
+    if (win->hwndTocBox) {
+        HwndInvalidate(win->hwndTocBox, false);
+    }
+}
+
 static void PaintTouchPanelPress(MainWindow* win, HDC hdc) {
     if (gPanelPressWin != win) {
         return;
@@ -3964,10 +3992,25 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             CloseTouchDocumentOverlays(win);
             break;
 
+        case WM_CAPTURECHANGED:
+            // a mouse press on a favorite owns the capture until release;
+            // losing it (popup, Alt-Tab) ends the press, not just pauses it
+            if (gFavDragWin == win && (HWND)lp != hwnd) {
+                ResetFavDrag();
+                SetTouchPanelPressed(win, Point{}, false);
+                HwndInvalidate(hwnd, false);
+            }
+            break;
+
         case WM_MOUSEMOVE:
             if (gFavDragWin == win && gFavDragFromRow >= 0) {
                 Vec<TouchFavRow> rows;
                 CollectTouchFavRows(rows);
+                if (gFavDragFromRow >= len(rows)) {
+                    // the favorites changed under the drag
+                    ResetTouchPanelGesture(win);
+                    return 0;
+                }
                 int idx = TouchFavRowAt(win, GET_Y_LPARAM(lp), len(rows));
                 // only within the same document, and never onto a heading
                 if (idx >= 0 && !rows[idx].isHeader && rows[idx].fs == rows[gFavDragFromRow].fs) {
@@ -4094,8 +4137,8 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 
         case WM_POINTERCAPTURECHANGED:
             if (LOWORD(wp) == win->touchPanelPointerId) {
-                win->touchPanelPointerId = 0;
-                win->touchPanelPointerMoved = false;
+                // the finger is gone without a release: no fling, no tap
+                ResetTouchPanelGesture(win);
                 return 0;
             }
             break;

@@ -59,14 +59,38 @@ static const Str updateInfoURLs[] = {
 #endif
 // clang-format on
 
-// prevent multiple update tasks from happening simultaneously
-// (this might e.g. happen if a user checks manually very quickly after startup)
-static bool gUpdateCheckInProgress = false;
+// What the update machinery is doing. One thing at a time:
+//   Idle --StartAsyncUpdateCheck--> Checking --UpdateCheckFinish--> Idle
+//   Idle | Checking --user confirms (Update button, toast, dialog)--> Downloading
+//   Downloading --DownloadUpdateFinish--> Idle (+ installs, or the update is
+//                                         pending again after a failure)
+// A download can overtake a check (Update clicked while a manual check runs):
+// the check's answer is then stale and is dropped when it lands, so the user is
+// never asked twice. Whether an update is available is separate: gPendingUpdate
+// (it shows the caption's Update button) and is kept through a failed download
+// so there is always a way to retry.
+enum class UpdatePhase {
+    Idle,
+    Checking,
+    Downloading,
+};
+static UpdatePhase gUpdatePhase = UpdatePhase::Idle;
 
-// when true, NotifyUserOfUpdate skips the install-confirmation dialog and just
-// installs (set when the user clicks "Download and update" in the pre-release
-// update notification)
-static bool gUpdateAutoInstall = false;
+static Str UpdatePhaseName(UpdatePhase phase) {
+    switch (phase) {
+        case UpdatePhase::Checking:
+            return StrL("checking");
+        case UpdatePhase::Downloading:
+            return StrL("downloading");
+        default:
+            return StrL("idle");
+    }
+}
+
+static void SetUpdatePhase(UpdatePhase phase) {
+    logf("update: %s -> %s\n", UpdatePhaseName(gUpdatePhase), UpdatePhaseName(phase));
+    gUpdatePhase = phase;
+}
 
 struct UpdateInfo {
     HWND hwndParent = nullptr;
@@ -210,8 +234,8 @@ static UpdateInfo* ParseUpdateInfo(Str d) {
 }
 
 static bool ShouldCheckForUpdate(UpdateCheck updateCheckType) {
-    if (gUpdateCheckInProgress) {
-        logf("CheckForUpdate: skipping because gUpdateCheckInProgress\n");
+    if (gUpdatePhase != UpdatePhase::Idle) {
+        logf("CheckForUpdate: skipping, already %s\n", UpdatePhaseName(gUpdatePhase));
         return false;
     }
 
@@ -327,22 +351,6 @@ enum class UpdateChoice {
 static void StartUpdateDownload(HWND hwndForNotif, UpdateInfo* updateInfo, bool installWhenDone);
 
 static UpdateChoice NotifyUserOfUpdate(UpdateInfo* updateInfo) {
-    auto installerPathAuto = updateInfo->installerPath;
-    // auto-install path: the user already opted in via the "Download and update"
-    // link, so skip the confirmation dialog and just install (issue: pre-release
-    // one-click update)
-    if (gUpdateAutoInstall) {
-        gUpdateAutoInstall = false;
-        SaveSettings(); // persist timeOfLastUpdateCheck
-        if (installerPathAuto && file::Exists(installerPathAuto)) {
-            StartInstallerAutoUpgrade(installerPathAuto);
-            ExitAfterStartingUpdater();
-        } else {
-            logf("NotifyUserOfUpdate: auto-install requested but installer not downloaded\n");
-        }
-        return UpdateChoice::Dismiss;
-    }
-
     auto mainInstr = _TRA("New version available");
     auto ver = updateInfo->latestVer;
     auto fmtStr = _TRA("You have version '%s' and version '%s' is available.\nDo you want to install the new version?");
@@ -420,6 +428,9 @@ struct UpdateProgressData {
 struct DownloadUpdateAsyncData {
     HWND hwndForNotif = nullptr;
     UpdateInfo* updateInfo = nullptr;
+    // the user already said yes (Update button, toast, dialog): install as
+    // soon as it lands instead of asking again
+    bool installWhenDone = false;
     HttpProgress httpProgress = {};
 
     DownloadUpdateAsyncData() = default;
@@ -430,11 +441,41 @@ static void DownloadUpdateFinish(DownloadUpdateAsyncData* data) {
     auto* hwndForNotif = data->hwndForNotif;
     auto* updateInfo = data->updateInfo;
     data->updateInfo = nullptr;
+    bool installWhenDone = data->installWhenDone;
+    delete data;
+    SetUpdatePhase(UpdatePhase::Idle);
     RemoveNotificationsForGroup(hwndForNotif, kNotifUpdateCheckInProgress);
+
+    bool downloaded = updateInfo->installerPath && file::Exists(updateInfo->installerPath);
+    if (!downloaded) {
+        // Failed (network, size cap, bad signature). It used to be dropped
+        // with only a log line, after the Update button had already gone, so
+        // there was no feedback and no way to retry short of a restart.
+        logf("DownloadUpdateFinish: the download of '%s' failed\n", updateInfo->dlURL);
+        TempStr msg =
+            fmt("Couldn't download SumatraPDF+ %s. Use the Update button to try again.", updateInfo->latestVer);
+        SetPendingUpdate(updateInfo);
+        if (IsWindow(hwndForNotif)) {
+            NotificationCreateArgs nargs;
+            nargs.hwndParent = hwndForNotif;
+            nargs.msg = msg;
+            nargs.warning = true;
+            nargs.groupId = kNotifUpdateCheckInProgress;
+            nargs.timeoutMs = 10 * 1000;
+            nargs.corner = NotifCorner::BottomLeft;
+            ShowNotification(nargs);
+        }
+        return;
+    }
+    if (installWhenDone) {
+        SaveSettings(); // persist timeOfLastUpdateCheck
+        StartInstallerAutoUpgrade(updateInfo->installerPath);
+        delete updateInfo;
+        ExitAfterStartingUpdater();
+        return;
+    }
     NotifyUserOfUpdate(updateInfo);
     delete updateInfo;
-    gUpdateCheckInProgress = false;
-    delete data;
 }
 
 static void UpdateDownloadProgressNotif(UpdateProgressData* data) {
@@ -504,6 +545,10 @@ void DownloadAndInstallPendingUpdate(MainWindow* win) {
     if (!win || !gPendingUpdate) {
         return;
     }
+    if (gUpdatePhase == UpdatePhase::Downloading) {
+        logf("DownloadAndInstallPendingUpdate: already downloading\n");
+        return;
+    }
     UpdateInfo* updateInfo = gPendingUpdate;
     gPendingUpdate = nullptr;
     RefreshUpdateButtons();
@@ -523,7 +568,15 @@ void DownloadAndInstallPendingUpdate(MainWindow* win) {
 // explicit user action - the caption's Update button, the toast's "Update now",
 // or the confirmation dialog - so an update never downloads on its own.
 static void StartUpdateDownload(HWND hwndForNotif, UpdateInfo* updateInfo, bool installWhenDone) {
-    gUpdateAutoInstall = installWhenDone;
+    // the update being fetched is no longer "available": the button goes until
+    // the download succeeds (installs) or fails (comes back)
+    if (gPendingUpdate && gPendingUpdate != updateInfo) {
+        delete gPendingUpdate;
+        gPendingUpdate = nullptr;
+        RefreshUpdateButtons();
+    }
+    // a manual check's "Checking..." shares the group; this replaces it
+    RemoveNotificationsForGroup(hwndForNotif, kNotifUpdateCheckInProgress);
 
     // progress notification updated by UpdateDownloadProgressNotif (same group)
     NotificationCreateArgs nargs;
@@ -537,10 +590,11 @@ static void StartUpdateDownload(HWND hwndForNotif, UpdateInfo* updateInfo, bool 
     nargs.yMargin = 2;
     ShowNotification(nargs);
 
-    gUpdateCheckInProgress = true;
+    SetUpdatePhase(UpdatePhase::Downloading);
     auto* fnData = new DownloadUpdateAsyncData;
     fnData->hwndForNotif = hwndForNotif;
     fnData->updateInfo = updateInfo;
+    fnData->installWhenDone = installWhenDone;
     auto fn = MkFunc0<DownloadUpdateAsyncData>(DownloadUpdateAsync, fnData);
     RunAsync(fn, "DownloadUpdateAsync");
 }
@@ -770,8 +824,8 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
             nargs.groupId = kNotifUpdateCheckInProgress;
             nargs.timeoutMs = 10 * 1000;
             nargs.corner = NotifCorner::BottomLeft;
-            nargs.msg = fmt("SumatraPDF+ %s is available. [Update now](CmdInstallPrereleaseUpdate)",
-                            updateInfo->latestVer);
+            nargs.msg =
+                fmt("SumatraPDF+ %s is available. [Update now](CmdInstallPrereleaseUpdate)", updateInfo->latestVer);
             ShowNotification(nargs);
         }
         return 0;
@@ -846,9 +900,14 @@ struct UpdateCheckAsyncData {
 
 static void UpdateCheckFinish(UpdateCheckAsyncData* data) {
     log("UpdateCheckFinish\n");
-    gUpdateCheckInProgress = false;
-
     AutoDelete delData(data);
+    if (gUpdatePhase != UpdatePhase::Checking) {
+        // a download the user started meanwhile overtook this check; its
+        // answer is stale and acting on it would ask them a second time
+        logf("UpdateCheckFinish: dropped, the update is already %s\n", UpdatePhaseName(gUpdatePhase));
+        return;
+    }
+    SetUpdatePhase(UpdatePhase::Idle);
 
     auto updateCheckType = data->updateCheckType;
     auto* rsp = data->rsp;
@@ -922,7 +981,7 @@ void StartAsyncUpdateCheck(MainWindow* win, UpdateCheck updateCheckType) {
         ShowNotification(args);
     }
     GetSystemTimeAsFileTime(&gGlobalPrefs->timeOfLastUpdateCheck);
-    gUpdateCheckInProgress = true;
+    SetUpdatePhase(UpdatePhase::Checking);
 
     // data freed in UpdateCheckFinish()
     auto* data = new UpdateCheckAsyncData();

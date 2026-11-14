@@ -1066,9 +1066,15 @@ static void SmartMarginScanFinishedUi(SmartMarginScan* s) {
     DisplayModel* dm = s->dm;
     if (SmartScanIsCurrent(dm, s->gen)) {
         dm->smartScanRunning = false;
-        dm->smartHfChecked = true;
-        dm->smartHfTopPt = s->hfTopPt;
-        dm->smartHfBottomPt = s->hfBottomPt;
+        // a scan run with header detection off never looked for the bands:
+        // its zeros mean "not looked", not "none found", and marking them
+        // checked made the Trim dialog's suggestion (DetectRunningHeaderFooter)
+        // skip its own look and propose nothing
+        if (s->detectRunningBands) {
+            dm->smartHfChecked = true;
+            dm->smartHfTopPt = s->hfTopPt;
+            dm->smartHfBottomPt = s->hfBottomPt;
+        }
         dm->pageBodies.Reset();
         for (int i = 0; i < len(s->results); i++) {
             const DisplayModel::PageBodyCache& r = s->results[i];

@@ -4901,11 +4901,14 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
     // Under touch chrome, closing the only open document returns to the Recent
     // (Home) view instead of closing the window, so a single-file window always
     // has somewhere to land. quitIfLast still closes the app (e.g. File > Exit).
+    // "Other document" means what HasTouchDocumentTab means: a Favorites tab
+    // left behind is not one, so closing the last real document still lands
+    // in the Library instead of on that tab.
     if (!quitIfLast && !tab->IsAboutTab() && IsTouchChrome(win)) {
         bool hasOtherDoc = false;
         for (int i = 0; i < win->TabCount(); i++) {
             WindowTab* t = win->GetTab(i);
-            if (t && t != tab && !t->IsAboutTab()) {
+            if (t && t != tab && !t->IsNonDocumentTab()) {
                 hasOtherDoc = true;
                 break;
             }
@@ -11307,9 +11310,22 @@ bool UseSlimCaption(MainWindow* win) {
 
 constexpr int kMaxNavPlaces = 64;
 
+static WindowTab* FindTabBySerial(MainWindow* win, int serial) {
+    for (WindowTab* tab : win->Tabs()) {
+        if (serial && tab->serial == serial) {
+            return tab;
+        }
+    }
+    return nullptr;
+}
+
 static int DocNavIdx(WindowTab* tab) {
     DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
     return dm ? dm->navHistoryIdx : -1;
+}
+
+static int DocNavIdx(MainWindow* win, const MainWindow::NavPlace& p) {
+    return p.view == TouchView::Doc ? DocNavIdx(FindTabBySerial(win, p.tabSerial)) : -1;
 }
 
 static bool CurrentNavPlace(MainWindow* win, MainWindow::NavPlace& p) {
@@ -11323,23 +11339,23 @@ static bool CurrentNavPlace(MainWindow* win, MainWindow::NavPlace& p) {
         if (!tab || tab->IsNonDocumentTab()) {
             return false;
         }
-        p.tab = tab;
+        p.tabSerial = tab->serial;
     } else if (p.view == TouchView::Web) {
-        p.webTab = TouchBrowserActiveTabId(win);
+        p.webTabSerial = TouchBrowserActiveTabSerial(win);
     }
     return true;
 }
 
 static bool IsSameNavPlace(const MainWindow::NavPlace& a, const MainWindow::NavPlace& b) {
-    return a.view == b.view && a.tab == b.tab && a.webTab == b.webTab;
+    return a.view == b.view && a.tabSerial == b.tabSerial && a.webTabSerial == b.webTabSerial;
 }
 
 static bool IsNavPlaceValid(MainWindow* win, const MainWindow::NavPlace& p) {
     if (p.view == TouchView::Doc) {
-        return win->GetTabIdx(p.tab) >= 0;
+        return FindTabBySerial(win, p.tabSerial) != nullptr;
     }
     if (p.view == TouchView::Web) {
-        return !p.webTab || TouchBrowserHasTab(win, p.webTab);
+        return !p.webTabSerial || TouchBrowserHasTab(win, p.webTabSerial);
     }
     return true;
 }
@@ -11364,11 +11380,13 @@ void NoteNavPlace(MainWindow* win) {
     if (!win || win->navPlaceMoving) {
         return;
     }
+    // first, even when the current place isn't one we record (e.g. a
+    // Favorites tab): Back / Forward read the entries right after this
+    PruneNavPlaces(win);
     MainWindow::NavPlace cur;
     if (!CurrentNavPlace(win, cur)) {
         return;
     }
-    PruneNavPlaces(win);
     int idx = win->navPlaceIdx;
     if (idx >= 0) {
         MainWindow::NavPlace& last = win->navPlaces[idx];
@@ -11377,17 +11395,17 @@ void NoteNavPlace(MainWindow* win) {
         }
         // the browser has just one view: a Web entry made before it had a tab
         // is this tab
-        if (last.view == TouchView::Web && cur.view == TouchView::Web && !last.webTab) {
-            last.webTab = cur.webTab;
+        if (last.view == TouchView::Web && cur.view == TouchView::Web && !last.webTabSerial) {
+            last.webTabSerial = cur.webTabSerial;
             return;
         }
         if (last.view == TouchView::Doc) {
-            last.leaveNavIdx = DocNavIdx(last.tab);
+            last.leaveNavIdx = DocNavIdx(win, last);
         }
         // a new place: anything ahead of here can no longer be gone Forward to
         win->navPlaces.RemoveAt(idx + 1, len(win->navPlaces) - idx - 1);
     }
-    cur.enterNavIdx = DocNavIdx(cur.tab);
+    cur.enterNavIdx = DocNavIdx(win, cur);
     win->navPlaces.Append(cur);
     if (len(win->navPlaces) > kMaxNavPlaces) {
         win->navPlaces.RemoveAt(0);
@@ -11415,11 +11433,12 @@ static bool CanNavigateWithinPlace(MainWindow* win, int dir) {
         return false;
     }
     int idx = win->navPlaceIdx;
-    if (idx < 0 || idx >= len(win->navPlaces) || win->navPlaces[idx].tab != win->CurrentTab()) {
+    WindowTab* curTab = win->CurrentTab();
+    if (idx < 0 || idx >= len(win->navPlaces) || !curTab || win->navPlaces[idx].tabSerial != curTab->serial) {
         return true;
     }
     const MainWindow::NavPlace& p = win->navPlaces[idx];
-    int navIdx = DocNavIdx(p.tab);
+    int navIdx = DocNavIdx(curTab);
     if (navIdx < 0) {
         return true; // not a fixed-layout document: its whole history is ours
     }
@@ -11438,9 +11457,12 @@ bool CanNavigateAcrossPlaces(MainWindow* win, int dir) {
 }
 
 static void GoToNavPlace(MainWindow* win, int idx) {
-    MainWindow::NavPlace& from = win->navPlaces[win->navPlaceIdx];
-    if (from.view == TouchView::Doc) {
-        from.leaveNavIdx = DocNavIdx(from.tab);
+    int fromIdx = win->navPlaceIdx;
+    if (fromIdx >= 0 && fromIdx < len(win->navPlaces)) {
+        MainWindow::NavPlace& from = win->navPlaces[fromIdx];
+        if (from.view == TouchView::Doc) {
+            from.leaveNavIdx = DocNavIdx(win, from);
+        }
     }
     MainWindow::NavPlace to = win->navPlaces[idx];
     win->navPlaceIdx = idx;
@@ -11450,11 +11472,11 @@ static void GoToNavPlace(MainWindow* win, int idx) {
             // leaves the browser / Library properly (hides the webview)
             SetTouchView(win, TouchView::Doc);
         }
-        SetTouchDocumentTab(win, win->GetTabIdx(to.tab));
+        SetTouchDocumentTab(win, win->GetTabIdx(FindTabBySerial(win, to.tabSerial)));
     } else {
         SetTouchView(win, to.view);
         if (to.view == TouchView::Web) {
-            TouchBrowserActivateTabById(win, to.webTab);
+            TouchBrowserActivateTabBySerial(win, to.webTabSerial);
         }
     }
     win->navPlaceMoving = false;
@@ -11488,15 +11510,7 @@ void NavigateAcrossPlaces(MainWindow* win, int dir) {
 // document is open in the touch chrome. They stay put (just dimmed) on the
 // Library tab so the tab strip doesn't shift when switching tabs.
 static bool ShowCaptionNavButtons(MainWindow* win) {
-    if (!IsTouchChrome(win)) {
-        return false;
-    }
-    for (WindowTab* tab : win->Tabs()) {
-        if (!tab->IsNonDocumentTab()) {
-            return true;
-        }
-    }
-    return false;
+    return IsTouchChrome(win) && HasTouchDocumentTab(win);
 }
 
 static bool CaptionNavButtonEnabled(MainWindow* win, int btnIdx) {

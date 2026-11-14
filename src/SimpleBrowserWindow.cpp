@@ -25,6 +25,7 @@
 #include "EngineBase.h"
 #include "EngineAll.h"
 #include "MainWindow.h"
+#include "WindowTab.h"
 #include "SumatraPDF.h"
 #include "Notifications.h"
 #include "Rail.h"
@@ -465,8 +466,19 @@ struct TbScrimWnd;
 // callbacks know which tab they belong to.
 struct TbTab {
     TouchBrowser* tb = nullptr;
+    // unique for the life of the process; how code outside the browser (Back /
+    // Forward history) remembers a tab without holding a pointer that dies
+    int serial = 0;
     WebviewWnd* webView = nullptr;
-    Str url;   // last committed URL; shown in the URL bar while active
+    // The page being loaded while a navigation is in flight, else the page on
+    // screen; shown in the URL bar while active. Written at navigationStarting,
+    // so it is NOT the page on screen during a load: use committedUrl for that.
+    Str url;
+    // The page actually on screen (the webview's Source at the last
+    // navigationCompleted). Lags `url` while a load is in flight; the document
+    // hand-off compares against it to tell "the link's page is still showing"
+    // from "Edge's viewer already shows the document".
+    Str committedUrl;
     Str title; // document title, empty until the page reports one
     // WebView2 ignores a Navigate issued before the control has a non-zero size
     // and a first layout, so every tab defers its first navigation to
@@ -474,8 +486,23 @@ struct TbTab {
     // page it should open is parked here.
     Str pendingUrl;
     bool didInitialNav = false;
-    // a top-level navigation is in flight; drives the load progress bar
-    bool loading = false;
+    // Where the tab's top-level load is (drives the spinner and progress bar):
+    //   Idle --navigationStarting--> Loading --navigationCompleted--> Idle
+    //   Loading --document handed to SumatraPDF--> HandedOff
+    //   HandedOff --completed, document committed--> Idle + step Back
+    //   HandedOff --completed, nothing committed--> Idle
+    // A document is usually recognised (by its response) before its load
+    // commits, while the link's page is still on screen. That load is let
+    // finish in the background (the window has already switched to the
+    // document tab) and then stepped back from: cancelling it instead left the
+    // link's page blank, and going Back before it commits overshot to the page
+    // before the link's.
+    enum class Load {
+        Idle,
+        Loading,
+        HandedOff
+    };
+    Load load = Load::Idle;
     // The page on screen is really a document (its response said so). Set from
     // the Content-Type of the main document, which is the only thing that knows
     // when the URL has no ".pdf" in it. While set, the nav row offers
@@ -861,6 +888,12 @@ static TempStr TbQueryFileNameTemp(Str url, Str ext) {
 // there (like a normal browser) instead of a temp file, so they persist and
 // have a real name.
 static TempStr TbDownloadsDirTemp() {
+    if (gForTesting) {
+        // test runs must never write into the user's real Downloads folder
+        TempStr dir = GetPathInAppDataDirTemp(StrL("Downloads"));
+        dir::Create(dir);
+        return dir;
+    }
     WCHAR* pathW = nullptr;
     HRESULT hr = SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &pathW);
     if (FAILED(hr) || !pathW) {
@@ -942,6 +975,48 @@ static HWND TbNotificationParent(MainWindow* win) {
     return win->hwndCanvas;
 }
 
+// Which file each document URL was saved to this session, so opening the same
+// URL again shows the tab that already has it instead of saving another copy
+// (dl.1.pdf, dl.2.pdf...). This is also what makes Forward from the browser
+// land on the document: the browser's own Forward entry for it re-runs the
+// hand-off, which now just switches to that tab.
+static StrVec gTbOpenedDocUrls;
+static StrVec gTbOpenedDocPaths;
+
+static void TbRememberOpenedDoc(Str url, Str path) {
+    int i = gTbOpenedDocUrls.FindI(url);
+    if (i >= 0) {
+        gTbOpenedDocUrls.RemoveAt(i);
+        gTbOpenedDocPaths.RemoveAt(i);
+    }
+    gTbOpenedDocUrls.Append(url);
+    gTbOpenedDocPaths.Append(path);
+}
+
+// switches `win` to the tab already showing what `url` was saved to; false if
+// there is none (it was closed, or the URL was never opened)
+static bool TbShowAlreadyOpenedDoc(MainWindow* win, Str url) {
+    int i = gTbOpenedDocUrls.FindI(url);
+    if (i < 0 || !IsMainWindowValid(win)) {
+        return false;
+    }
+    Str path = gTbOpenedDocPaths[i];
+    int tabIdx = 0;
+    for (WindowTab* tab : win->Tabs()) {
+        if (tab->filePath && path::IsSame(tab->filePath, path)) {
+            logf("tb: '%s' is already open as '%s'; showing that tab\n", url, path);
+            if (win->touchView != TouchView::Doc) {
+                SetTouchView(win, TouchView::Doc);
+            }
+            SetTouchDocumentTab(win, tabIdx);
+            ShowOrHideToolbar(win);
+            return true;
+        }
+        tabIdx++;
+    }
+    return false;
+}
+
 static void TbDocDownloadFinish(TbDocDownload* d) {
     logf("tb: download finished '%s' -> '%s' exists=%d\n", d->url, d->destPath, (int)file::Exists(d->destPath));
     if (file::Exists(d->destPath) && TbDownloadIsWebPage(d->destPath)) {
@@ -957,6 +1032,7 @@ static void TbDocDownloadFinish(TbDocDownload* d) {
         TbRecordDownload(d->destPath);
     }
     if (IsMainWindowValid(d->win) && file::Exists(d->destPath)) {
+        TbRememberOpenedDoc(d->url, d->destPath);
         LoadArgs args(d->destPath, d->win);
         if (d->displayName) {
             args.SetDisplayName(d->displayName);
@@ -997,9 +1073,16 @@ static void TbDocDownloadWithCookies(TbDocDownload* d, Str cookieHeader) {
 // `ext` is the extension the file should end up with ("" = whatever the URL
 // already says); a content-type detected document usually has no extension in
 // its URL at all, and SumatraPDF picks its engine from the file name.
-static void TbStartDocDownload(MainWindow* win, Str url, Str ext) {
-    logf("tb: document download '%s' ext='%s'\n", url, ext);
+// `userAsked` is an explicit "Open in SumatraPDF" tap: it skips the
+// duplicate guard, which exists to merge the automatic triggers (and would
+// otherwise silently swallow the tap that follows a suppressed hand-off, or a
+// retry after a download that came back as a sign-in page).
+static void TbStartDocDownload(MainWindow* win, Str url, Str ext, bool userAsked = false) {
+    logf("tb: document download '%s' ext='%s' userAsked=%d\n", url, ext, (int)userAsked);
     if (!url) {
+        return;
+    }
+    if (TbShowAlreadyOpenedDoc(win, url)) {
         return;
     }
     double nowMs = AnimNowMs();
@@ -1008,7 +1091,11 @@ static void TbStartDocDownload(MainWindow* win, Str url, Str ext) {
             gTbRecentDownloadUrls.RemoveAt(i);
             gTbRecentDownloadMs.RemoveAt(i);
         } else if (str::EqI(gTbRecentDownloadUrls[i], url)) {
-            return;
+            if (!userAsked) {
+                return;
+            }
+            gTbRecentDownloadUrls.RemoveAt(i);
+            gTbRecentDownloadMs.RemoveAt(i);
         }
     }
     gTbRecentDownloadUrls.Append(url);
@@ -1149,10 +1236,41 @@ static void TbUpdateNavButtons(TouchBrowser* tb) {
     RepaintCaptionNavButtons(tb->win);
 }
 
+struct TbHandoffBackReq {
+    MainWindow* win = nullptr;
+    int tabSerial = 0;
+};
+
+// the second half of TbHandoffExit::BackAfterLoad, from the message loop
+static void TbHandoffBackNow(TbHandoffBackReq* req) {
+    MainWindow* win = req->win;
+    int serial = req->tabSerial;
+    delete req;
+    if (!IsMainWindowValid(win) || !win->touchBrowser) {
+        return;
+    }
+    for (TbTab* t : win->touchBrowser->tabs) {
+        if (t->serial == serial && t->webView && t->webView->CanGoBack()) {
+            logf("tb: hand-off: '%s' loaded in the background, stepping back off it\n", t->committedUrl);
+            t->webView->GoBack();
+        }
+    }
+}
+
 static void TbNavigationCompleted(void* ctx, Str url, bool /*success*/) {
     auto* tab = (TbTab*)ctx;
     logf("tb: navigation completed '%s'\n", url);
+    // `url` is the webview's Source: what is on screen now, whether this load
+    // succeeded or failed
+    bool docCommitted = tab->load == TbTab::Load::HandedOff && !str::EqI(url, tab->committedUrl);
     str::ReplaceWithCopy(&tab->url, url);
+    str::ReplaceWithCopy(&tab->committedUrl, url);
+    if (docCommitted) {
+        // the handed-off document is now the current entry: step back off it
+        // (posted: navigating from inside a WebView2 event is not safe)
+        auto* req = new TbHandoffBackReq{tab->tb->win, tab->serial};
+        uitask::Post(MkFunc0<TbHandoffBackReq>(TbHandoffBackNow, req), "TbHandoffBackNow");
+    }
     // both success and failure land here - including a navigation WebView2
     // cancelled - so the progress bar always gets to finish
     TbSetTabLoading(tab, false);
@@ -1188,24 +1306,78 @@ static void TbNavigationCompleted(void* ctx, Str url, bool /*success*/) {
 // "Open in SumatraPDF" button.
 constexpr double kTbTakeoverGuardMs = 8000.0;
 
+// How a document hand-off leaves the browser tab once the download is started.
+// The response that reveals a document usually arrives BEFORE its navigation
+// commits, so the right exit depends on what is actually on screen
+// (committedUrl), never on the address being loaded (url).
+enum class TbHandoffExit {
+    None,          // no webview: nothing to undo
+    BackAfterLoad, // the link's page is still on screen: let the load commit, then Back
+    GoBack,        // Edge's viewer already shows the document: step back off it
+    CloseTab,      // the tab exists only for the document (target=_blank): close it
+    GoHome,        // last tab, nothing to go back to
+};
+
+static Str TbHandoffExitName(TbHandoffExit e) {
+    switch (e) {
+        case TbHandoffExit::BackAfterLoad:
+            return StrL("back-after-load");
+        case TbHandoffExit::GoBack:
+            return StrL("go-back");
+        case TbHandoffExit::CloseTab:
+            return StrL("close-tab");
+        case TbHandoffExit::GoHome:
+            return StrL("go-home");
+        default:
+            return StrL("none");
+    }
+}
+
+static TbHandoffExit TbPickHandoffExit(TbTab* tab, Str docUrl, int nTabs) {
+    WebviewWnd* wv = tab->webView;
+    if (!wv) {
+        return TbHandoffExit::None;
+    }
+    bool pageOnScreen = !str::IsEmptyOrWhiteSpace(tab->committedUrl);
+    bool docOnScreen = pageOnScreen && str::EqI(tab->committedUrl, docUrl);
+    if (pageOnScreen && !docOnScreen) {
+        return TbHandoffExit::BackAfterLoad;
+    }
+    if (wv->CanGoBack()) {
+        return TbHandoffExit::GoBack;
+    }
+    if (nTabs > 1) {
+        return TbHandoffExit::CloseTab;
+    }
+    return TbHandoffExit::GoHome;
+}
+
+static int TbTabIdxBySerial(TouchBrowser* tb, int serial);
+
 struct TbDocTakeoverReq {
     MainWindow* win = nullptr;
-    TbTab* tab = nullptr;
+    int tabSerial = 0;
     Str url;
     Str ext;
 };
 
 // Runs from the message loop: the detection fires inside a WebView2 event
 // handler, and neither navigating the control nor starting a download belongs
-// in there. `tab` may be gone by now, so it is re-validated against the live
-// browser first (same contract as TbCloseTabNow).
+// in there. The tab may be gone by now, so it is looked up again by serial
+// (same contract as TbCloseTabNow). Not by pointer: a tab closed meanwhile can
+// have its address reused by a new one, which then passed the check and was
+// handed a download it never asked for.
 static void TbDocTakeoverNow(TbDocTakeoverReq* req) {
     MainWindow* win = req->win;
-    TbTab* tab = req->tab;
     Str url = req->url;
     Str ext = req->ext;
-    bool valid = IsMainWindowValid(win) && win->touchBrowser && win->touchBrowser->tabs.Find(tab) >= 0;
-    if (valid) {
+    TouchBrowser* liveTb = IsMainWindowValid(win) ? win->touchBrowser : nullptr;
+    int tabIdx = TbTabIdxBySerial(liveTb, req->tabSerial);
+    TbTab* tab = tabIdx >= 0 ? liveTb->tabs[tabIdx] : nullptr;
+    if (!tab) {
+        logf("tb: hand-off for '%s' dropped, its tab is gone\n", url);
+    }
+    if (tab) {
         tab->isDocPage = true;
         str::ReplaceWithCopy(&tab->docPageUrl, url);
         str::ReplaceWithCopy(&tab->docPageExt, ext);
@@ -1216,37 +1388,40 @@ static void TbDocTakeoverNow(TbDocTakeoverReq* req) {
             str::ReplaceWithCopy(&tab->lastTakeoverUrl, url);
             tab->lastTakeoverMs = now;
             // ...and get out of Edge's viewer, back to the page the link was on
-            WebviewWnd* wv = tab->webView;
             TouchBrowser* tb = win->touchBrowser;
-            // The response usually arrives before the document's navigation
-            // commits, while the page the link was on is still the current
-            // history entry: going back then went one page too far (the page
-            // before the link's). Cancelling the load keeps the link's page.
-            bool committed = tab->url && str::EqI(tab->url, url);
-            bool stop = wv && !committed && wv->CanGoBack();
-            bool goBack = wv && !stop && wv->CanGoBack();
-            // A link with target=_blank opened this tab just for the document:
-            // there is no page to go back to, and sending it to the home page
-            // left a stray Google tab. It is closed instead - but only after
-            // the tab the link was on is back in front, because the download
-            // takes the site's cookies from the active tab's webview, and the
-            // webview of a tab being closed never answers.
-            bool closeTab = !goBack && !stop && len(tb->tabs) > 1;
-            if (closeTab) {
+            WebviewWnd* wv = tab->webView;
+            TbHandoffExit exit = TbPickHandoffExit(tab, url, len(tb->tabs));
+            logf("tb: hand-off exit %s (on screen '%s')\n", TbHandoffExitName(exit), tab->committedUrl);
+            if (exit == TbHandoffExit::CloseTab) {
+                // the tab the link was on goes back in front BEFORE the download
+                // starts: it takes the site's cookies from the active tab's
+                // webview, and the webview of a tab being closed never answers
                 int idx = tb->tabs.Find(tab);
                 TbActivateTab(tb, idx > 0 ? idx - 1 : idx + 1);
             }
             TbStartDocDownload(win, url, ext);
-            if (stop) {
-                wv->Stop();
-                // still on the link's page, which is not a document
-                TbClearDocPage(tab);
-            } else if (goBack) {
-                wv->GoBack();
-            } else if (closeTab) {
-                TbCloseTab(tab);
-            } else if (wv) {
-                wv->Navigate(TouchBrowserHomeUrl());
+            switch (exit) {
+                case TbHandoffExit::BackAfterLoad:
+                    // finished by TbNavigationCompleted; the window is on the
+                    // document tab meanwhile, so the viewer is never seen
+                    if (tab->load == TbTab::Load::Loading) {
+                        tab->load = TbTab::Load::HandedOff;
+                    }
+                    // the page the browser will be on is the link's, not a
+                    // document: no "Open in SumatraPDF" for it
+                    TbClearDocPage(tab);
+                    break;
+                case TbHandoffExit::GoBack:
+                    wv->GoBack();
+                    break;
+                case TbHandoffExit::CloseTab:
+                    TbCloseTab(tab);
+                    break;
+                case TbHandoffExit::GoHome:
+                    wv->Navigate(TouchBrowserHomeUrl());
+                    break;
+                case TbHandoffExit::None:
+                    break;
             }
         }
         TbRelayoutChrome(win->touchBrowser);
@@ -1265,7 +1440,7 @@ static void TbMainDocumentResponse(void* ctx, Str url, Str contentType) {
     }
     auto* req = new TbDocTakeoverReq();
     req->win = tab->tb->win;
-    req->tab = tab;
+    req->tabSerial = tab->serial;
     req->url = str::Dup(url);
     req->ext = str::Dup(TouchBrowserExtForFileType(ft));
     uitask::Post(MkFunc0<TbDocTakeoverReq>(TbDocTakeoverNow, req), "TbDocTakeoverNow");
@@ -1283,7 +1458,7 @@ static void TbOpenPageAsDoc(TouchBrowser* tb) {
         return;
     }
     Str ext = act->docPageExt ? act->docPageExt : StrL(".pdf");
-    TbStartDocDownload(tb->win, url, ext);
+    TbStartDocDownload(tb->win, url, ext, true);
 }
 
 static void TbDocumentTitleChanged(void* ctx, Str title) {
@@ -2990,7 +3165,7 @@ void TbChromeWnd::ProgressReset() {
 // the bar shows the ACTIVE tab only, so switching tabs adopts that tab's state
 void TbChromeWnd::SyncProgressToActiveTab() {
     TbTab* act = TbActiveTab(tb);
-    if (act && act->loading) {
+    if (act && act->load == TbTab::Load::Loading) {
         ProgressStart();
     } else {
         ProgressReset();
@@ -3102,7 +3277,7 @@ void TbChromeWnd::OnProgTick() {
 
 static bool TbAnyTabLoading(TouchBrowser* tb) {
     for (TbTab* t : tb->tabs) {
-        if (t->loading) {
+        if (t->load == TbTab::Load::Loading) {
             return true;
         }
     }
@@ -3382,7 +3557,7 @@ void TbChromeWnd::Draw(HDC hdc) {
             Rect close = tabCloseRects[i];
             close.x += off;
             int labelX = r.x + padLeft;
-            if (tb->tabs[i]->loading) {
+            if (tb->tabs[i]->load == TbTab::Load::Loading) {
                 int sd = DpiScale(hwnd, kTbSpinnerDx);
                 DrawSpinner(hdc, Rect{labelX, r.y + (r.dy - sd) / 2, sd, sd});
                 labelX += sd + innerGap;
@@ -3931,7 +4106,7 @@ static void TbSyncUrlBar(TouchBrowser* tb) {
 }
 
 static void TbSetTabLoading(TbTab* t, bool loading) {
-    t->loading = loading;
+    t->load = loading ? TbTab::Load::Loading : TbTab::Load::Idle;
     TbChromeWnd* chrome = t->tb ? t->tb->chrome : nullptr;
     if (chrome) {
         // every tab shows its own spinner, background ones included
@@ -4004,6 +4179,7 @@ static void TbDomContentLoaded(void* ctx) {
 static void TbDestroyTab(TbTab* t) {
     delete t->webView;
     str::Free(t->url);
+    str::Free(t->committedUrl);
     str::Free(t->title);
     str::Free(t->pendingUrl);
     str::Free(t->docPageUrl);
@@ -4018,21 +4194,24 @@ static void TbDestroyTab(TbTab* t) {
 // is detected before `tab` (which would then be dangling) is ever dereferenced.
 struct TbCloseTabReq {
     MainWindow* win = nullptr;
-    TbTab* tab = nullptr;
+    int tabSerial = 0;
 };
 
 static void TbCloseTabNow(TbCloseTabReq* req) {
     MainWindow* win = req->win;
-    TbTab* tab = req->tab;
+    int serial = req->tabSerial;
     delete req;
     if (!IsMainWindowValid(win) || !win->touchBrowser) {
         return;
     }
     TouchBrowser* tb = win->touchBrowser;
-    int idx = tb->tabs.Find(tab);
+    // by serial, not pointer: a new tab reusing a closed one's address would
+    // otherwise be closed in its place
+    int idx = TbTabIdxBySerial(tb, serial);
     if (idx < 0) {
         return; // already closed
     }
+    TbTab* tab = tb->tabs[idx];
     if (len(tb->tabs) == 1) {
         // never leave the browser without a live webview: the last tab is
         // recycled back to the home page instead of being closed
@@ -4055,7 +4234,7 @@ static void TbCloseTabNow(TbCloseTabReq* req) {
 static void TbCloseTab(TbTab* t) {
     auto* req = new TbCloseTabReq();
     req->win = t->tb->win;
-    req->tab = t;
+    req->tabSerial = t->serial;
     uitask::Post(MkFunc0<TbCloseTabReq>(TbCloseTabNow, req), "TbCloseTabNow");
 }
 
@@ -4196,7 +4375,9 @@ static TbTab* TbCreateTab(TouchBrowser* tb, Str url) {
     if (len(tb->tabs) >= kTbMaxTabs) {
         return nullptr;
     }
+    static int gNextTbTabSerial = 0;
     auto* t = new TbTab();
+    t->serial = ++gNextTbTabSerial;
     t->tb = tb;
     t->pendingUrl = str::Dup(url);
     t->webView = TbCreateWebView(t);
@@ -4245,7 +4426,11 @@ static void TbRebuildNow(TbRebuildReq* req) {
             TbApplyNightLight(t);
         }
         t->didInitialNav = false;
-        t->loading = false;
+        // nothing is on screen in the new control yet, and the old load (with
+        // its progress bar and any document button) died with the process
+        str::FreePtr(&t->committedUrl);
+        TbClearDocPage(t);
+        TbSetTabLoading(t, false);
     }
     // the new controls go through the same show/hide and z-order as a tab
     // switch; the relayout gives them bounds and issues the active tab's
@@ -4592,26 +4777,30 @@ void DestroyTouchWebView(MainWindow* win) {
     delete tb;
 }
 
-void* TouchBrowserActiveTabId(MainWindow* win) {
+static int TbTabIdxBySerial(TouchBrowser* tb, int serial) {
+    for (int i = 0; tb && serial && i < len(tb->tabs); i++) {
+        if (tb->tabs[i]->serial == serial) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int TouchBrowserActiveTabSerial(MainWindow* win) {
+    TbTab* t = win && win->touchBrowser ? TbActiveTab(win->touchBrowser) : nullptr;
+    return t ? t->serial : 0;
+}
+
+bool TouchBrowserHasTab(MainWindow* win, int serial) {
+    return win && TbTabIdxBySerial(win->touchBrowser, serial) >= 0;
+}
+
+void TouchBrowserActivateTabBySerial(MainWindow* win, int serial) {
     if (!win || !win->touchBrowser) {
-        return nullptr;
-    }
-    return TbActiveTab(win->touchBrowser);
-}
-
-bool TouchBrowserHasTab(MainWindow* win, void* tabId) {
-    if (!win || !win->touchBrowser || !tabId) {
-        return false;
-    }
-    return win->touchBrowser->tabs.Find((TbTab*)tabId) >= 0;
-}
-
-void TouchBrowserActivateTabById(MainWindow* win, void* tabId) {
-    if (!win || !win->touchBrowser || !tabId) {
         return;
     }
     TouchBrowser* tb = win->touchBrowser;
-    int idx = tb->tabs.Find((TbTab*)tabId);
+    int idx = TbTabIdxBySerial(tb, serial);
     if (idx >= 0 && idx != tb->activeTab) {
         TbActivateTab(tb, idx);
     }

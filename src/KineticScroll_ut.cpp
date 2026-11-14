@@ -186,6 +186,157 @@ static void expectRetargetDoesNotJump() {
     utassert(KsPos(ks) == 600);
 }
 
+// A clock the tests advance by hand, so time-dependent phases (fling decay,
+// the end of an ease) are asserted exactly instead of racing the real clock.
+static double gFakeNowMs = 0.0;
+static double FakeNow() {
+    return gFakeNowMs;
+}
+
+// a quick upward flick: 10px every 8ms, then let go
+static void flick(KineticScroll& ks, int startPointer) {
+    KsDragBegin(ks, startPointer);
+    for (int i = 1; i <= 6; i++) {
+        gFakeNowMs += 8.0;
+        KsDragUpdate(ks, startPointer - (i * 10));
+    }
+    KsDragEnd(ks);
+}
+
+static void expectFlingDecaysAndStops() {
+    AnimSetAppEnabled(true);
+    if (!AnimEnabled()) {
+        return; // drag releases land immediately; nothing coasts
+    }
+    KsSetClockForTesting(FakeNow);
+    gFakeNowMs = 1000.0;
+    KineticScroll ks;
+    KsSetBounds(ks, 0, 100000);
+    KsSetPos(ks, 1000);
+    flick(ks, 500);
+    utassert(ks.phase == KsPhase::Flinging);
+    utassert(KsIsMoving(ks));
+    int atRelease = KsPos(ks);
+    int ticks = 0;
+    int last = atRelease;
+    while (KsTick(ks)) {
+        gFakeNowMs += 16.0;
+        utassert(KsPos(ks) >= last); // keeps going the way it was flicked
+        last = KsPos(ks);
+        utassert(++ticks < 2000);
+    }
+    utassert(KsPos(ks) > atRelease); // it coasted
+    utassert(ks.phase == KsPhase::Idle);
+    utassert(ks.velocity == 0.0f);
+    KsSetClockForTesting(nullptr);
+}
+
+static void expectFlingStopsAtEdge() {
+    AnimSetAppEnabled(true);
+    if (!AnimEnabled()) {
+        return;
+    }
+    KsSetClockForTesting(FakeNow);
+    gFakeNowMs = 1000.0;
+    KineticScroll ks;
+    KsSetBounds(ks, 0, 120);
+    KsSetPos(ks, 0);
+    flick(ks, 500);
+    int ticks = 0;
+    while (KsTick(ks)) {
+        gFakeNowMs += 16.0;
+        utassert(++ticks < 2000);
+    }
+    utassert(KsPos(ks) == 120);
+    utassert(ks.phase == KsPhase::Idle);
+    KsSetClockForTesting(nullptr);
+}
+
+// the finger owns the position: a wheel notch mid-drag used to start an ease
+// that fought the finger every frame, and could leave a fling flagged after
+// the ease finished, which then jumped the list on the next tick
+static void expectWheelIgnoredWhileDragging() {
+    AnimSetAppEnabled(true);
+    KsSetClockForTesting(FakeNow);
+    gFakeNowMs = 1000.0;
+    KineticScroll ks;
+    KsSetBounds(ks, 0, 1000);
+    KsSetPos(ks, 100);
+    KsDragBegin(ks, 300);
+    KsScrollBy(ks, 200);
+    utassert(ks.phase == KsPhase::Dragging);
+    utassert(KsPos(ks) == 100);
+    gFakeNowMs += 8.0;
+    KsDragUpdate(ks, 290);
+    utassert(KsPos(ks) == 110);
+    KsSetClockForTesting(nullptr);
+}
+
+// the list relaid out under the finger: the drag continues from the new spot
+static void expectSetPosWhileDraggingReanchors() {
+    KsSetClockForTesting(FakeNow);
+    gFakeNowMs = 1000.0;
+    KineticScroll ks;
+    KsSetBounds(ks, 0, 1000);
+    KsSetPos(ks, 100);
+    KsDragBegin(ks, 300);
+    gFakeNowMs += 8.0;
+    KsDragUpdate(ks, 280); // pos 120
+    KsSetPos(ks, 500);
+    utassert(KsIsDragging(ks));
+    utassert(KsPos(ks) == 500);
+    gFakeNowMs += 8.0;
+    KsDragUpdate(ks, 270); // 10px further up from where it was re-anchored
+    utassert(KsPos(ks) == 510);
+    KsSetClockForTesting(nullptr);
+}
+
+static void expectEaseEndsIdle() {
+    AnimSetAppEnabled(true);
+    if (!AnimEnabled()) {
+        return;
+    }
+    KsSetClockForTesting(FakeNow);
+    gFakeNowMs = 1000.0;
+    KineticScroll ks;
+    KsSetBounds(ks, 0, 1000);
+    KsSetPos(ks, 0);
+    KsScrollBy(ks, 300);
+    utassert(ks.phase == KsPhase::Easing);
+    gFakeNowMs += 100.0;
+    utassert(KsTick(ks));
+    int mid = KsPos(ks);
+    utassert(mid > 0 && mid < 300);
+    gFakeNowMs += kKineticWheelMs;
+    utassert(!KsTick(ks));
+    utassert(KsPos(ks) == 300);
+    utassert(ks.phase == KsPhase::Idle);
+    utassert(!KsIsMoving(ks));
+    KsSetClockForTesting(nullptr);
+}
+
+// a drag cancelled by KsStop (capture lost, long-press fired) must not fling
+// when a stray release arrives afterwards
+static void expectStopEndsDrag() {
+    AnimSetAppEnabled(true);
+    KsSetClockForTesting(FakeNow);
+    gFakeNowMs = 1000.0;
+    KineticScroll ks;
+    KsSetBounds(ks, 0, 100000);
+    KsSetPos(ks, 1000);
+    KsDragBegin(ks, 500);
+    for (int i = 1; i <= 6; i++) {
+        gFakeNowMs += 8.0;
+        KsDragUpdate(ks, 500 - (i * 10));
+    }
+    KsStop(ks);
+    utassert(!KsIsDragging(ks));
+    KsDragEnd(ks);
+    utassert(ks.phase == KsPhase::Idle);
+    utassert(!KsTick(ks));
+    KsSetClockForTesting(nullptr);
+}
+
 void KineticScroll_UnitTests() {
     expectBounds();
     expectWheelEases();
@@ -195,4 +346,10 @@ void KineticScroll_UnitTests() {
     expectSlowReleaseDoesNotFling();
     expectStopHalts();
     expectRetargetDoesNotJump();
+    expectFlingDecaysAndStops();
+    expectFlingStopsAtEdge();
+    expectWheelIgnoredWhileDragging();
+    expectSetPosWhileDraggingReanchors();
+    expectEaseEndsIdle();
+    expectStopEndsDrag();
 }

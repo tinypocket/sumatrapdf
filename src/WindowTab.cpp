@@ -26,7 +26,9 @@
 #include "EditAnnotations.h"
 
 WindowTab::WindowTab(MainWindow* win) {
+    static int gNextSerial = 0;
     this->win = win;
+    this->serial = ++gNextSerial;
 }
 
 void WindowTab::SetFilePath(Str path) {

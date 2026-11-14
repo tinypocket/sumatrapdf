@@ -268,13 +268,23 @@ struct TopBarWnd : Wnd {
     bool previewPinned = false;
     TouchBookmarkConfirmWnd* bookmarkConfirmWnd = nullptr;
     TouchNightLightWnd* nightLightWnd = nullptr;
+    // A press on a saved page remembers its index (for painting) and its page
+    // (what it is about): the list can be rebuilt while the finger is down, and
+    // acting on the bare index then hit a neighbouring favorite - a 3-second
+    // hold could delete the wrong page. See SavedPressIdx.
     int savedHoldingIdx = -1;
+    int savedHoldingPage = 0;
     u64 savedHoldStarted = 0;
     bool savedHoldCompleted = false;
     int savedBodyHoldingIdx = -1;
+    int savedBodyHoldingPage = 0;
     u64 savedBodyHoldStarted = 0;
     bool savedBodyHoldTriggered = false;
     int savedRenamingIdx = -1;
+    // the document whose favorite is being renamed, fixed when the rename
+    // starts: committing against whatever tab is current by then could rename
+    // a page of another file
+    Str savedRenamePath;
     bool savedRenameSelectAll = false;
     WCHAR savedRenameText[128]{};
 
@@ -327,10 +337,19 @@ constexpr UINT_PTR kPreviewCloseTimerId = 0x51A2;
 // hovering the switcher opens the strip after the same delay as the rail
 constexpr UINT_PTR kPreviewHoverTimerId = 0x51A3;
 constexpr int kPreviewHoverDelayMs = 450;
-constexpr UINT_PTR kSavedPageHoldTimerId = 0x51A3;
+constexpr UINT_PTR kSavedPageHoldTimerId = 0x51A6;
 constexpr UINT_PTR kSavedPageRenameTimerId = 0x51A4;
 // drives the hover / press transitions; only runs while one is in flight
 constexpr UINT_PTR kTopBarAnimTimerId = 0x51A5;
+// All of these fire on the one top-bar window, whose WM_TIMER dispatches by id:
+// a shared id makes the first handler swallow the other's ticks (the saved-page
+// hold once shared the hover id, so hold-to-delete could never finish).
+static_assert(kPreviewCloseTimerId != kPreviewHoverTimerId && kPreviewCloseTimerId != kSavedPageHoldTimerId &&
+                  kPreviewCloseTimerId != kSavedPageRenameTimerId && kPreviewCloseTimerId != kTopBarAnimTimerId &&
+                  kPreviewHoverTimerId != kSavedPageHoldTimerId && kPreviewHoverTimerId != kSavedPageRenameTimerId &&
+                  kPreviewHoverTimerId != kTopBarAnimTimerId && kSavedPageHoldTimerId != kSavedPageRenameTimerId &&
+                  kSavedPageHoldTimerId != kTopBarAnimTimerId && kSavedPageRenameTimerId != kTopBarAnimTimerId,
+              "top-bar timer ids must be distinct");
 
 void TopBarWnd::CancelPreviewClose() {
     KillTimer(hwnd, kPreviewCloseTimerId);
@@ -483,6 +502,17 @@ COLORREF TouchFavoriteGroupColor(Str filePath) {
     return kPalette[h % dimof(kPalette)];
 }
 
+// where the favorite a press began on is now, or -1 if it is gone
+static int SavedPressIdx(Vec<int>& pages, int idx, int page) {
+    if (idx < 0) {
+        return -1;
+    }
+    if (idx < len(pages) && pages[idx] == page) {
+        return idx;
+    }
+    return pages.Find(page);
+}
+
 void TopBarWnd::RefreshSavedPages() {
     // an in-flight rename holds an index into these vectors; rebuilding under
     // it would retarget the edit at a different favorite
@@ -565,6 +595,8 @@ void TopBarWnd::BeginSavedPageRename(int idx) {
         return;
     }
     savedRenamingIdx = idx;
+    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    str::ReplaceWithCopy(&savedRenamePath, tab && !tab->IsNonDocumentTab() ? tab->filePath : Str{});
     savedRenameSelectAll = true;
     TempWStr label = ToWStrTemp(SavedPageLabelTemp(idx));
     wcsncpy_s(savedRenameText, label.s, _TRUNCATE);
@@ -585,10 +617,10 @@ void TopBarWnd::CommitSavedPageRename() {
         name = StrL("");
     }
     savedPageNames.SetAt(savedRenamingIdx, name);
-    WindowTab* tab = win ? win->CurrentTab() : nullptr;
-    if (tab && tab->filePath && savedRenamingIdx < len(savedPages)) {
-        RenameFavorite(tab->filePath, savedPages[savedRenamingIdx], name);
+    if (savedRenamePath) {
+        RenameFavorite(savedRenamePath, savedPages[savedRenamingIdx], name);
     }
+    str::FreePtr(&savedRenamePath);
     savedRenamingIdx = -1;
     savedRenameSelectAll = false;
     savedRenameText[0] = 0;
@@ -596,6 +628,7 @@ void TopBarWnd::CommitSavedPageRename() {
 }
 
 void TopBarWnd::CancelSavedPageRename() {
+    str::FreePtr(&savedRenamePath);
     savedRenamingIdx = -1;
     savedRenameSelectAll = false;
     savedRenameText[0] = 0;
@@ -1287,6 +1320,10 @@ void TouchPreviewWnd::Show(HWND anchorHwnd, Rect anchorRect) {
 
 void TouchPreviewWnd::Hide() {
     PressCancel();
+    // a finger can still be down when the popup goes (Esc, a timer, a tap
+    // elsewhere) and its release then never arrives here; a stale id made
+    // every later touch on the popup be ignored as "another finger"
+    pointerId = 0;
     if (owner) {
         owner->previewPinned = false;
     }
@@ -2555,8 +2592,9 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         int oldHotIdx = hotIdx;
         SetHot(idx);
         if (idx == 0 && oldHotIdx != 0 && gTopBarSlots[0].item == TopBarItem::Preview) {
-            KillTimer(hwnd, kPreviewHoverTimerId);
-            SetTimer(hwnd, kPreviewHoverTimerId, kPreviewHoverDelayMs, nullptr);
+            // same path as the rail's switcher; without an anchor the timer
+            // fired and showed nothing, so hovering this one never previewed
+            HoverTouchDocumentPreview(win, hwnd, PreviewAnchorRect(slotRects[0]), true);
         } else if (oldHotIdx == 0 && idx != 0 && gTopBarSlots[0].item == TopBarItem::Preview) {
             KillTimer(hwnd, kPreviewHoverTimerId);
             SchedulePreviewClose();
@@ -2607,6 +2645,7 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 bookmarkConfirmWnd->Hide();
             }
             savedHoldingIdx = i;
+            savedHoldingPage = i < len(savedPages) ? savedPages[i] : 0;
             savedHoldStarted = GetTickCount64();
             savedHoldCompleted = false;
             SetCapture(hwnd);
@@ -2623,6 +2662,7 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 return 0;
             }
             savedBodyHoldingIdx = i;
+            savedBodyHoldingPage = i < len(savedPages) ? savedPages[i] : 0;
             savedBodyHoldStarted = GetTickCount64();
             savedBodyHoldTriggered = false;
             savedTrayDragging = savedContentDx > savedTrayRect.dx;
@@ -2695,12 +2735,14 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     }
 
     if (msg == WM_TIMER && wparam == kSavedPageHoldTimerId) {
-        if (savedHoldingIdx < 0 || savedHoldingIdx >= len(savedPages)) {
+        savedHoldingIdx = SavedPressIdx(savedPages, savedHoldingIdx, savedHoldingPage);
+        if (savedHoldingIdx < 0) {
             KillTimer(hwnd, kSavedPageHoldTimerId);
+            HwndInvalidate(hwnd, false);
             return 0;
         }
         if (GetTickCount64() - savedHoldStarted >= 3000) {
-            int page = savedPages[savedHoldingIdx];
+            int page = savedHoldingPage;
             savedHoldingIdx = -1;
             savedHoldCompleted = true;
             KillTimer(hwnd, kSavedPageHoldTimerId);
@@ -2716,7 +2758,8 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
     if (msg == WM_TIMER && wparam == kSavedPageRenameTimerId) {
         KillTimer(hwnd, kSavedPageRenameTimerId);
-        if (savedBodyHoldingIdx >= 0 && savedBodyHoldingIdx < len(savedPages) && !savedTrayDidDrag) {
+        savedBodyHoldingIdx = SavedPressIdx(savedPages, savedBodyHoldingIdx, savedBodyHoldingPage);
+        if (savedBodyHoldingIdx >= 0 && !savedTrayDidDrag) {
             int idx = savedBodyHoldingIdx;
             savedBodyHoldingIdx = -1;
             savedBodyHoldStarted = 0;
@@ -2736,7 +2779,7 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         SetPressed(-1);
         if (savedTrayDragging) {
             bool dragged = savedTrayDidDrag;
-            int quickBodyIdx = savedBodyHoldingIdx;
+            int quickBodyIdx = SavedPressIdx(savedPages, savedBodyHoldingIdx, savedBodyHoldingPage);
             savedTrayDragging = false;
             savedTrayDidDrag = false;
             savedBodyHoldingIdx = -1;
@@ -2759,14 +2802,14 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         if (savedBodyHoldingIdx >= 0) {
-            int idx = savedBodyHoldingIdx;
+            int idx = SavedPressIdx(savedPages, savedBodyHoldingIdx, savedBodyHoldingPage);
             savedBodyHoldingIdx = -1;
             savedBodyHoldStarted = 0;
             KillTimer(hwnd, kSavedPageRenameTimerId);
             if (GetCapture() == hwnd) {
                 ReleaseCapture();
             }
-            if (idx < len(savedPages) && win && win->ctrl) {
+            if (idx >= 0 && win && win->ctrl) {
                 win->ctrl->GoToPage(savedPages[idx], true);
                 HwndInvalidate(hwnd, false);
             }
@@ -2777,14 +2820,16 @@ LRESULT TopBarWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         if (savedHoldingIdx >= 0) {
-            int idx = savedHoldingIdx;
+            int idx = SavedPressIdx(savedPages, savedHoldingIdx, savedHoldingPage);
             savedHoldingIdx = -1;
             KillTimer(hwnd, kSavedPageHoldTimerId);
             if (GetCapture() == hwnd) {
                 ReleaseCapture();
             }
             HwndInvalidate(hwnd, false);
-            ShowBookmarkConfirm(idx);
+            if (idx >= 0) {
+                ShowBookmarkConfirm(idx);
+            }
             return 0;
         }
         // the files pill lists every other document that has favorites, each

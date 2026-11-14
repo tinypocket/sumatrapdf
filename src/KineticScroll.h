@@ -20,7 +20,23 @@
 // how long a wheel notch takes to ease into place
 constexpr int kKineticWheelMs = 260;
 
+// What the scroll offset is doing. Exactly one at a time:
+//   Idle     --KsScrollBy-->     Easing   --KsTick reaches target--> Idle
+//   any      --KsDragBegin-->    Dragging --KsDragEnd, fast-->       Flinging
+//                                         --KsDragEnd, slow-->       Idle
+//   Flinging --KsTick slows/edge--> Idle
+//   any      --KsStop/KsSetPos--> Idle (KsSetPos keeps Dragging, re-anchored)
+// The finger owns the position while Dragging: wheel steps are ignored then.
+enum class KsPhase {
+    Idle,
+    Easing,
+    Dragging,
+    Flinging,
+};
+
 struct KineticScroll {
+    KsPhase phase = KsPhase::Idle;
+
     // current offset; fractional between frames, rounded by KsPos()
     float pos = 0.0f;
 
@@ -33,14 +49,14 @@ struct KineticScroll {
     // --- fling ---
     // px per millisecond; sign follows increasing pos
     float velocity = 0.0f;
-    bool flinging = false;
     double lastTickMs = 0.0;
 
     // --- drag tracking ---
-    bool dragging = false;
     int dragStartPointer = 0;
     float dragStartPos = 0.0f;
+    // the pointer at the last velocity sample, and at the last update
     int lastPointer = 0;
+    int curPointer = 0;
     double lastSampleMs = 0.0;
     // smoothed pointer speed, so one erratic sample before release can't throw
     // the fling off
@@ -53,7 +69,9 @@ struct KineticScroll {
 void KsSetBounds(KineticScroll&, int minPos, int maxPos);
 void KsSetPos(KineticScroll&, int pos);
 int KsPos(const KineticScroll&);
+// easing or flinging: the owner's timer should keep calling KsTick
 bool KsIsMoving(const KineticScroll&);
+bool KsIsDragging(const KineticScroll&);
 // stop dead wherever it is (view change, list rebuilt under it)
 void KsStop(KineticScroll&);
 
@@ -68,3 +86,6 @@ void KsDragEnd(KineticScroll&);
 
 // advance to now; true while still moving (keep the timer running)
 bool KsTick(KineticScroll&);
+
+// unit tests only: replace the clock (milliseconds); nullptr restores it
+void KsSetClockForTesting(double (*nowMs)());

@@ -134,8 +134,6 @@ struct WebviewWnd : Wnd {
     void RebuildBindScript();
     void GoBack();
     void GoForward();
-    // cancels the navigation in progress, if any
-    void Stop();
     // the document's current title (""/empty when there is none). WebView2 only
     // raises documentTitleChanged when the title CHANGES, so a reload of the
     // same page never re-reports it - a host that dropped its copy on

@@ -50,8 +50,6 @@ struct RailItem {
 
 constexpr int kRailDocumentPreview = -1;
 // hovering the document switcher opens the preview strip after this delay
-constexpr UINT_PTR kRailHoverTimerId = 4;
-constexpr int kRailHoverDelayMs = 450;
 // drives the hover / press / active-marker transitions; only runs while one of
 // them is in flight
 constexpr UINT_PTR kRailAnimTimerId = 5;
@@ -236,18 +234,17 @@ static bool IsRailItemActive(MainWindow* win, const RailItem& item) {
 // Is a real document open? NOT MainWindow::HasDocsLoaded(): that returns true
 // when there are zero tabs, which is exactly the no-document case here, so the
 // document-only rail icons never greyed out.
+// Must agree with SelectTouchDocumentTab: a Favorites tab is not a document,
+// and counting it here left document icons enabled that then did nothing.
 static bool RailHasDocument(MainWindow* win) {
     if (!win) {
         return false;
     }
-    for (int i = 0; i < win->TabCount(); i++) {
-        WindowTab* tab = win->GetTab(i);
-        if (tab && !tab->IsAboutTab()) {
-            return true;
-        }
+    if (HasTouchDocumentTab(win)) {
+        return true;
     }
     // tabless mode: no tabs at all, but a document may still be loaded
-    return win->ctrl != nullptr;
+    return win->TabCount() == 0 && win->ctrl != nullptr;
 }
 
 static bool IsRailItemEnabled(MainWindow* win, const RailItem& item) {
@@ -327,6 +324,23 @@ void SetTouchView(MainWindow* win, TouchView view) {
         view = TouchView::Library;
     }
     TouchView oldView = win->touchView;
+    // A switch is: check the target can be shown, leave the old view, select
+    // the target's tab, enter the new view. The check comes first so a refused
+    // switch changes nothing; leaving first and then failing used to hide the
+    // browser while touchView still said Web (a blank content area).
+    if (view == TouchView::Doc && !HasTouchDocumentTab(win)) {
+        logf("touch view: no document to show, staying on %d\n", (int)oldView);
+        return;
+    }
+    // undoes the leave step if selecting the target's tab still fails
+    auto rollback = [win, oldView, view]() {
+        logf("touch view: switch to %d failed, back to %d\n", (int)view, (int)oldView);
+        win->touchView = oldView;
+        if (oldView == TouchView::Web && view != TouchView::Web) {
+            ShowTouchWebView(win, true);
+        }
+        UpdateRailForWindow(win);
+    };
     if (oldView != view && oldView == TouchView::Library) {
         HomePageDestroySearch(win);
     }
@@ -334,10 +348,9 @@ void SetTouchView(MainWindow* win, TouchView view) {
         ShowTouchWebView(win, false);
     }
     if (view == TouchView::Doc) {
-        TouchView previous = win->touchView;
         win->touchView = TouchView::Doc;
         if (!SelectTouchDocumentTab(win)) {
-            win->touchView = previous;
+            rollback();
             return;
         }
         // The pane is the way this document's tab was left (each tab keeps its
@@ -359,6 +372,7 @@ void SetTouchView(MainWindow* win, TouchView view) {
             win->lastNonDocView = view;
         }
         if (!SelectTouchHomeTab(win)) {
+            rollback();
             return;
         }
         win->uiState.tocVisible = false;
@@ -415,6 +429,9 @@ void SetTouchPanelMode(MainWindow* win, TouchPanelMode mode) {
     SetTouchPanelModeAndRestoreSearch(win, mode);
     EnsureTouchPaneLoaded(win);
     win->touchSidebarCollapsed = false;
+    // a coast or drag from the old mode would write its position back into
+    // the new one on the next tick
+    ResetTouchPanelGesture(win);
     win->touchPanelScrollY = 0;
     win->uiState.tocVisible = true;
     // opening a panel is the other half of the same state (see above)
@@ -859,10 +876,11 @@ LRESULT RailWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         if (idx != hotIdx) {
             SetHot(idx);
             // hovering the switcher previews the open documents after a short
-            // delay, the way the taskbar does; moving off cancels it
-            KillTimer(hwnd, kRailHoverTimerId);
+            // delay, the way the taskbar does; moving off cancels it. The top
+            // bar owns that one delay: the rail used to wait as well, before
+            // handing over, so the preview took twice as long from here.
             if (idx >= 0 && gRailItems[idx].cmdId == kRailDocumentPreview) {
-                SetTimer(hwnd, kRailHoverTimerId, kRailHoverDelayMs, nullptr);
+                HoverTouchDocumentPreview(win, hwnd, ItemRect(idx), true);
             } else {
                 HoverTouchDocumentPreview(win, hwnd, Rect{}, false);
             }
@@ -880,7 +898,6 @@ LRESULT RailWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
     if (msg == WM_MOUSELEAVE) {
         trackingMouse = false;
-        KillTimer(hwnd, kRailHoverTimerId);
         SetHot(-1);
         // the rail takes no capture, so a press dragged off it ends here
         SetPressed(-1);
@@ -896,14 +913,6 @@ LRESULT RailWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         if (idx >= 0 && IsRailItemEnabled(win, gRailItems[idx])) {
             SetPressed(idx);
         }
-    }
-
-    if (msg == WM_TIMER && wparam == kRailHoverTimerId) {
-        KillTimer(hwnd, kRailHoverTimerId);
-        if (hotIdx >= 0 && gRailItems[hotIdx].cmdId == kRailDocumentPreview) {
-            HoverTouchDocumentPreview(win, hwnd, ItemRect(hotIdx), true);
-        }
-        return 0;
     }
 
     if (msg == WM_LBUTTONUP) {

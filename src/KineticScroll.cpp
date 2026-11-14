@@ -32,6 +32,31 @@ constexpr double kDragIdleMs = 90.0;
 // estimate waits for a usable time base.
 constexpr double kMinSampleMs = 2.0;
 
+static double (*gKsNowForTesting)() = nullptr;
+
+void KsSetClockForTesting(double (*nowMs)()) {
+    gKsNowForTesting = nowMs;
+}
+
+static double KsNowMs() {
+    return gKsNowForTesting ? gKsNowForTesting() : AnimNowMs();
+}
+
+// every phase change goes through here, so the motion state never ends up as
+// a stale mix (e.g. an ease that finished leaving a fling flagged behind it)
+static void KsEnter(KineticScroll& ks, KsPhase phase) {
+    ks.phase = phase;
+    if (phase != KsPhase::Easing) {
+        ks.easeDurMs = 0;
+    }
+    if (phase != KsPhase::Flinging) {
+        ks.velocity = 0.0f;
+    }
+    if (phase != KsPhase::Dragging) {
+        ks.dragVelocity = 0.0f;
+    }
+}
+
 static float ClampF(float v, float lo, float hi) {
     if (v < lo) {
         return lo;
@@ -61,9 +86,14 @@ void KsSetBounds(KineticScroll& ks, int minPos, int maxPos) {
 void KsSetPos(KineticScroll& ks, int pos) {
     ks.pos = (float)pos;
     ClampPos(ks);
-    ks.easeDurMs = 0;
-    ks.flinging = false;
-    ks.velocity = 0.0f;
+    if (ks.phase == KsPhase::Dragging) {
+        // the content moved under the finger (relayout, bounds change): keep
+        // dragging from here instead of snapping back on the next update
+        ks.dragStartPointer = ks.curPointer;
+        ks.dragStartPos = ks.pos;
+        return;
+    }
+    KsEnter(ks, KsPhase::Idle);
 }
 
 int KsPos(const KineticScroll& ks) {
@@ -73,59 +103,59 @@ int KsPos(const KineticScroll& ks) {
 }
 
 bool KsIsMoving(const KineticScroll& ks) {
-    return ks.flinging || ks.easeDurMs > 0;
+    return ks.phase == KsPhase::Easing || ks.phase == KsPhase::Flinging;
+}
+
+bool KsIsDragging(const KineticScroll& ks) {
+    return ks.phase == KsPhase::Dragging;
 }
 
 void KsStop(KineticScroll& ks) {
-    ks.easeDurMs = 0;
-    ks.flinging = false;
-    ks.velocity = 0.0f;
-    ks.dragging = false;
-    ks.dragVelocity = 0.0f;
+    KsEnter(ks, KsPhase::Idle);
 }
 
 void KsScrollBy(KineticScroll& ks, int delta, int durMs) {
-    // a wheel notch during a fling should add to where it's heading, not fight
-    // it from the current position
-    float base = (ks.easeDurMs > 0) ? ks.easeTo : ks.pos;
+    if (ks.phase == KsPhase::Dragging) {
+        // the finger owns the position: an ease would fight it every frame
+        return;
+    }
+    // a wheel notch during an ease should add to where it's heading, not
+    // fight it from the current position
+    float base = (ks.phase == KsPhase::Easing) ? ks.easeTo : ks.pos;
     float target = ClampF(base + (float)delta, (float)ks.minPos, (float)ks.maxPos);
-
-    ks.flinging = false;
-    ks.velocity = 0.0f;
 
     if (!AnimEnabled() || durMs <= 0) {
         ks.pos = target;
-        ks.easeDurMs = 0;
+        KsEnter(ks, KsPhase::Idle);
         return;
     }
+    KsEnter(ks, KsPhase::Easing);
     ks.easeFrom = ks.pos;
     ks.easeTo = target;
-    ks.easeStartMs = AnimNowMs();
+    ks.easeStartMs = KsNowMs();
     ks.easeDurMs = durMs;
 }
 
 void KsDragBegin(KineticScroll& ks, int pointerPos) {
-    ks.dragging = true;
+    // the finger owns the position now (and catches a coasting list)
+    KsEnter(ks, KsPhase::Dragging);
     ks.dragStartPointer = pointerPos;
     ks.dragStartPos = ks.pos;
     ks.lastPointer = pointerPos;
-    ks.lastSampleMs = AnimNowMs();
-    ks.dragVelocity = 0.0f;
-    // the finger owns the position now
-    ks.easeDurMs = 0;
-    ks.flinging = false;
-    ks.velocity = 0.0f;
+    ks.curPointer = pointerPos;
+    ks.lastSampleMs = KsNowMs();
 }
 
 void KsDragUpdate(KineticScroll& ks, int pointerPos) {
-    if (!ks.dragging) {
+    if (ks.phase != KsPhase::Dragging) {
         return;
     }
+    ks.curPointer = pointerPos;
     // content moves opposite the finger
     ks.pos = ks.dragStartPos - (float)(pointerPos - ks.dragStartPointer);
     ClampPos(ks);
 
-    double now = AnimNowMs();
+    double now = KsNowMs();
     double dt = now - ks.lastSampleMs;
     if (dt >= kDragIdleMs) {
         // finger paused: whatever it was doing before is no longer its intent
@@ -143,47 +173,38 @@ void KsDragUpdate(KineticScroll& ks, int pointerPos) {
 }
 
 void KsDragEnd(KineticScroll& ks) {
-    if (!ks.dragging) {
+    if (ks.phase != KsPhase::Dragging) {
         return;
     }
-    ks.dragging = false;
-
-    double now = AnimNowMs();
+    double now = KsNowMs();
     // released long after the last movement: a hold, not a flick
-    if (now - ks.lastSampleMs >= kDragIdleMs) {
-        ks.dragVelocity = 0.0f;
-    }
-    float v = ks.dragVelocity;
-    ks.dragVelocity = 0.0f;
+    float v = (now - ks.lastSampleMs >= kDragIdleMs) ? 0.0f : ks.dragVelocity;
+    KsEnter(ks, KsPhase::Idle);
 
     float mag = v < 0 ? -v : v;
     if (!AnimEnabled() || mag < kFlingLaunchVelocity) {
-        ks.flinging = false;
-        ks.velocity = 0.0f;
         return;
     }
     // already pinned against an edge in the direction of travel: nothing to
     // coast into, so don't start a fling that can't move
     if ((v < 0 && ks.pos <= (float)ks.minPos) || (v > 0 && ks.pos >= (float)ks.maxPos)) {
-        ks.flinging = false;
-        ks.velocity = 0.0f;
         return;
     }
+    KsEnter(ks, KsPhase::Flinging);
     ks.velocity = ClampF(v, -kFlingMaxVelocity, kFlingMaxVelocity);
-    ks.flinging = true;
     ks.lastTickMs = now;
 }
 
 bool KsTick(KineticScroll& ks) {
-    double now = AnimNowMs();
+    double now = KsNowMs();
 
-    if (ks.easeDurMs > 0) {
+    if (ks.phase == KsPhase::Easing) {
         double elapsed = now - ks.easeStartMs;
         float t = (float)(elapsed / (double)ks.easeDurMs);
         if (t >= 1.0f) {
             ks.pos = ks.easeTo;
-            ks.easeDurMs = 0;
             ClampPos(ks);
+            KsEnter(ks, KsPhase::Idle);
             return false;
         }
         if (t < 0.0f) {
@@ -195,7 +216,7 @@ bool KsTick(KineticScroll& ks) {
         return true;
     }
 
-    if (!ks.flinging) {
+    if (ks.phase != KsPhase::Flinging) {
         return false;
     }
 
@@ -217,14 +238,12 @@ bool KsTick(KineticScroll& ks) {
 
     if (ks.pos <= (float)ks.minPos || ks.pos >= (float)ks.maxPos) {
         ClampPos(ks);
-        ks.flinging = false;
-        ks.velocity = 0.0f;
+        KsEnter(ks, KsPhase::Idle);
         return false;
     }
     float mag = ks.velocity < 0 ? -ks.velocity : ks.velocity;
     if (mag < kFlingMinVelocity) {
-        ks.flinging = false;
-        ks.velocity = 0.0f;
+        KsEnter(ks, KsPhase::Idle);
         return false;
     }
     return true;

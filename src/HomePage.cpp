@@ -3707,6 +3707,33 @@ static void ShowLibraryCardSizeMenu(MainWindow* win) {
     }
 }
 
+// What the Library's content pane shows. Two remembered choices decide it:
+// the sidebar selection (libraryRecentSelected, else librarySelectedFolderPath)
+// and, while a query is typed, whether the file matches or a folder match was
+// picked (librarySearchFilesSelected). A query hides the sidebar selection
+// without forgetting it, so clearing the box brings Recent back - which is why
+// both flags can be set at once, and why every reader must ask here instead
+// of reading one of them.
+enum class LibraryPane {
+    Recent,
+    Folder,
+    SearchFiles,
+};
+
+static LibraryPane LibraryShownPane(MainWindow* win, Str query) {
+    if (len(query) > 0) {
+        return win->librarySearchFilesSelected ? LibraryPane::SearchFiles : LibraryPane::Folder;
+    }
+    return win->libraryRecentSelected ? LibraryPane::Recent : LibraryPane::Folder;
+}
+
+static TempStr LibraryQueryTemp(MainWindow* win) {
+    if (win->hwndHomeSearch) {
+        return HwndGetTextTemp(win->hwndHomeSearch);
+    }
+    return str::DupTemp(win->librarySearchQuery);
+}
+
 static void ShowLibraryHeaderOverflow(MainWindow* win) {
     constexpr int kCmdContentView = 1;
     constexpr int kCmdListView = 2;
@@ -3714,8 +3741,11 @@ static void ShowLibraryHeaderOverflow(MainWindow* win) {
     constexpr int kCmdTogglePin = 4;
     constexpr int kCmdZoomFirst = 100;
 
-    bool isRecent = win->libraryRecentSelected;
-    bool isSearch = win->librarySearchFilesSelected;
+    // from what is on screen: searching from Recent used to offer "Open
+    // file..." here instead of the view options for the results
+    LibraryPane pane = LibraryShownPane(win, LibraryQueryTemp(win));
+    bool isRecent = pane == LibraryPane::Recent;
+    bool isSearch = pane == LibraryPane::SearchFiles;
     Str selectedPath = win->librarySelectedFolderPath ? Str(win->librarySelectedFolderPath) : Str{};
     HMENU popup = CreatePopupMenu();
     if (isRecent) {
@@ -4787,10 +4817,9 @@ static void DrawTouchLibraryPageV2(MainWindow* win, HDC hdc) {
     // notification selects them, see HomePageOnSearchQueryChanged); a folder
     // match tapped in the sidebar shows that folder instead.
     bool searching = len(query) > 0;
-    bool showingSearchFiles = searching && win->librarySearchFilesSelected;
-    if (searching) {
-        recentSelected = false;
-    }
+    LibraryPane pane = LibraryShownPane(win, query);
+    bool showingSearchFiles = pane == LibraryPane::SearchFiles;
+    recentSelected = pane == LibraryPane::Recent;
     if (hasSidebar) {
         // Always available, not just while there is a query: choosing folders
         // ahead of typing is as reasonable as narrowing an existing search.
@@ -6601,6 +6630,10 @@ void HomePageOnHoldTimer(MainWindow* win) {
     win->touchAboutPointerId = 0;
     win->touchAboutPanArea = 0;
     win->touchAboutSuppressMouseUp = true;
+    // the press began a drag on the scrollers; a long-press ends it without a
+    // release, so it must not stay "dragging" (it would ignore wheel steps)
+    KsStop(win->libraryFilesKs);
+    KsStop(win->libraryTreeKs);
     OnAboutContextMenu(win, pt.x, pt.y);
 }
 

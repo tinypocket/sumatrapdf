@@ -16,6 +16,10 @@ void TabsOnChangedDoc(MainWindow*);
 void TabsSelect(MainWindow* win, int tabIndex);
 bool SelectTouchHomeTab(MainWindow* win);
 bool SelectTouchDocumentTab(MainWindow* win);
+// the one answer to "is there a document to show": a tab that is neither the
+// Library/browser tab nor the Favorites tab. SelectTouchDocumentTab succeeds
+// exactly when this is true.
+bool HasTouchDocumentTab(MainWindow* win);
 void TabsOnCtrlTab(MainWindow* win, bool reverse);
 // also shows/hides the tabbar when necessary
 void UpdateTabWidth(MainWindow*);

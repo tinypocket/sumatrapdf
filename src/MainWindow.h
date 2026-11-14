@@ -223,15 +223,18 @@ struct MainWindow {
     TouchBrowser* touchBrowser = nullptr;
     // Back / Forward across places, not just within one document: a browser
     // tab, the Library, a document tab. See NoteNavPlace in SumatraPDF.cpp.
+    // Tabs are remembered by serial, never by pointer: a closed tab's entry
+    // then simply finds nothing (and is skipped) instead of pointing at freed
+    // memory or at a new tab allocated at the same address.
     struct NavPlace {
         TouchView view = TouchView::Library;
-        WindowTab* tab = nullptr; // TouchView::Doc
-        void* webTab = nullptr;   // TouchView::Web: the browser tab (TbTab*)
-        int enterNavIdx = -1;     // the document's navHistoryIdx when we arrived
-        int leaveNavIdx = -1;     // ... and when we last left it
+        int tabSerial = 0;    // TouchView::Doc: WindowTab::serial
+        int webTabSerial = 0; // TouchView::Web: the browser tab's serial; 0 = browser had no tab yet
+        int enterNavIdx = -1; // the document's navHistoryIdx when we arrived
+        int leaveNavIdx = -1; // ... and when we last left it
     };
     Vec<NavPlace> navPlaces;
-    int navPlaceIdx = -1;
+    int navPlaceIdx = -1; // -1 only while navPlaces is empty
     // set while Back / Forward switch places, so the switch isn't recorded as a new one
     bool navPlaceMoving = false;
     // the last non-document view the user was in (Library / Web), so

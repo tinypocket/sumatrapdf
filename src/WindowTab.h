@@ -35,6 +35,10 @@ struct WindowTab {
         Favorites, // full-window favorites list (CmdFavoriteShowInTab)
     };
     Type type = Type::None;
+    // unique for the life of the process (never reused, unlike the pointer):
+    // lets code that remembers a tab tell it from a later tab that happens to
+    // be allocated at the same address
+    int serial = 0;
     Str filePath;
     Str displayName;
     MainWindow* win = nullptr;

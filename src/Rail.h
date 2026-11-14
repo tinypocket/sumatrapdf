@@ -30,9 +30,10 @@ void DestroyTouchWebView(MainWindow* win);
 void TouchWebGoHome(MainWindow* win);
 // the window-wide Back / Forward (see NoteNavPlace) step through the browser's
 // own history and switch between its tabs through these
-void* TouchBrowserActiveTabId(MainWindow* win);
-bool TouchBrowserHasTab(MainWindow* win, void* tabId);
-void TouchBrowserActivateTabById(MainWindow* win, void* tabId);
+// browser tabs by serial (unique for the process, never reused); 0 = none
+int TouchBrowserActiveTabSerial(MainWindow* win);
+bool TouchBrowserHasTab(MainWindow* win, int serial);
+void TouchBrowserActivateTabBySerial(MainWindow* win, int serial);
 bool TouchBrowserCanNavigate(MainWindow* win, int dir);
 void TouchBrowserNavigate(MainWindow* win, int dir);
 void TouchWebToggleBookmark(MainWindow* win);

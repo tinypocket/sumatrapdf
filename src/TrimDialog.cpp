@@ -32,7 +32,11 @@ struct TrimSample {
 
 // The band a click lands in. The middle of a page is neither, so a stray tap in
 // the text does nothing rather than cropping half the book away.
-enum class TrimBand { None, Top, Bottom };
+enum class TrimBand {
+    None,
+    Top,
+    Bottom
+};
 
 struct TrimDlgWnd : Wnd {
     ~TrimDlgWnd() override;
@@ -314,9 +318,8 @@ void TrimDlgWnd::DrawLoupe(HDC hdc) {
     }
     const Rect& sr = samples[dragSample].rect;
     float frac = dragBand == TrimBand::Top ? topAnim.Value() : (1.0f - botAnim.Value());
-    int lineY = sr.y + (int)((float)previewDy * (dragBand == TrimBand::Top ? topAnim.Value()
-                                                                           : 1.0f - botAnim.Value()) +
-                             0.5f);
+    int lineY =
+        sr.y + (int)((float)previewDy * (dragBand == TrimBand::Top ? topAnim.Value() : 1.0f - botAnim.Value()) + 0.5f);
     int dx = DpiScale(hwnd, kLoupeDx);
     int dy = DpiScale(hwnd, kLoupeDy);
     // above the line when there is room, below it otherwise, so the loupe never
@@ -435,8 +438,7 @@ void TrimDlgWnd::OnPaint(HDC hdc, PAINTSTRUCT*) {
         }
         SetTextColor(hdc, ThemeWindowDarkerTextColor());
         Rect lbl{s.rect.x, s.rect.y + s.rect.dy + DpiScale(hwnd, 4), s.rect.dx, DpiScale(hwnd, 16)};
-        HdcDrawText(hdc, fmt("p. %d", s.pageNo), lbl, DT_SINGLELINE | DT_CENTER | DT_NOPREFIX,
-                    HdcGetUiFont(hdc, 11));
+        HdcDrawText(hdc, fmt("p. %d", s.pageNo), lbl, DT_SINGLELINE | DT_CENTER | DT_NOPREFIX, HdcGetUiFont(hdc, 11));
     }
 
     TempStr summary;
@@ -494,6 +496,14 @@ LRESULT TrimDlgWnd::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         dragging = false;
         dragBand = TrimBand::None;
         ReleaseCapture();
+        HwndInvalidate(hwnd, false);
+        return 0;
+    }
+    if (msg == WM_CAPTURECHANGED && dragging && (HWND)lparam != hwnd) {
+        // capture taken away mid-drag (Alt-Tab, a popup): the drag is over,
+        // or the band would keep following a mouse with no button held
+        dragging = false;
+        dragBand = TrimBand::None;
         HwndInvalidate(hwnd, false);
         return 0;
     }
@@ -580,7 +590,15 @@ bool ShowTrimHeaderFooterDialog(MainWindow* win) {
 
     // own modal loop: the dialog owns the interaction until it is dismissed
     MSG msg;
-    while (!dlg->done && GetMessageW(&msg, nullptr, 0, 0)) {
+    bool quit = false;
+    while (!dlg->done) {
+        if (GetMessageW(&msg, nullptr, 0, 0) <= 0) {
+            // the app is quitting: cancel, and hand WM_QUIT back to the main
+            // loop, which would otherwise never see it
+            quit = true;
+            dlg->applied = false;
+            break;
+        }
         if (!IsDialogMessageW(dlg->hwnd, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -594,8 +612,14 @@ bool ShowTrimHeaderFooterDialog(MainWindow* win) {
     float bottom = dlg->trimBottom;
     DisplayModel* dm = dlg->dm;
     delete dlg;
+    if (quit) {
+        PostQuitMessage((int)msg.wParam);
+        return false;
+    }
 
-    if (!applied || !dm) {
+    // the document can be reloaded or closed while the dialog is up (file
+    // changed on disk, DDE): only apply to the model it was opened for
+    if (!applied || !dm || !IsMainWindowValid(win) || win->AsFixed() != dm) {
         return false;
     }
     dm->SetManualTrim(top, bottom);
