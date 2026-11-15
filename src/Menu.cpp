@@ -8,6 +8,7 @@
 #include "base/BitManip.h"
 #include "base/Dpi.h"
 #include "base/Win.h"
+#include "base/GdiPlusUtil.h"
 
 #include "wingui/UIModels.h"
 
@@ -34,6 +35,7 @@
 #include "Favorites.h"
 #include "FileThumbnails.h"
 #include "HomePage.h"
+#include "TopBar.h"
 #include "Translations.h"
 #include "Toolbar.h"
 #include "Accelerators.h"
@@ -199,6 +201,25 @@ static MenuDef menuDefFile[] = {
 //] ACCESSKEY_GROUP File Menu
 
 //[ ACCESSKEY_GROUP View Menu
+static MenuDef menuDefTouchSidebarDensity[] = {
+    {
+        _TRN("Condensed"),
+        CmdTouchSidebarDensityCondensed,
+    },
+    {
+        _TRN("Normal"),
+        CmdTouchSidebarDensityNormal,
+    },
+    {
+        _TRN("Expanded"),
+        CmdTouchSidebarDensityExpanded,
+    },
+    {
+        nullptr,
+        0,
+    },
+};
+
 static MenuDef menuDefView[] = {
     {
         _TRN("Command Palette"),
@@ -264,6 +285,14 @@ static MenuDef menuDefView[] = {
     {
         _TRN("Show &Toolbar"),
         CmdToggleToolbar,
+    },
+    {
+        _TRN("Show Tabs"),
+        CmdToggleTabs,
+    },
+    {
+        _TRN("Sidebar Row Height"),
+        (UINT_PTR)menuDefTouchSidebarDensity,
     },
     {
         kMenuSeparator,
@@ -1110,8 +1139,19 @@ static MenuDef menuDefContextStart[] = {
         CmdOpenSelectedDocument,
     },
     {
+        // opens a second (or third...) view of a file that is already open,
+        // instead of switching to the existing tab
+        _TRN("Open Another Copy"),
+        CmdOpenSelectedDocumentNewCopy,
+    },
+    {
         _TRN("Show in folder"),
         CmdShowInFolder,
+    },
+    {
+        // the Library's own view of the file's folder, as opposed to Explorer
+        _TRN("Show in Library folder"),
+        CmdShowInLibraryFolder,
     },
     {
         _TRN("&Pin Document"),
@@ -1771,6 +1811,13 @@ static void MenuUpdateStateForWindow(MainWindow* win) {
         MenuSetChecked(win->menu, CmdToggleToolbar, toolbarOn);
     }
     MenuSetChecked(win->menu, CmdToggleMenuBar, gGlobalPrefs->showMenubar);
+    MenuSetChecked(win->menu, CmdToggleTabs, gGlobalPrefs->useTabs);
+    MenuSetChecked(win->menu, CmdTouchSidebarDensityCondensed,
+                   str::EqI(gGlobalPrefs->touchSidebarDensity, StrL("condensed")));
+    MenuSetChecked(win->menu, CmdTouchSidebarDensityNormal,
+                   str::EqI(gGlobalPrefs->touchSidebarDensity, StrL("normal")));
+    MenuSetChecked(win->menu, CmdTouchSidebarDensityExpanded,
+                   str::EqI(gGlobalPrefs->touchSidebarDensity, StrL("expanded")));
     // CmdChangeScrollbar doesn't need a check mark - it opens a dialog
     MenuUpdateDisplayMode(win);
     MenuUpdateZoom(win);
@@ -1825,7 +1872,10 @@ void OnAboutContextMenu(MainWindow* win, int x, int y) {
     }
 
     FileState* fs = gFileHistory.FindByPath(path);
-    if (!fs) {
+    // a Library card is a file that may never have been opened, so it has no
+    // history entry; it still gets the menu, minus the history-only items
+    bool inLibrary = IsTouchChrome(win) && win->IsCurrentTabAbout() && TouchLibraryContainsFile(path);
+    if (!fs && !inLibrary) {
         return;
     }
 
@@ -1833,7 +1883,16 @@ void OnAboutContextMenu(MainWindow* win, int x, int y) {
     ctx.isDocLoaded = true;
     ctx.filePath = path;
     HMENU popup = BuildMenuFromDef(menuDefContextStart, CreatePopupMenu(), &ctx);
-    MenuSetChecked(popup, CmdPinSelectedDocument, fs->isPinned);
+    if (!inLibrary) {
+        MenuRemove(popup, CmdShowInLibraryFolder);
+    }
+    if (fs) {
+        MenuSetChecked(popup, CmdPinSelectedDocument, fs->isPinned);
+    } else {
+        MenuRemove(popup, CmdPinSelectedDocument);
+        MenuRemove(popup, CmdForgetSelectedDocument);
+    }
+    RemoveBadMenuSeparators(popup);
     Point pt = HwndMapWindowPoint(win->hwndCanvas, HWND_DESKTOP, {x, y});
     MarkMenuOwnerDraw(popup);
     INT cmd = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, win->hwndFrame, nullptr);
@@ -1848,12 +1907,26 @@ void OnAboutContextMenu(MainWindow* win, int x, int y) {
         return;
     }
 
+    if (CmdOpenSelectedDocumentNewCopy == cmd) {
+        // activateExisting is what makes a second open switch to the tab that
+        // already has the file; off, the load creates another tab for it
+        LoadArgs args(path, win);
+        args.activateExisting = false;
+        LoadDocument(&args);
+        return;
+    }
+
     if (CmdShowInFolder == cmd) {
         SumatraOpenPathInDefaultFileManager(path);
         return;
     }
 
-    if (CmdPinSelectedDocument == cmd) {
+    if (CmdShowInLibraryFolder == cmd) {
+        ShowFileInTouchLibrary(win, path);
+        return;
+    }
+
+    if (CmdPinSelectedDocument == cmd && fs) {
         fs->isPinned = !fs->isPinned;
         win->DeleteToolTip();
         win->RedrawAll(true);
@@ -2334,6 +2407,16 @@ static int GetMenuCheckMarkCx(HWND hwnd) {
 
 constexpr int kMenuPaddingY = 4;
 constexpr int kMenuPaddingX = 8;
+// Touch chrome: a menu row is a tap target like any other, and text height
+// plus 8px is far below what a finger can hit. Matches the sidebar's row.
+constexpr int kTouchMenuRowDy = 40;
+
+static int MenuRowMinDy(HWND hwnd) {
+    if (!gGlobalPrefs || !gGlobalPrefs->touchChrome) {
+        return 0;
+    }
+    return DpiScale(hwnd, kTouchMenuRowDy);
+}
 
 void MenuCustomDrawMesureItem(HWND hwnd, MEASUREITEMSTRUCT* mis) {
     if (ODT_MENU != mis->CtlType) {
@@ -2368,6 +2451,7 @@ void MenuCustomDrawMesureItem(HWND hwnd, MEASUREITEMSTRUCT* mis) {
 
     int cxMenuCheckMark = GetMenuCheckMarkCx(hwnd);
     mis->itemHeight += padY * 2;
+    mis->itemHeight = std::max(mis->itemHeight, (uint)MenuRowMinDy(hwnd));
     mis->itemWidth = uint(dx + cxMenuCheckMark + (padX * 2));
 }
 
@@ -2450,10 +2534,8 @@ void MenuCustomDrawItem(HWND hwnd, DRAWITEMSTRUCT* dis) {
 
     auto* brBg = CreateSolidBrush(bgCol);
     HdcFillRect(hdc, ToRect(rc), brBg);
-    auto* brTxt = CreateSolidBrush(txtCol);
 
     AutoDeleteObject deleteBgBrush(brBg);
-    AutoDeleteObject deleteTxtBrush(brTxt);
 
     if (isSeparator) {
         ReportIf(modi->text);
@@ -2477,17 +2559,19 @@ void MenuCustomDrawItem(HWND hwnd, DRAWITEMSTRUCT* dis) {
     Str shortcutText = {};
     TempStr menuText = ParseMenuTextTemp(modi->text, &shortcutText);
 
-    // DrawTextEx handles & => underscore drawing
+    // DrawTextEx handles & => underscore drawing. The row can be taller than
+    // the text asks for (touch), so center in it rather than sit at the top.
+    uint vAlign = DT_VCENTER | DT_SINGLELINE;
     rc.top += padY;
     rc.left += cxCheckMark;
     WCHAR* ws = CWStrTemp(menuText);
-    DrawTextExW(hdc, ws, -1, &rc, DT_LEFT, nullptr);
+    DrawTextExW(hdc, ws, -1, &rc, DT_LEFT | vAlign, nullptr);
     if (shortcutText) {
         ws = CWStrTemp(shortcutText);
         rc = dis->rcItem;
         rc.top += padY;
         rc.right -= (padX + (cxCheckMark / 2));
-        DrawTextExW(hdc, ws, -1, &rc, DT_RIGHT, nullptr);
+        DrawTextExW(hdc, ws, -1, &rc, DT_RIGHT | vAlign, nullptr);
     }
 
     constexpr int kRadioCircleDx = 6;
@@ -2501,20 +2585,16 @@ void MenuCustomDrawItem(HWND hwnd, DRAWITEMSTRUCT* dis) {
             rc.right = rc.left + dx;
             rc.top = rc.top + (rcDy / 2) - (dx / 2);
             rc.bottom = rc.top + dx;
-            ScopedSelectObject restoreBrush(hdc, brTxt);
-            Ellipse(hdc, rc.left, rc.top, rc.right, rc.bottom);
+            FillEllipseAA(hdc, ToRect(rc), txtCol);
             return;
         }
 
         // draw a checkmark
-        AutoDeletePen pen(CreatePen(PS_SOLID, 2, txtCol));
-        ScopedSelectPen restorePen(hdc, pen);
-        POINT points[3];
         int offX = DpiScale(hwnd, 6); // 6 is chosen experimentally
-        points[0] = {rc.left + offX, rc.top + (rcDy / 2)};
-        points[1] = {rc.left + (cxCheckMark / 2), rc.bottom - (padY * 3)};
-        points[2] = {rc.left + cxCheckMark - offX, rc.top + (padY * 3)};
-        Polyline(hdc, points, dimof(points));
+        Point points[3] = {{rc.left + offX, rc.top + (rcDy / 2)},
+                           {rc.left + (cxCheckMark / 2), rc.bottom - (padY * 3)},
+                           {rc.left + cxCheckMark - offX, rc.top + (padY * 3)}};
+        DrawPolylineAA(hdc, points, 3, txtCol, 2);
     }
 }
 

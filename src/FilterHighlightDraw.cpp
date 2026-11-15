@@ -258,6 +258,17 @@ void DrawTreeItemFilterHighlight(HDC hdc, Rect labelRect, Str text, const StrVec
         }
     }
     if (nRanges == 0) {
+        // A row can be in the filtered list on its parent's account (the
+        // bookmarks under a matching chapter) and carry no match of its own.
+        // It still needs its title; returning here left those rows blank.
+        HBRUSH hbrBg = CreateSolidBrush(bgCol);
+        HdcFillRect(hdc, labelRect, hbrBg);
+        DeleteObject(hbrBg);
+        int oldBkMode = SetBkMode(hdc, TRANSPARENT);
+        COLORREF oldTxtCol = SetTextColor(hdc, txtCol);
+        HdcDrawText(hdc, text, labelRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        SetBkMode(hdc, oldBkMode);
+        SetTextColor(hdc, oldTxtCol);
         if (oldFont) {
             SelectObject(hdc, oldFont);
         }
@@ -305,7 +316,7 @@ void DrawTreeItemFilterHighlight(HDC hdc, Rect labelRect, Str text, const StrVec
     // Draw non-match runs in the row text color (white when selected+focused);
     // match runs use ink that contrasts with the underlay so yellow+white does
     // not wash out. Prefix extents keep run x positions aligned with underlays.
-    COLORREF matchTxtCol = TextColorContrasting(highlightCol);
+    COLORREF matchTxtCol = IsCurrentThemeDefault() ? TextColorContrasting(highlightCol) : ThemeWindowLinkColor();
     int oldBkMode = SetBkMode(hdc, TRANSPARENT);
     COLORREF oldTxtCol = SetTextColor(hdc, txtCol);
     int pos = 0;

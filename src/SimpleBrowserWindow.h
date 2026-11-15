@@ -25,3 +25,7 @@ struct SimpleBrowserWindow : Wnd {
 };
 
 SimpleBrowserWindow* SimpleBrowserWindowCreate(const SimpleBrowserCreateArgs&);
+
+// The in-product embedded web browser (TouchView::Web) is implemented in
+// SimpleBrowserWindow.cpp but declared in Rail.h so the rail / frame can call it
+// without pulling in WebView types.

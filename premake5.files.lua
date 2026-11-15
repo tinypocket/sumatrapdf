@@ -625,6 +625,8 @@ function sumatrapdf_files()
     "ChangeThemeDialog.*",
     "AppSettings.*",
     "AppTools.*",
+    "BrowserLogins.*",
+    "BrowserUrlUtil.*",
     "Canvas.*",
     "CanvasAboutUI.*",
     "CaptionGlyphs.*",
@@ -697,6 +699,8 @@ function sumatrapdf_files()
     "RegistryInstaller.*",
     "RegistryPreview.*",
     "RegistrySearchFilter.*",
+    "KineticScroll.*",
+    "Rail.*",
     "RenderCache.*",
     "resource.h",
     "SearchAndDDE.*",
@@ -734,6 +738,8 @@ function sumatrapdf_files()
     "TextViewWnd.*",
     "Theme.*",
     "Toolbar.*",
+    "TopBar.*",
+    "TrimDialog.*",
     "TranslationLangs.cpp",
     "Translations.*",
     "TreeModel.*",
@@ -1310,6 +1316,12 @@ function test_util_files()
   })
   files_in_dir("src", {
     --"AppTools.*",
+    "BrowserLogins.*",
+    "BrowserLogins_ut.cpp",
+    "BrowserUrlUtil.*",
+    "BrowserUrlUtil_ut.cpp",
+    "KineticScroll.cpp",
+    "KineticScroll_ut.cpp",
     "Commands.*",
     "CrashHandlerNoOp.cpp",
     "DisplayMode.*",
@@ -1331,6 +1343,8 @@ function test_util_files()
   })
   files {
     "src/tools/test_util.cpp",
+    -- KineticScroll's easing/fling asks AnimEnabled()/AnimNowMs()/AnimEaseOut()
+    "src/wingui/Anim.cpp",
   }
 end
 

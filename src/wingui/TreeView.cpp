@@ -3,6 +3,7 @@
 
 #include "base/Base.h"
 #include "base/BitManip.h"
+#include "base/Dpi.h"
 #include "base/Win.h"
 
 #include "wingui/UIModels.h"
@@ -53,6 +54,10 @@ HWND TreeView::Create(const CreateArgs& args) {
         cargs.style |= TVS_FULLROWSELECT;
         cargs.style &= ~TVS_HASLINES;
     }
+    if (args.noSystemButtons) {
+        // the owner draws its own disclosure chevron in custom-draw
+        cargs.style &= ~(TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT);
+    }
 
     Wnd::CreateControl(cargs);
 
@@ -62,6 +67,13 @@ HWND TreeView::Create(const CreateArgs& args) {
     SetWindowTheme(hwnd, L"Explorer", nullptr);
 
     TreeView_SetUnicodeFormat(hwnd, true);
+
+    if (args.itemDy > 0) {
+        TreeView_SetItemHeight(hwnd, DpiScale(hwnd, args.itemDy));
+    }
+    if (args.indentDx > 0) {
+        TreeView_SetIndent(hwnd, DpiScale(hwnd, args.indentDx));
+    }
 
     SetToolTipsDelayTime(TTDT_AUTOPOP, 32767);
 
