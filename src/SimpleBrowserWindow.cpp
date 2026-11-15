@@ -615,6 +615,18 @@ static Gdiplus::RectF TbRectF(const Rect& r) {
 }
 
 // rounded filled rect with an optional 1px border
+// The fill of an accent-surface button (ThemeAccentSurfaceColors) while it is
+// hovered or pressed: the pale accent tint moved a little toward its own text
+// colour. The hot edge colour used before is the accent itself, the same hue
+// as the label, which made the label vanish on hover.
+static COLORREF TbAccentPillBg(bool hot, bool pressed) {
+    COLORREF bg, fg;
+    ThemeAccentSurfaceColors(&bg, &fg);
+    int pct = pressed ? 22 : (hot ? 12 : 0);
+    auto mix = [pct](int a, int b) { return (a * (100 - pct) + b * pct) / 100; };
+    return RGB(mix(GetRValue(bg), GetRValue(fg)), mix(GetGValue(bg), GetGValue(fg)), mix(GetBValue(bg), GetBValue(fg)));
+}
+
 static void TbFillRounded(HDC hdc, const Rect& r, float rad, COLORREF fill, COLORREF border = kColorUnset,
                           float borderW = 1.0f) {
     if (r.dx <= 0 || r.dy <= 0) {
@@ -3688,7 +3700,7 @@ void TbChromeWnd::Draw(HDC hdc) {
             ThemeAccentSurfaceColors(&accentBg, &accentFg);
             bool odHot = (hot.part == TbPart::OpenDoc);
             bool odPressed = (pressed.part == TbPart::OpenDoc);
-            COLORREF bg = odPressed ? ThemeEdgeColor() : (odHot ? ThemeHotEdgeColor() : accentBg);
+            COLORREF bg = TbAccentPillBg(odHot, odPressed);
             TbFillRounded(hdc, openDocRect, radius, bg, ThemeEdgeColor());
             SetTextColor(hdc, accentFg);
             HdcDrawText(hdc, StrL(kTbOpenDocLabel), openDocRect, flags, font);
@@ -3700,7 +3712,7 @@ void TbChromeWnd::Draw(HDC hdc) {
             ThemeAccentSurfaceColors(&accentBg, &accentFg);
             bool slHot = (hot.part == TbPart::SaveLogin);
             bool slPressed = (pressed.part == TbPart::SaveLogin);
-            COLORREF bg = slPressed ? ThemeEdgeColor() : (slHot ? ThemeHotEdgeColor() : accentBg);
+            COLORREF bg = TbAccentPillBg(slHot, slPressed);
             TbFillRounded(hdc, saveLoginRect, radius, bg, ThemeEdgeColor());
             SetTextColor(hdc, accentFg);
             HdcDrawText(hdc, TbSaveLoginLabelTemp(act), saveLoginRect, flags | DT_END_ELLIPSIS, font);
