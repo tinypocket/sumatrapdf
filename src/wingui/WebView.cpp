@@ -158,6 +158,9 @@ enum class SharedWebViewEnvState {
 SharedWebViewEnvState gSharedEnvState = SharedWebViewEnvState::NotStarted;
 ICoreWebView2Environment* gSharedEnvironment = nullptr;
 WStr gSharedUserDataFolder;
+// URI of the document whose web message is being delivered; only set during
+// the (synchronous) delivery, for WebViewEvents::pageMessage
+static Str gWebMessageSource;
 Vec<WebviewWnd*> gPendingWebviews;
 
 // Creating the environment fails with HRESULT_FROM_WIN32(ERROR_INVALID_STATE) when
@@ -332,7 +335,14 @@ class webview2_com_handler : public ICoreWebView2CreateCoreWebView2ControllerCom
             return S_OK;
         }
         TempStr s = ToUtf8Temp(message);
+        WCHAR* source = nullptr;
+        args->get_Source(&source);
+        gWebMessageSource = source ? ToUtf8Temp(source) : Str();
         msgCb.Call(s);
+        gWebMessageSource = {};
+        if (source) {
+            CoTaskMemFree(source);
+        }
         CoTaskMemFree(message);
         return S_OK;
     }
@@ -1351,13 +1361,15 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
         settings->put_AreDefaultScriptDialogsEnabled(enableBrowserChrome ? TRUE : FALSE);
         settings->put_IsStatusBarEnabled(FALSE);
         settings->put_IsZoomControlEnabled(enableBrowserChrome ? TRUE : FALSE);
-        // WebView2's own password autosave + general autofill (ICoreWebView2Settings4).
-        // Stored in this control's dataDir, not the user's Edge profile.
+        // WebView2's general autofill (ICoreWebView2Settings4), stored in this
+        // control's dataDir, not the user's Edge profile. Its password autosave
+        // stays off: the in-product browser saves logins itself
+        // (BrowserLogins.cpp), and two "save password?" offers would compete.
         if (enableAutofill) {
             ICoreWebView2Settings4* settings4 = nullptr;
             if (SUCCEEDED(settings->QueryInterface(IID_PPV_ARGS(&settings4))) && settings4) {
                 settings4->put_IsGeneralAutofillEnabled(TRUE);
-                settings4->put_IsPasswordAutosaveEnabled(TRUE);
+                settings4->put_IsPasswordAutosaveEnabled(FALSE);
                 settings4->Release();
             }
         }
@@ -2175,6 +2187,10 @@ static void OnBrowserMessageCbHwnd(void* hwndVoid, Str msg) {
         }
         if (IsJsNotifyMessage(msg)) {
             self->OnJsNotify(msg);
+            return;
+        }
+        if (self->events.pageMessage) {
+            self->events.pageMessage(self->events.ctx, gWebMessageSource, msg);
             return;
         }
         self->OnBrowserMessage(msg);

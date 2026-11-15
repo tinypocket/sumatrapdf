@@ -66,6 +66,10 @@ struct WebViewEvents {
     // window.__sumatra__.notify(name, ...): one-way, no reply and no promise, so
     // it's the right channel for high-frequency events like scrolling
     void (*jsNotify)(void* ctx, Str method, Str paramsJson) = nullptr;
+    // any other message a page posted (window.chrome.webview.postMessage).
+    // sourceUrl is the URL of the document that posted it, as WebView2 reports
+    // it, so it can be trusted where msg (written by the page) can't.
+    void (*pageMessage)(void* ctx, Str sourceUrl, Str msg) = nullptr;
 };
 
 struct WebViewResourceProvider {

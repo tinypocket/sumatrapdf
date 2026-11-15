@@ -32,6 +32,7 @@
 #include "Theme.h"
 #include "Translations.h"
 #include "BrowserUrlUtil.h"
+#include "BrowserLogins.h"
 #include "wingui/Anim.h"
 
 #include "SimpleBrowserWindow.h"
@@ -517,6 +518,15 @@ struct TbTab {
     // the webview's init script that tints each new page with the night
     // light; 0 while it is off (see TbApplyNightLight)
     int nightLightScript = 0;
+    // A sign-in the page reported that isn't saved yet: while set (and this is
+    // the active tab) the nav row offers "Save password". Kept across the
+    // redirects that follow a sign-in, until the user answers, the tab signs
+    // in again, or the tab closes. loginOrigin is where it was typed, as the
+    // webview reported it.
+    Str loginOrigin;
+    Str loginUser;
+    Str loginPassword;
+    bool loginIsUpdate = false;
 };
 
 struct TouchBrowser {
@@ -1151,6 +1161,11 @@ static void TbRelayoutChrome(TouchBrowser* tb);
 static Rect TbMenuAnchorScreenRect(TouchBrowser* tb);
 static void TbShowFavMgr(TouchBrowser* tb);
 static void TbShowMenu(TouchBrowser* tb);
+static TempStr TbSaveLoginLabelTemp(TbTab* t);
+static void TbSaveLoginOffer(TouchBrowser* tb);
+static void TbClearLoginOffer(TbTab* t);
+static void TbForgetLogin(TouchBrowser* tb);
+static void TbNeverSaveLogin(TouchBrowser* tb);
 static void TbOnNewTab(TouchBrowser* tb);
 static void TbCloseTab(TbTab* t);
 // a tab started / finished loading: drives the nav row's progress bar, which
@@ -1257,7 +1272,9 @@ static void TbHandoffBackNow(TbHandoffBackReq* req) {
     }
 }
 
-static void TbNavigationCompleted(void* ctx, Str url, bool /*success*/) {
+static void TbFillSavedLogin(TbTab* tab, Str url);
+
+static void TbNavigationCompleted(void* ctx, Str url, bool success) {
     auto* tab = (TbTab*)ctx;
     logf("tb: navigation completed '%s'\n", url);
     // `url` is the webview's Source: what is on screen now, whether this load
@@ -1270,6 +1287,9 @@ static void TbNavigationCompleted(void* ctx, Str url, bool /*success*/) {
         // (posted: navigating from inside a WebView2 event is not safe)
         auto* req = new TbHandoffBackReq{tab->tb->win, tab->serial};
         uitask::Post(MkFunc0<TbHandoffBackReq>(TbHandoffBackNow, req), "TbHandoffBackNow");
+    }
+    if (success) {
+        TbFillSavedLogin(tab, url);
     }
     // both success and failure land here - including a navigation WebView2
     // cancelled - so the progress bar always gets to finish
@@ -2519,6 +2539,7 @@ constexpr int kTbCmdCleanup = 3;
 constexpr int kTbCmdInfo = 4;
 // the same setting, and the same panel, as the document's ... menu
 constexpr int kTbCmdNightLight = 5;
+constexpr int kTbCmdForgetLogin = 6;
 
 struct TbMenuItemDef {
     const char* label; // nullptr = separator
@@ -2532,6 +2553,7 @@ static const TbMenuItemDef gTbMenuItems[] = {
     {"Clean up downloaded files...", kTbCmdCleanup},
     {"Where do downloads go?", kTbCmdInfo},
     {nullptr, kTbCmdNone},
+    {"Forget saved password for this site", kTbCmdForgetLogin},
     {"Night light...", kTbCmdNightLight},
 };
 constexpr int kTbMenuItemCount = (int)dimof(gTbMenuItems);
@@ -2568,6 +2590,9 @@ static void TbRunMenuCmd(TbMenuCmdReq* req) {
             break;
         case kTbCmdNightLight:
             ShowTouchNightLight(win, TbMenuAnchorScreenRect(tb));
+            break;
+        case kTbCmdForgetLogin:
+            TbForgetLogin(tb);
             break;
         default:
             break;
@@ -2838,6 +2863,9 @@ enum class TbPart {
     Fwd,
     Home,
     OpenDoc,
+    SaveLogin,
+    LoginNever,
+    LoginNotNow,
     FavBtn,
     Info,
     Menu
@@ -2905,6 +2933,10 @@ struct TbChromeWnd : Wnd {
     Rect newTabRect, backRect, fwdRect, homeRect, urlRect, favBtnRect, infoRect, menuRect;
     // only laid out (non-empty) while the active tab is showing a document
     Rect openDocRect;
+    // only laid out while the active tab has a sign-in to offer saving
+    Rect saveLoginRect;
+    Rect loginNeverRect;
+    Rect loginNotNowRect;
     Rect editRect;
     int tabScrollX = 0;
     int tabContentDx = 0;
@@ -3457,11 +3489,31 @@ void TbChromeWnd::Layout(HDC hdc) {
         // and takes its width out of the URL field
         int leftOfUrl = favBtnRect.x;
         TbTab* act = TbActiveTab(tb);
+        openDocRect = {};
         if (act && act->isDocPage) {
             Size sz = HdcMeasureText(hdc, StrL(kTbOpenDocLabel), DT_SINGLELINE | DT_NOPREFIX, fontBtn);
             int dx = sz.dx + 2 * btnPadX;
             openDocRect = {favBtnRect.x - gap - dx, btnY, dx, btnDy};
             leftOfUrl = openDocRect.x;
+        }
+        // "Save password for <site>" + "Never" + "Not now" while a sign-in
+        // waits for an answer; also taken out of the URL field
+        saveLoginRect = {};
+        loginNeverRect = {};
+        loginNotNowRect = {};
+        if (act && act->loginOrigin) {
+            Size nn = HdcMeasureText(hdc, StrL("Not now"), DT_SINGLELINE | DT_NOPREFIX, fontBtn);
+            int nnDx = nn.dx + 2 * btnPadX;
+            loginNotNowRect = {leftOfUrl - gap - nnDx, btnY, nnDx, btnDy};
+            Size nv = HdcMeasureText(hdc, StrL("Never"), DT_SINGLELINE | DT_NOPREFIX, fontBtn);
+            int nvDx = nv.dx + 2 * btnPadX;
+            loginNeverRect = {loginNotNowRect.x - gap - nvDx, btnY, nvDx, btnDy};
+            Size sz = HdcMeasureText(hdc, TbSaveLoginLabelTemp(act), DT_SINGLELINE | DT_NOPREFIX, fontBtn);
+            // never squeeze the URL field below a third of the row for it
+            int maxDx = std::max(0, loginNeverRect.x - gap - x - rc.dx / 3);
+            int dx = std::min(sz.dx + 2 * btnPadX, maxDx);
+            saveLoginRect = {loginNeverRect.x - gap - dx, btnY, dx, btnDy};
+            leftOfUrl = saveLoginRect.x;
         }
 
         int urlX = x;
@@ -3642,6 +3694,26 @@ void TbChromeWnd::Draw(HDC hdc) {
             HdcDrawText(hdc, StrL(kTbOpenDocLabel), openDocRect, flags, font);
         }
 
+        TbTab* act = TbActiveTab(tb);
+        if (!saveLoginRect.IsEmpty() && act && act->loginOrigin) {
+            COLORREF accentBg, accentFg;
+            ThemeAccentSurfaceColors(&accentBg, &accentFg);
+            bool slHot = (hot.part == TbPart::SaveLogin);
+            bool slPressed = (pressed.part == TbPart::SaveLogin);
+            COLORREF bg = slPressed ? ThemeEdgeColor() : (slHot ? ThemeHotEdgeColor() : accentBg);
+            TbFillRounded(hdc, saveLoginRect, radius, bg, ThemeEdgeColor());
+            SetTextColor(hdc, accentFg);
+            HdcDrawText(hdc, TbSaveLoginLabelTemp(act), saveLoginRect, flags | DT_END_ELLIPSIS, font);
+
+            TbFillRounded(hdc, loginNeverRect, radius, btnBg(TbPart::LoginNever, -1));
+            SetTextColor(hdc, text);
+            HdcDrawText(hdc, StrL("Never"), loginNeverRect, flags, font);
+
+            TbFillRounded(hdc, loginNotNowRect, radius, btnBg(TbPart::LoginNotNow, -1));
+            SetTextColor(hdc, text);
+            HdcDrawText(hdc, StrL("Not now"), loginNotNowRect, flags, font);
+        }
+
         TbFillRounded(hdc, favBtnRect, radius, btnBg(TbPart::FavBtn, -1));
         // the button is a toggle, so it says which way it is pointing by
         // colouring its label with the accent once the page is a favorite
@@ -3723,6 +3795,15 @@ TbHit TbChromeWnd::HitTest(Point pt) const {
     if (!openDocRect.IsEmpty() && openDocRect.Contains(pt)) {
         return {TbPart::OpenDoc, -1};
     }
+    if (!saveLoginRect.IsEmpty() && saveLoginRect.Contains(pt)) {
+        return {TbPart::SaveLogin, -1};
+    }
+    if (!loginNeverRect.IsEmpty() && loginNeverRect.Contains(pt)) {
+        return {TbPart::LoginNever, -1};
+    }
+    if (!loginNotNowRect.IsEmpty() && loginNotNowRect.Contains(pt)) {
+        return {TbPart::LoginNotNow, -1};
+    }
     if (favBtnRect.Contains(pt)) {
         return {TbPart::FavBtn, -1};
     }
@@ -3773,6 +3854,18 @@ void TbChromeWnd::Invoke(const TbHit& h) {
             break;
         case TbPart::OpenDoc:
             TbOpenPageAsDoc(tb);
+            break;
+        case TbPart::SaveLogin:
+            TbSaveLoginOffer(tb);
+            break;
+        case TbPart::LoginNever:
+            TbNeverSaveLogin(tb);
+            break;
+        case TbPart::LoginNotNow:
+            if (TbTab* t = TbActiveTab(tb)) {
+                logf("tb: login for '%s' not saved (Not now)\n", t->loginOrigin);
+                TbClearLoginOffer(t);
+            }
             break;
         case TbPart::FavBtn:
             TouchWebToggleBookmark(tb->win);
@@ -4176,7 +4269,143 @@ static void TbDomContentLoaded(void* ctx) {
     }
 }
 
+// --- saved logins ------------------------------------------------------------
+// The page side and the storage are in BrowserLogins.cpp. Here: the "Save
+// password" offer in the nav row, and filling a saved login into each page of
+// its site as it loads. The site is always the one WebView2 reports for the
+// document, never what the page claims.
+
+static void TbFreeSecret(Str* s) {
+    if (s->s) {
+        SecureZeroMemory(s->s, (size_t)len(*s));
+    }
+    str::FreePtr(s);
+}
+
+static void TbClearLoginOffer(TbTab* t) {
+    bool had = (bool)t->loginOrigin;
+    str::FreePtr(&t->loginOrigin);
+    str::FreePtr(&t->loginUser);
+    TbFreeSecret(&t->loginPassword);
+    t->loginIsUpdate = false;
+    if (had && TbIsActiveTab(t)) {
+        // the nav row loses its buttons, so the URL field grows back
+        TbRelayoutChrome(t->tb);
+    }
+}
+
+static TempStr TbSaveLoginLabelTemp(TbTab* t) {
+    TempStr host = BrowserLoginHostTemp(t->loginOrigin);
+    return fmt(t->loginIsUpdate ? "Update password for %s" : "Save password for %s", host);
+}
+
+static void TbSaveLoginOffer(TouchBrowser* tb) {
+    TbTab* t = TbActiveTab(tb);
+    if (!t || !t->loginOrigin) {
+        return;
+    }
+    TempStr host = BrowserLoginHostTemp(t->loginOrigin);
+    bool ok = BrowserLoginSave(t->loginOrigin, t->loginUser, t->loginPassword);
+    logf("tb: login for '%s' %s\n", t->loginOrigin,
+         ok ? StrL("saved") : StrL("NOT saved (Credential Manager refused it)"));
+    TbClearLoginOffer(t);
+    TempStr msg = ok ? fmt("Password saved for %s. It will be filled in next time.", host)
+                     : fmt("Couldn't save the password for %s.", host);
+    ShowTemporaryNotification(TbNotificationParent(tb->win), msg);
+}
+
+static void TbForgetLogin(TouchBrowser* tb) {
+    TbTab* t = TbActiveTab(tb);
+    TempStr origin = t ? BrowserLoginOriginTemp(t->committedUrl ? t->committedUrl : t->url) : TempStr();
+    if (!origin) {
+        ShowTemporaryNotification(TbNotificationParent(tb->win), StrL("This page has no saved password."));
+        return;
+    }
+    TempStr host = BrowserLoginHostTemp(origin);
+    int n = BrowserLoginForget(origin);
+    // also undoes "Never": forgetting a site starts it over
+    bool wasNever = BrowserLoginClearNever(origin);
+    logf("tb: forgot %d saved login(s) for '%s'%s\n", n, origin, wasNever ? StrL(", offers back on") : StrL(""));
+    TempStr msg;
+    if (n > 0) {
+        msg = fmt("Forgot the saved password for %s.", host);
+    } else if (wasNever) {
+        msg = fmt("Will offer to save passwords for %s again.", host);
+    } else {
+        msg = fmt("No saved password for %s.", host);
+    }
+    ShowTemporaryNotification(TbNotificationParent(tb->win), msg);
+}
+
+static void TbNeverSaveLogin(TouchBrowser* tb) {
+    TbTab* t = TbActiveTab(tb);
+    if (!t || !t->loginOrigin) {
+        return;
+    }
+    TempStr origin = str::DupTemp(t->loginOrigin);
+    bool ok = BrowserLoginSetNever(origin);
+    logf("tb: never save logins for '%s'%s\n", origin, ok ? StrL("") : StrL(" (Credential Manager refused it)"));
+    TbClearLoginOffer(t);
+    TempStr host = BrowserLoginHostTemp(origin);
+    TempStr msg =
+        ok ? fmt("Won't offer to save passwords for %s. Undo with \"Forget saved password\" in the ... menu.", host)
+           : fmt("Couldn't remember that for %s.", host);
+    ShowTemporaryNotification(TbNotificationParent(tb->win), msg);
+}
+
+// The page reported a sign-in (the capture script's message).
+static void TbPageMessage(void* ctx, Str sourceUrl, Str msg) {
+    auto* t = (TbTab*)ctx;
+    TempStr user, password;
+    if (!BrowserLoginParseSaveMsg(msg, &user, &password)) {
+        return;
+    }
+    TempStr origin = BrowserLoginOriginTemp(sourceUrl);
+    if (!origin) {
+        return; // not an http(s) page: nothing to tie a login to
+    }
+    if (BrowserLoginIsSaved(origin, user, password)) {
+        return; // the saved login was used: nothing new to offer
+    }
+    if (BrowserLoginIsNever(origin)) {
+        return; // the user said "Never" for this site
+    }
+    bool isUpdate = BrowserLoginHasUser(origin, user);
+    logf("tb: sign-in on '%s', offering to %s it\n", origin, isUpdate ? StrL("update") : StrL("save"));
+    TbClearLoginOffer(t);
+    t->loginOrigin = str::Dup(origin);
+    t->loginUser = str::Dup(user);
+    t->loginPassword = str::Dup(password);
+    t->loginIsUpdate = isUpdate;
+    SecureZeroMemory(password.s, (size_t)len(password));
+    if (TbIsActiveTab(t)) {
+        TbRelayoutChrome(t->tb);
+    }
+}
+
+// A page of a site with a saved login finished loading: fill the login in.
+// The script re-checks location.origin, so a page that navigated on in the
+// meantime is left alone.
+static void TbFillSavedLogin(TbTab* tab, Str url) {
+    if (!tab->webView) {
+        return;
+    }
+    TempStr origin = BrowserLoginOriginTemp(url);
+    if (!origin) {
+        return;
+    }
+    TempStr user, password;
+    if (!BrowserLoginFind(origin, &user, &password)) {
+        return;
+    }
+    TempStr js = BrowserLoginFillScriptTemp(origin, user, password);
+    tab->webView->Eval(js);
+    SecureZeroMemory(js.s, (size_t)len(js));
+    SecureZeroMemory(password.s, (size_t)len(password));
+}
+
 static void TbDestroyTab(TbTab* t) {
+    TbClearLoginOffer(t);
     delete t->webView;
     str::Free(t->url);
     str::Free(t->committedUrl);
@@ -4352,6 +4581,7 @@ static WebviewWnd* TbCreateWebView(TbTab* t) {
     wv->events.documentTitleChanged = TbDocumentTitleChanged;
     wv->events.mainDocumentResponse = TbMainDocumentResponse;
     wv->events.domContentLoaded = TbDomContentLoaded;
+    wv->events.pageMessage = TbPageMessage;
     wv->events.resolveAccelCmd = TbResolveAccelCmd;
     wv->events.processFailed = TbProcessFailed;
     wv->forwardAppAccelerators = true;
@@ -4365,6 +4595,8 @@ static WebviewWnd* TbCreateWebView(TbTab* t) {
         delete wv;
         return nullptr;
     }
+    // reports sign-ins, for "Save password" (see BrowserLogins.h)
+    wv->AddInitScript(BrowserLoginCaptureScript());
     return wv;
 }
 
