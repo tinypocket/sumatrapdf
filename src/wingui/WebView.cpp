@@ -550,6 +550,9 @@ class webview2_navigation_completed_handler : public ICoreWebView2NavigationComp
         }
         BOOL success = FALSE;
         args->get_IsSuccess(&success);
+        COREWEBVIEW2_WEB_ERROR_STATUS err = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+        args->get_WebErrorStatus(&err);
+        m_wnd->lastNavHostNotFound = !success && err == COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED;
         WCHAR* uri = nullptr;
         ICoreWebView2* webview = m_wnd->webview;
         if (webview) {

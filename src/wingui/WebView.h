@@ -201,6 +201,9 @@ struct WebviewWnd : Wnd {
     Str pendingNavUrl;
     WebViewResourceProvider resourceProvider;
     WebViewEvents events;
+    // the load navigationCompleted is reporting failed because the host name
+    // does not exist (DNS); only meaningful inside that callback
+    bool lastNavHostNotFound = false;
     bool forwardAppAccelerators = true;
     bool allowClipboardRead = false;
     // in-product browser: turn on WebView2's own password autosave + autofill

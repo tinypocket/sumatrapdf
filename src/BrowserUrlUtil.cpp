@@ -180,3 +180,139 @@ TempStr TbChipLabel(Str url) {
     }
     return str::DupTemp(s);
 }
+
+static TempStr EncodeSearchQueryTemp(Str query) {
+    static constexpr char hex[] = "0123456789ABCDEF";
+    str::Builder encoded(len(query) * 3);
+    for (int i = 0; i < len(query); i++) {
+        u8 c = (u8)query.s[i];
+        bool unreserved = str::IsAlNum((char)c) || c == '-' || c == '_' || c == '.' || c == '~';
+        if (unreserved) {
+            encoded.AppendChar((char)c);
+        } else {
+            encoded.AppendChar('%');
+            encoded.AppendChar(hex[c >> 4]);
+            encoded.AppendChar(hex[c & 0x0f]);
+        }
+    }
+    return ToStrTemp(encoded);
+}
+
+TempStr TouchBrowserSearchUrlTemp(Str text) {
+    return str::JoinTemp(StrL("https://www.google.com/search?q="), EncodeSearchQueryTemp(text));
+}
+
+static bool IsAllDigits(Str s) {
+    if (len(s) == 0) {
+        return false;
+    }
+    for (int i = 0; i < len(s); i++) {
+        if (s.s[i] < '0' || s.s[i] > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// host without its ":port"
+static Str HostNameOnly(Str host) {
+    int colon = str::LastIndexOfChar(host, ':');
+    return colon >= 0 ? Str(host.s, colon) : host;
+}
+
+// "192.168.1.10": four all-digit labels
+static bool IsIpv4(Str name) {
+    int labels = 0;
+    int start = 0;
+    for (int i = 0; i <= len(name); i++) {
+        if (i == len(name) || name.s[i] == '.') {
+            if (!IsAllDigits(Str(name.s + start, i - start))) {
+                return false;
+            }
+            labels++;
+            start = i + 1;
+        }
+    }
+    return labels == 4;
+}
+
+// "example.com", "docs.example.co.uk": dotted, no empty label, and the last
+// label (the top-level domain) has a letter in it. Rules out "3.14", "e.g."
+// and ".bashrc", which are searches.
+static bool LooksLikeDomain(Str name) {
+    if (!str::ContainsChar(name, '.') || name.s[0] == '.' || name.s[len(name) - 1] == '.') {
+        return false;
+    }
+    if (str::Contains(name, StrL(".."))) {
+        return false;
+    }
+    int dot = str::LastIndexOfChar(name, '.');
+    Str tld(name.s + dot + 1, len(name) - dot - 1);
+    for (int i = 0; i < len(tld); i++) {
+        char c = tld.s[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Turns what the user typed in the browser address field into a navigable URL.
+// Explicit schemes and recognizable host names are addresses; everything else
+// is a Google query. This mirrors the useful part of a normal browser omnibox
+// without treating a single word such as "weather" as an HTTPS host name.
+// Local hosts (localhost, IP addresses) get http://, which is what a local dev
+// server speaks; real sites get https://.
+TempStr TouchBrowserAddressToUrlTemp(Str address, bool* guessedHost) {
+    if (guessedHost) {
+        *guessedHost = false;
+    }
+    Str s = address;
+    while (len(s) > 0 && str::IsWs(s.s[0])) {
+        s = Str(s.s + 1, len(s) - 1);
+    }
+    while (len(s) > 0 && str::IsWs(s.s[len(s) - 1])) {
+        s = Str(s.s, len(s) - 1);
+    }
+    if (!s) {
+        return {};
+    }
+
+    if (str::Contains(s, StrL("://")) || str::StartsWithI(s, StrL("about:")) || str::StartsWithI(s, StrL("mailto:"))) {
+        return str::DupTemp(s);
+    }
+
+    bool hasWhitespace = false;
+    for (int i = 0; i < len(s); i++) {
+        if (str::IsWs(s.s[i])) {
+            hasWhitespace = true;
+            break;
+        }
+    }
+
+    Str host = s;
+    int hostEnd = len(host);
+    for (int i = 0; i < 3; i++) {
+        int idx = str::IndexOfChar(host, "/?#"[i]);
+        if (idx >= 0 && idx < hostEnd) {
+            hostEnd = idx;
+        }
+    }
+    host = Str(host.s, hostEnd);
+
+    bool isLocalhost = str::EqI(host, StrL("localhost")) || str::StartsWithI(host, StrL("localhost:"));
+    bool isIpv6 = len(host) >= 2 && host.s[0] == '[' && str::ContainsChar(host, ']');
+    Str name = isIpv6 ? host : HostNameOnly(host);
+    bool isIpv4 = IsIpv4(name);
+    if (!hasWhitespace && (isLocalhost || isIpv6 || isIpv4)) {
+        return str::JoinTemp(StrL("http://"), s);
+    }
+    if (!hasWhitespace && LooksLikeDomain(name)) {
+        if (guessedHost) {
+            *guessedHost = true;
+        }
+        return str::JoinTemp(StrL("https://"), s);
+    }
+
+    return TouchBrowserSearchUrlTemp(s);
+}

@@ -515,6 +515,11 @@ struct TbTab {
     // back to the document can't put us in a takeover loop
     Str lastTakeoverUrl;
     double lastTakeoverMs = 0.0;
+    // Text typed in the address field that was turned into a made-up address
+    // ("melodos.com" -> https://melodos.com). If that load fails because the
+    // host doesn't exist, the tab searches for the text instead. Cleared when
+    // the load completes either way.
+    Str typedFallback;
     // the webview's init script that tints each new page with the night
     // light; 0 while it is off (see TbApplyNightLight)
     int nightLightScript = 0;
@@ -553,6 +558,9 @@ struct TouchBrowser {
     // selects the whole address (as every browser does) rather than dropping a
     // caret in the middle of the url
     bool urlSelectOnClick = false;
+    // a touch/pen tap that focused the address field selected all of it; the
+    // lift of that same tap must not then drop a caret (see TbUrlEditProc)
+    bool urlSwallowPointerUp = false;
     // WebView2's browser process died and took every tab's control with it; a
     // rebuild is queued (see TbProcessFailed). lastRebuildMs keeps a runtime
     // that dies again straight away from being rebuilt in a loop.
@@ -1286,6 +1294,27 @@ static void TbHandoffBackNow(TbHandoffBackReq* req) {
 
 static void TbFillSavedLogin(TbTab* tab, Str url);
 
+static int TbTabIdxBySerial(TouchBrowser* tb, int serial);
+
+// Posted: navigating from inside a WebView2 event is not safe. The tab is
+// re-found by serial, in case it closed meanwhile.
+struct TbSearchReq {
+    MainWindow* win = nullptr;
+    int tabSerial = 0;
+    Str text;
+};
+
+static void TbSearchNow(TbSearchReq* req) {
+    MainWindow* win = req->win;
+    TouchBrowser* tb = IsMainWindowValid(win) ? win->touchBrowser : nullptr;
+    int idx = TbTabIdxBySerial(tb, req->tabSerial);
+    if (idx >= 0 && tb->tabs[idx]->webView) {
+        tb->tabs[idx]->webView->Navigate(TouchBrowserSearchUrlTemp(req->text));
+    }
+    str::Free(req->text);
+    delete req;
+}
+
 static void TbNavigationCompleted(void* ctx, Str url, bool success) {
     auto* tab = (TbTab*)ctx;
     logf("tb: navigation completed '%s'\n", url);
@@ -1302,6 +1331,17 @@ static void TbNavigationCompleted(void* ctx, Str url, bool success) {
     }
     if (success) {
         TbFillSavedLogin(tab, url);
+    }
+    if (tab->typedFallback) {
+        // a typed "something.tld" whose host doesn't exist was meant as a
+        // search; anything else (refused, timed out) is a real site's error
+        bool notFound = !success && tab->webView && tab->webView->lastNavHostNotFound;
+        if (notFound) {
+            logf("tb: '%s' is not a site, searching for it\n", tab->typedFallback);
+            auto* req = new TbSearchReq{tab->tb->win, tab->serial, str::Dup(tab->typedFallback)};
+            uitask::Post(MkFunc0<TbSearchReq>(TbSearchNow, req), "TbSearchNow");
+        }
+        str::FreePtr(&tab->typedFallback);
     }
     // both success and failure land here - including a navigation WebView2
     // cancelled - so the progress bar always gets to finish
@@ -2999,7 +3039,15 @@ struct TbChromeWnd : Wnd {
     float PressAmount(TbPart part, int idx) const;
 };
 
-// Enter in the URL field navigates (prefixing https:// when no scheme is typed)
+// Enter in the address field navigates to URLs and searches Google for text.
+// the SDK only defines these for _WIN32_WINNT >= Windows 8
+#ifndef WM_POINTERDOWN
+#define WM_POINTERDOWN 0x0246
+#endif
+#ifndef WM_POINTERUP
+#define WM_POINTERUP 0x0247
+#endif
+
 static LRESULT CALLBACK TbUrlEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
     auto* tb = (TouchBrowser*)ref;
     // Taking focus selects the whole address, and the click that brought focus
@@ -3015,6 +3063,27 @@ static LRESULT CALLBACK TbUrlEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     }
     if (msg == WM_KILLFOCUS && tb) {
         tb->urlSelectOnClick = false;
+        tb->urlSwallowPointerUp = false;
+    }
+    // A finger or pen tap reaches the EDIT as WM_POINTER messages, which the
+    // control handles itself (it places the caret when the finger lifts)
+    // without ever turning them into the WM_LBUTTONDOWN below - so a tap left
+    // a caret where a click selects the whole address. The tap that brings
+    // focus selects everything, and its lift is swallowed; once the field has
+    // focus, taps place the caret as usual.
+    if (msg == WM_POINTERDOWN && (GetFocus() != hwnd || (tb && tb->urlSelectOnClick))) {
+        log("tb: address field tapped, selecting it all\n");
+        SetFocus(hwnd);
+        SendMessageW(hwnd, EM_SETSEL, 0, -1);
+        if (tb) {
+            tb->urlSelectOnClick = false;
+            tb->urlSwallowPointerUp = true;
+        }
+        return 0;
+    }
+    if (msg == WM_POINTERUP && tb && tb->urlSwallowPointerUp) {
+        tb->urlSwallowPointerUp = false;
+        return 0;
     }
     if (msg == WM_LBUTTONDOWN) {
         // Clicking a field that does not have focus selects all of it,
@@ -3037,9 +3106,10 @@ static LRESULT CALLBACK TbUrlEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         TempStr txt = HwndGetTextTemp(hwnd);
         WebviewWnd* wv = tb ? TbActiveWebView(tb) : nullptr;
         if (wv && !str::IsEmptyOrWhiteSpace(txt)) {
-            Str url = txt;
-            if (!str::StartsWithI(url, StrL("http://")) && !str::StartsWithI(url, StrL("https://"))) {
-                url = str::JoinTemp(StrL("https://"), txt);
+            bool guessed = false;
+            TempStr url = TouchBrowserAddressToUrlTemp(txt, &guessed);
+            if (TbTab* t = TbActiveTab(tb)) {
+                str::ReplaceWithCopy(&t->typedFallback, guessed ? Str(txt) : Str());
             }
             wv->Navigate(url);
         }
@@ -4426,6 +4496,7 @@ static void TbDestroyTab(TbTab* t) {
     str::Free(t->docPageUrl);
     str::Free(t->docPageExt);
     str::Free(t->lastTakeoverUrl);
+    str::Free(t->typedFallback);
     delete t;
 }
 

@@ -42,6 +42,11 @@ static void expectChip(Str url, Str exp) {
     utassert(str::Eq(got, exp));
 }
 
+static void expectAddress(Str address, Str exp) {
+    TempStr got = TouchBrowserAddressToUrlTemp(address);
+    utassert(str::Eq(got, exp));
+}
+
 void BrowserUrl_UnitTests() {
     // regression: ordinary web pages must NOT be classified as documents
     expectNotDoc(StrL("https://www.google.com"));            // bare host -> ft Unknown
@@ -60,6 +65,41 @@ void BrowserUrl_UnitTests() {
     expectChip(StrL("https://www.google.com/search"), StrL("google.com"));
     expectChip(StrL("http://example.org"), StrL("example.org"));
     expectChip(StrL("https://docs.example.com/a/b"), StrL("docs.example.com"));
+
+    // Address-field entries: recognizable URLs navigate directly, while plain
+    // words and phrases become URL-encoded Google searches.
+    expectAddress(StrL("https://example.com/a"), StrL("https://example.com/a"));
+    expectAddress(StrL("example.com/a"), StrL("https://example.com/a"));
+    expectAddress(StrL("melodos.com"), StrL("https://melodos.com"));
+    expectAddress(StrL("www.melodos.com"), StrL("https://www.melodos.com"));
+    expectAddress(StrL("docs.example.co.uk/x?y=1"), StrL("https://docs.example.co.uk/x?y=1"));
+    expectAddress(StrL("example.com:8443"), StrL("https://example.com:8443"));
+    // local dev servers speak http
+    expectAddress(StrL("localhost:8080/test"), StrL("http://localhost:8080/test"));
+    expectAddress(StrL("localhost"), StrL("http://localhost"));
+    expectAddress(StrL("127.0.0.1:8080"), StrL("http://127.0.0.1:8080"));
+    expectAddress(StrL("192.168.1.10"), StrL("http://192.168.1.10"));
+    expectAddress(StrL("[::1]:3000"), StrL("http://[::1]:3000"));
+    // dotted things that are not sites
+    expectAddress(StrL("3.14"), StrL("https://www.google.com/search?q=3.14"));
+    expectAddress(StrL("e.g."), StrL("https://www.google.com/search?q=e.g."));
+    expectAddress(StrL(".bashrc"), StrL("https://www.google.com/search?q=.bashrc"));
+    expectAddress(StrL("1.2.3"), StrL("https://www.google.com/search?q=1.2.3"));
+    expectAddress(StrL("about:blank"), StrL("about:blank"));
+    expectAddress(StrL("weather"), StrL("https://www.google.com/search?q=weather"));
+    expectAddress(StrL("  best PDF reader  "), StrL("https://www.google.com/search?q=best%20PDF%20reader"));
+    expectAddress(StrL("sumatrapdf + touch"), StrL("https://www.google.com/search?q=sumatrapdf%20%2B%20touch"));
+    expectAddress(StrL("caf\xC3\xA9"), StrL("https://www.google.com/search?q=caf%C3%A9"));
+    // only a made-up https:// address can fall back to a search
+    bool guessed = false;
+    TouchBrowserAddressToUrlTemp(StrL("melodos.com"), &guessed);
+    utassert(guessed);
+    TouchBrowserAddressToUrlTemp(StrL("https://melodos.com"), &guessed);
+    utassert(!guessed);
+    TouchBrowserAddressToUrlTemp(StrL("localhost:3000"), &guessed);
+    utassert(!guessed);
+    TouchBrowserAddressToUrlTemp(StrL("weather"), &guessed);
+    utassert(!guessed);
 
     // Which file types the browser pulls out and opens as a document.
     // Regression: the engine also opens .html/.txt/images, so using

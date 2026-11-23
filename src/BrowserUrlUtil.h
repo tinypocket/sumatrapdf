@@ -8,3 +8,8 @@ bool TouchBrowserFileTypeIsDownloadableDoc(FileType ft);
 FileType TouchBrowserFileTypeFromContentType(Str contentType);
 TempStr TouchBrowserExtForFileType(FileType ft);
 TempStr TbChipLabel(Str url);
+// guessedHost: set when the result is an address made up from typed text
+// with no scheme ("example.com" -> https://example.com), so a host that turns
+// out not to exist can fall back to searching for the text
+TempStr TouchBrowserAddressToUrlTemp(Str address, bool* guessedHost = nullptr);
+TempStr TouchBrowserSearchUrlTemp(Str text);
