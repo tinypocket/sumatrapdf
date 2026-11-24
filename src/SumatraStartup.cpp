@@ -58,6 +58,7 @@
 #include "SearchAndDDE.h"
 #include "SumatraProperties.h"
 #include "Tabs.h"
+#include "Recovery.h"
 #include "Translations.h"
 #include "StressTesting.h"
 #include "Version.h"
@@ -2493,6 +2494,8 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
 
     LoadSettings();
     UpdateGlobalPrefs(flags);
+    // keep a copy of unsaved PDF changes so they survive a crash (Recovery.cpp)
+    InitRecovery();
     // wingui has no access to app prefs, so push the animation settings down
     AnimSetAppEnabled(gGlobalPrefs->animateUI);
     AnimSetElaborate(gGlobalPrefs->elaborateAnimations);
@@ -2876,6 +2879,12 @@ ContinueOpenWindow:
     ChangeCurrDirToDocuments();
 
     StartAsyncUpdateCheck(win, UpdateCheck::Automatic);
+
+    // once the window is up: offer to restore changes a crash left unsaved
+    if (win) {
+        auto fn = MkFunc0<MainWindow>(RecoveryOfferAtStartup, win);
+        uitask::Post(fn, "RecoveryOfferAtStartup");
+    }
 
     if (IsDebuggerPresent()) {
         // helps when running from 10x under debugger

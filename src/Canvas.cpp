@@ -3710,6 +3710,41 @@ typedef BOOL(WINAPI* Sig_GetPointerType)(UINT32 pointerId, DWORD* pointerType);
 static Sig_GetPointerType DynGetPointerType = nullptr;
 static bool triedLoadPointerApi = false;
 
+// POINTER_INFO / POINTER_PEN_INFO, declared here because the SDK only exposes
+// them for WINVER >= 0x0602 and we target 0x0601
+struct SumatraPointerInfo {
+    UINT32 pointerType;
+    UINT32 pointerId;
+    UINT32 frameId;
+    UINT32 pointerFlags;
+    HANDLE sourceDevice;
+    HWND hwndTarget;
+    POINT ptPixelLocation;
+    POINT ptHimetricLocation;
+    POINT ptPixelLocationRaw;
+    POINT ptHimetricLocationRaw;
+    DWORD dwTime;
+    UINT32 historyCount;
+    INT32 inputData;
+    DWORD dwKeyStates;
+    UINT64 performanceCount;
+    INT32 buttonChangeType;
+};
+struct SumatraPointerPenInfo {
+    SumatraPointerInfo pointerInfo;
+    UINT32 penFlags;
+    UINT32 penMask;
+    UINT32 pressure;
+    UINT32 rotation;
+    INT32 tiltX;
+    INT32 tiltY;
+};
+// PEN_FLAG_INVERTED: the pen is turned around; PEN_FLAG_ERASER: its eraser end is pressed
+#define SUMATRA_PEN_FLAG_INVERTED 0x00000002
+#define SUMATRA_PEN_FLAG_ERASER 0x00000004
+typedef BOOL(WINAPI* Sig_GetPointerPenInfo)(UINT32 pointerId, SumatraPointerPenInfo* penInfo);
+static Sig_GetPointerPenInfo DynGetPointerPenInfo = nullptr;
+
 static void EnsurePointerApiLoaded() {
     if (triedLoadPointerApi) {
         return;
@@ -3718,6 +3753,7 @@ static void EnsurePointerApiLoaded() {
     HMODULE h = GetModuleHandleW(L"user32.dll");
     if (h) {
         DynGetPointerType = (Sig_GetPointerType)GetProcAddress(h, "GetPointerType");
+        DynGetPointerPenInfo = (Sig_GetPointerPenInfo)GetProcAddress(h, "GetPointerPenInfo");
     }
 }
 
@@ -3751,6 +3787,13 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
 
     if (msg == WM_POINTERDOWN) {
         mouseWp = MK_LBUTTON;
+        // in draw mode the pen's eraser end erases
+        bool eraserEnd = false;
+        SumatraPointerPenInfo penInfo{};
+        if (DynGetPointerPenInfo && DynGetPointerPenInfo(pointerId, &penInfo)) {
+            eraserEnd = (penInfo.penFlags & (SUMATRA_PEN_FLAG_INVERTED | SUMATRA_PEN_FLAG_ERASER)) != 0;
+        }
+        DrawModeSetPenEraser(win, eraserEnd);
         OnMouseLeftButtonDown(win, x, y, mouseWp);
         return true;
     }

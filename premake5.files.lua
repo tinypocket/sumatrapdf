@@ -629,6 +629,7 @@ function sumatrapdf_files()
     "BrowserUrlUtil.*",
     "Canvas.*",
     "DrawMode.*",
+    "Recovery.*",
     "InkShapes.*",
     "CanvasAboutUI.*",
     "CaptionGlyphs.*",

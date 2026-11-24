@@ -1308,6 +1308,7 @@ if exist ..\out\rel64_prefast_asan\InstallerData.dat del /f /q ..\out\rel64_pref
     <ClInclude Include="..\src\Rail.h" />
     <ClInclude Include="..\src\ReadAloudHighlight.h" />
     <ClInclude Include="..\src\ReadAloudPlaybackBar.h" />
+    <ClInclude Include="..\src\Recovery.h" />
     <ClInclude Include="..\src\RefHover.h" />
     <ClInclude Include="..\src\RefHoverDetect.h" />
     <ClInclude Include="..\src\RefHoverInternal.h" />
@@ -1526,6 +1527,7 @@ if exist ..\out\rel64_prefast_asan\InstallerData.dat del /f /q ..\out\rel64_pref
     <ClCompile Include="..\src\Rail.cpp" />
     <ClCompile Include="..\src\ReadAloudHighlight.cpp" />
     <ClCompile Include="..\src\ReadAloudPlaybackBar.cpp" />
+    <ClCompile Include="..\src\Recovery.cpp" />
     <ClCompile Include="..\src\RefHover.cpp" />
     <ClCompile Include="..\src\RefHoverCanvas.cpp" />
     <ClCompile Include="..\src\RefHoverDetect.cpp" />

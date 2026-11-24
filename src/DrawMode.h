@@ -14,6 +14,7 @@ bool DrawModeCanUndo(MainWindow*);
 bool DrawModeCancelStroke(MainWindow*);
 void DeleteDrawMode(MainWindow*);
 
+void DrawModeSetPenEraser(MainWindow*, bool eraser);
 bool DrawModeOnMouseDown(MainWindow*, int x, int y);
 bool DrawModeOnMouseMove(MainWindow*, int x, int y);
 bool DrawModeOnMouseUp(MainWindow*, int x, int y);

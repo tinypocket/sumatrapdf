@@ -39,13 +39,13 @@
 #include "InkShapes.h"
 #include "DrawMode.h"
 
-
 enum class DrawTool {
     Pen,
     Line,
     Arrow,
     Rect,
     Ellipse,
+    Eraser,
 };
 
 // the colors and thicknesses offered on the toolbar; thickness is in page
@@ -104,6 +104,7 @@ static const BarItem gBarItems[] = {
     {BarItemKind::Tool, (int)DrawTool::Arrow},
     {BarItemKind::Tool, (int)DrawTool::Rect},
     {BarItemKind::Tool, (int)DrawTool::Ellipse},
+    {BarItemKind::Tool, (int)DrawTool::Eraser},
     {BarItemKind::Separator, 0},
     {BarItemKind::Color, 0},
     {BarItemKind::Color, 1},
@@ -126,6 +127,17 @@ constexpr int kBarSepDx = 13;
 constexpr int kBarPad = 6;
 constexpr int kBarTopMargin = 12;
 
+// one step Undo can take back: a mark that was drawn, or one that was erased
+// (kept as the geometry needed to draw it again)
+struct DrawUndoStep {
+    Annotation* added = nullptr;
+    int erasedPageNo = 0;
+    DrawnAnnotArgs erased;
+};
+
+// the eraser takes out marks passing within this many pixels of the pointer
+constexpr int kEraserRadiusPx = 10;
+
 struct DrawModeState {
     MainWindow* win = nullptr;
     bool on = false;
@@ -137,11 +149,17 @@ struct DrawModeState {
     Point holdAnchor;
     bool snapped = false;
     InkShape shape; // when snapped, in canvas coordinates
+    // the current drag erases instead of drawing (eraser tool or the pen's
+    // eraser end); erasePos is where the eraser circle is painted
+    bool erasing = false;
+    Point erasePos;
+    // set by the pen input path just before a down: the pen's eraser end
+    bool penEraserNext = false;
 
     Vec<DrawnMark*> pending;
 
-    // marks made in this draw session, newest last
-    Vec<Annotation*> undo;
+    // what this draw session changed, newest last
+    Vec<DrawUndoStep*> undo;
     EngineBase* undoEngine = nullptr;
 
     HWND hwndBar = nullptr;
@@ -184,10 +202,17 @@ static bool CanDrawOn(MainWindow* win) {
 // Undo entries point at annotations of one engine. Saving reloads the document
 // into a new engine, after which they mean nothing: drop them rather than test
 // (and dereference) stale pointers.
+static void ClearUndo(DrawModeState* st) {
+    for (DrawUndoStep* step : st->undo) {
+        delete step;
+    }
+    st->undo.Reset();
+}
+
 static void DropStaleUndo(DrawModeState* st) {
     EngineBase* engine = CurrentEngine(st->win);
     if (st->undoEngine != engine) {
-        st->undo.Reset();
+        ClearUndo(st);
         st->undoEngine = engine;
     }
 }
@@ -363,6 +388,17 @@ void PaintDrawModeOverlay(MainWindow* win, HDC hdc) {
     for (DrawnMark* m : st->pending) {
         PaintMark(g, dm, m);
     }
+    if (st->drawing && st->erasing) {
+        // the eraser's reach, so it's clear what it will take out
+        float r = (float)DpiScale(win->hwndCanvas, kEraserRadiusPx);
+        Gdiplus::SolidBrush fill(Gdiplus::Color(40, 120, 120, 120));
+        Gdiplus::Pen ring(Gdiplus::Color(200, 90, 90, 90), 1.5f);
+        float x = (float)st->erasePos.x;
+        float y = (float)st->erasePos.y;
+        g.FillEllipse(&fill, x - r, y - r, 2 * r, 2 * r);
+        g.DrawEllipse(&ring, x - r, y - r, 2 * r, 2 * r);
+        return;
+    }
     if (st->drawing && len(st->pts) > 0) {
         AnnotationType type;
         bool arrow;
@@ -508,6 +544,12 @@ static void PaintBarGlyph(Gdiplus::Graphics& g, const BarItem& it, float cx, flo
                 case DrawTool::Ellipse:
                     g.DrawEllipse(&pen, cx - 10 * s, cy - 7 * s, 20 * s, 14 * s);
                     break;
+                case DrawTool::Eraser: {
+                    // a tilted eraser block with its rubber end marked off
+                    Gdiplus::PointF block[] = {P(-9, 3), P(3, -9), P(9, -3), P(-3, 9)};
+                    g.DrawPolygon(&pen, block, 4);
+                    g.DrawLine(&pen, P(-6, 0), P(0, 6));
+                } break;
             }
             break;
         case BarItemKind::Color: {
@@ -818,7 +860,7 @@ void ExitDrawMode(MainWindow* win) {
     }
     DrawModeCancelStroke(win);
     st->on = false;
-    st->undo.Reset();
+    ClearUndo(st);
     FreePending(st);
     if (st->hwndBar) {
         ShowWindow(st->hwndBar, SW_HIDE);
@@ -837,6 +879,7 @@ void DeleteDrawMode(MainWindow* win) {
         DestroyWindow(st->hwndBar);
     }
     FreePending(st);
+    ClearUndo(st);
     delete st;
     win->drawMode = nullptr;
 }
@@ -859,6 +902,7 @@ bool DrawModeCancelStroke(MainWindow* win) {
     }
     st->drawing = false;
     st->snapped = false;
+    st->erasing = false;
     st->pts.Reset();
     KillTimer(win->hwndCanvas, kDrawHoldTimerID);
     if (GetCapture() == win->hwndCanvas) {
@@ -869,6 +913,75 @@ bool DrawModeCancelStroke(MainWindow* win) {
 }
 
 static void CommitStroke(DrawModeState* st);
+static void AfterAnnotationsChanged(MainWindow* win);
+
+static void ForgetPendingMark(DrawModeState* st, Annotation* annot) {
+    for (int i = len(st->pending) - 1; i >= 0; i--) {
+        if (st->pending[i]->annot == annot) {
+            delete st->pending[i];
+            st->pending.RemoveAt(i);
+        }
+    }
+}
+
+// Takes out every drawn mark (ink, line, shape) within the eraser's reach of
+// pt. Highlights and other annotations are left alone.
+static void EraseAt(DrawModeState* st, Point pt) {
+    MainWindow* win = st->win;
+    DisplayModel* dm = win->AsFixed();
+    WindowTab* tab = win->CurrentTab();
+    int pageNo = dm ? dm->GetPageNoByPoint(pt) : 0;
+    if (!tab || pageNo <= 0) {
+        return;
+    }
+    EngineBase* engine = CurrentEngine(win);
+    PointF pagePt = dm->CvtFromScreen(pt, pageNo);
+    float zoom = std::max(0.01f, dm->GetZoomReal(pageNo));
+    float tolerance = (float)DpiScale(win->hwndCanvas, kEraserRadiusPx) / zoom;
+    bool erased = false;
+    // a few marks can overlap under one spot; take them all
+    for (int i = 0; i < 16; i++) {
+        Annotation* annot = EngineFindDrawnAnnotationAt(engine, pageNo, pagePt, tolerance);
+        if (!annot) {
+            break;
+        }
+        auto* step = new DrawUndoStep();
+        if (GetDrawnAnnotArgs(annot, step->erased)) {
+            step->erasedPageNo = pageNo;
+            DropStaleUndo(st);
+            st->undo.Append(step);
+        } else {
+            delete step;
+        }
+        ForgetPendingMark(st, annot);
+        DeleteAnnotationAndUpdateUI(tab, annot);
+        erased = true;
+        logf("draw: erased a mark on page %d\n", pageNo);
+    }
+    if (erased) {
+        AfterAnnotationsChanged(win);
+    }
+}
+
+// erases along the segment from a to b, so a quick swipe doesn't skip marks
+static void EraseAlong(DrawModeState* st, Point a, Point b) {
+    int step = std::max(2, DpiScale(st->win->hwndCanvas, kEraserRadiusPx) / 2);
+    int dist = std::max(abs(b.x - a.x), abs(b.y - a.y));
+    int n = std::max(1, dist / step);
+    for (int i = 1; i <= n; i++) {
+        Point p(a.x + (b.x - a.x) * i / n, a.y + (b.y - a.y) * i / n);
+        EraseAt(st, p);
+    }
+}
+
+// The pen input path (Canvas.cpp) calls this before forwarding a pen-down, so
+// turning the pen around to its eraser end erases whatever tool is selected.
+void DrawModeSetPenEraser(MainWindow* win, bool eraser) {
+    DrawModeState* st = GetState(win);
+    if (st) {
+        st->penEraserNext = eraser;
+    }
+}
 
 bool DrawModeOnMouseDown(MainWindow* win, int x, int y) {
     DrawModeState* st = GetState(win);
@@ -888,12 +1001,20 @@ bool DrawModeOnMouseDown(MainWindow* win, int x, int y) {
     DropStaleUndo(st);
     st->drawing = true;
     st->snapped = false;
+    st->erasing = gDrawTool == DrawTool::Eraser || st->penEraserNext;
+    st->penEraserNext = false;
     st->pageNo = pageNo;
     st->pts.Reset();
     st->pts.Append(Point(x, y));
     st->holdAnchor = Point(x, y);
     SetCapture(win->hwndCanvas);
     HwndSetFocus(win->hwndFrame);
+    if (st->erasing) {
+        st->erasePos = Point(x, y);
+        EraseAt(st, Point(x, y));
+        ScheduleRepaint(win, 0);
+        return true;
+    }
     if (gDrawTool == DrawTool::Pen) {
         SetTimer(win->hwndCanvas, kDrawHoldTimerID, kHoldDelayMs, nullptr);
         // a dot shows as soon as the pen touches down
@@ -908,6 +1029,12 @@ bool DrawModeOnMouseMove(MainWindow* win, int x, int y) {
         return false;
     }
     Point pt(x, y);
+    if (st->erasing) {
+        EraseAlong(st, st->erasePos, pt);
+        st->erasePos = pt;
+        ScheduleRepaint(win, 0);
+        return true;
+    }
     if (st->snapped) {
         // the shape is set; moving on only matters for a line, whose end follows
         if (st->shape.kind == InkShapeKind::Line && len(st->shape.points) == 2) {
@@ -936,7 +1063,7 @@ bool DrawModeOnMouseMove(MainWindow* win, int x, int y) {
 
 static void SnapHeldStroke(DrawModeState* st) {
     KillTimer(st->win->hwndCanvas, kDrawHoldTimerID);
-    if (!st->drawing || st->snapped || gDrawTool != DrawTool::Pen) {
+    if (!st->drawing || st->snapped || st->erasing || gDrawTool != DrawTool::Pen) {
         return;
     }
     Vec<PointF> pts;
@@ -1074,7 +1201,9 @@ static void CommitStroke(DrawModeState* st) {
     }
     logf("draw: added type %d annotation on page %d (%d points)\n", (int)m->type, m->pageNo, len(m->pts));
     DropStaleUndo(st);
-    st->undo.Append(annot);
+    auto* step = new DrawUndoStep();
+    step->added = annot;
+    st->undo.Append(step);
     // keep painting the mark until the page re-renders with its annotation
     m->annot = annot;
     m->shownAt = GetTickCount();
@@ -1089,6 +1218,10 @@ bool DrawModeOnMouseUp(MainWindow* win, int x, int y) {
         return false;
     }
     DrawModeOnMouseMove(win, x, y);
+    if (st->erasing) {
+        DrawModeCancelStroke(win); // ends the drag; erasing already happened
+        return true;
+    }
     CommitStroke(st);
     return true;
 }
@@ -1129,19 +1262,26 @@ void DrawModeUndo(MainWindow* win) {
     DropStaleUndo(st);
     EngineBase* engine = CurrentEngine(win);
     WindowTab* tab = win->CurrentTab();
-    while (len(st->undo) > 0) {
-        Annotation* annot = st->undo.Pop();
-        if (!tab || !EngineHasAnnotation(engine, annot)) {
-            continue;
-        }
-        for (int i = len(st->pending) - 1; i >= 0; i--) {
-            if (st->pending[i]->annot == annot) {
-                delete st->pending[i];
-                st->pending.RemoveAt(i);
+    while (len(st->undo) > 0 && tab) {
+        DrawUndoStep* step = st->undo.Pop();
+        if (step->added) {
+            Annotation* annot = step->added;
+            delete step;
+            if (!EngineHasAnnotation(engine, annot)) {
+                continue; // already deleted some other way
             }
+            ForgetPendingMark(st, annot);
+            DeleteAnnotationAndUpdateUI(tab, annot);
+            logf("draw: undid a mark, %d left\n", len(st->undo));
+        } else {
+            // put an erased mark back
+            Annotation* annot = EngineMupdfCreateDrawnAnnotation(engine, step->erasedPageNo, step->erased);
+            delete step;
+            if (!annot) {
+                continue;
+            }
+            logf("draw: undid an erase, %d left\n", len(st->undo));
         }
-        DeleteAnnotationAndUpdateUI(tab, annot);
-        logf("draw: undid a mark, %d left\n", len(st->undo));
         AfterAnnotationsChanged(win);
         return;
     }

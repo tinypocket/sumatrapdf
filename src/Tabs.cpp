@@ -32,6 +32,7 @@
 #include "Menu.h"
 #include "TableOfContents.h"
 #include "Tabs.h"
+#include "Recovery.h"
 #include "SumatraDialogs.h"
 #include "FileHistory.h"
 #include "Theme.h"
@@ -601,6 +602,7 @@ static void TabsContextMenu(ContextMenuEvent* ev) {
         case CmdDiscardChanges: {
             // revert to the on-disk version, discarding unsaved changes
             TabsSelect(win, tabIdx);
+            RecoveryForgetFile(tabUnderMouse->filePath);
             ReloadDocument(win, false);
             return;
         }

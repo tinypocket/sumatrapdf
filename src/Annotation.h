@@ -97,6 +97,8 @@ struct DrawnAnnotArgs {
     AnnotationType annotType = AnnotationType::Ink;
     // Ink: the stroke; Line: start, end; Square/Circle: two corners; Polygon: vertices
     Vec<PointF> points;
+    // Ink with several strokes: how many of points belong to each (empty = one stroke)
+    Vec<int> strokeCounts;
     bool arrowEnd = false;
     PdfColor col = 0;
     float borderWidth = 2;

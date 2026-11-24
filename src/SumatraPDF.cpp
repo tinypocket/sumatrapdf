@@ -84,6 +84,7 @@
 #include "SelectTextKeyboard.h"
 #include "SelectionToolbar.h"
 #include "DrawMode.h"
+#include "Recovery.h"
 #include "ScreenshotCapture.h"
 #include "Screenshot.h"
 #include "ImageSaveCropResize.h"
@@ -3698,6 +3699,8 @@ void StartLoadDocument(LoadArgs* argsIn) {
         argsIn->onFinished.Call(false);
         return;
     }
+    // a crash left unsaved changes for this PDF: offer them back before it loads
+    RecoveryBeforeLoad(win->hwndFrame, path);
 
     if (argsIn->targetTab) {
         argsIn->targetTab->loadState = WindowTab::LoadState::Loading;
@@ -4556,6 +4559,7 @@ bool SaveAnnotationsToExistingFile(WindowTab* tab) {
         tab->ignoreNextAutoReload = false;
         return false;
     }
+    RecoveryForgetFile(path);
     ShowSavedAnnotationsNotification(tab->win->hwndCanvas, path);
 
     // Capture selection before the engine (and Annotation*) is torn down.
@@ -4644,6 +4648,8 @@ bool SaveAnnotationsToMaybeNewPdfFile(WindowTab* tab) {
         str::Free(srcFileName);
         return false;
     }
+    // the changes are safe in the new file; the original keeps none
+    RecoveryForgetFile(srcFileName);
 
     // Capture selection before the engine (and Annotation*) is torn down.
     SavedAnnotSel sel = CaptureSelectedAnnotation(tab);
@@ -4795,6 +4801,7 @@ bool MaybeSaveAnnotations(WindowTab* tab) {
     }
     switch (choice) {
         case SaveChoice::Discard:
+            RecoveryForgetFile(path);
             return true;
         case SaveChoice::SaveNew: {
             bool didSave = SaveAnnotationsToMaybeNewPdfFile(tab);
@@ -4808,6 +4815,9 @@ bool MaybeSaveAnnotations(WindowTab* tab) {
             ShowErrorData data{tab, path};
             auto fn = MkFunc1(ShowSaveAnnotationError, &data);
             bool didSave = EngineMupdfSaveUpdated(engine, nullptr, fn);
+            if (didSave) {
+                RecoveryForgetFile(path);
+            }
             if (!didSave) {
                 // fn reported the error. Don't close: that would discard the
                 // annotations. Re-arm the prompt so the user can retry or pick
@@ -10904,6 +10914,7 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             // revert to the on-disk version, discarding unsaved changes (same as
             // the tab context menu); makes it work from the command palette too
             if (tab && win->IsDocLoaded()) {
+                RecoveryForgetFile(tab->filePath);
                 ReloadDocument(win, false);
             }
             return 0;

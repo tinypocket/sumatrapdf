@@ -2896,6 +2896,9 @@ static Str PalmDocToHTML(Str path) {
     return html;
 }
 
+extern Str gRecoveryCopyToLoad;
+extern Str gRecoveryCopyForFile;
+
 bool EngineMupdf::Load(Str path, PasswordUI* pwdUI) {
     bool ok;
     auto* ctx = Ctx();
@@ -2946,6 +2949,35 @@ bool EngineMupdf::Load(Str path, PasswordUI* pwdUI) {
             return false;
         }
         return FinishLoading();
+    }
+
+    // restoring changes a crash left unsaved: read the recovery copy instead of
+    // the file (into memory, so the copy can be deleted once saved)
+    bool restoring = streamNo < 0 && len(gRecoveryCopyToLoad) > 0 && path::IsSame(path, gRecoveryCopyForFile);
+    if (restoring) {
+        TempStr copyPath = str::DupTemp(gRecoveryCopyToLoad);
+        str::FreePtr(&gRecoveryCopyToLoad);
+        str::FreePtr(&gRecoveryCopyForFile);
+        Str d = file::ReadFile(copyPath);
+        bool loaded = false;
+        if (len(d) > 0) {
+            fz_buffer* buf = fz_new_buffer_from_copied_data(ctx, (const u8*)d.s, (size_t)d.len);
+            fz_stream* copy = fz_open_buffer(ctx, buf);
+            fz_drop_buffer(ctx, buf);
+            loaded = LoadFromStream(copy, FilePath(), pwdUI) && FinishLoading();
+            if (!loaded && _doc) {
+                fz_drop_document(ctx, _doc);
+                _doc = nullptr;
+            }
+        }
+        str::Free(d);
+        logf("EngineMupdf::Load: restoring unsaved changes to '%s' from '%s': %s\n", path, copyPath,
+             loaded ? StrL("restored") : StrL("failed, opening the file as it is"));
+        if (loaded) {
+            restoredFromRecovery = true;
+            modifiedAnnotations = true; // the changes are not in the file yet
+            return true;
+        }
     }
 
     fz_stream* file = FzOpenOrReadFile(ctx, fnCopy);
@@ -3418,6 +3450,72 @@ static fz_buffer* EngineMupdfLoadExternalStream(fz_context* ctx, const char* fil
     }
     str::Free(data);
     return buf;
+}
+
+// Crash recovery (Recovery.cpp). The app (not the previewer / search filter,
+// which also compile this file) installs the change callback. A recovery copy
+// is the whole document as currently edited; restoring loads that copy in
+// place of the file at gRecoveryCopyForFile, keeping the file's own path.
+Str gRecoveryCopyToLoad;
+Str gRecoveryCopyForFile;
+void (*gOnAnnotationsModified)(EngineMupdf*) = nullptr;
+
+// Writes the document, unsaved changes included, to path as a complete PDF.
+// Serialised into memory under the document lock, then written to disk
+// atomically, so a crash mid-write never destroys the previous good copy.
+// The document itself is not changed: this is a plain (non-incremental) write
+// to another output.
+extern const pdf_write_options pdf_default_write_options2;
+
+bool EngineMupdfSaveRecoveryCopy(EngineBase* engine, Str path) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        return false;
+    }
+    auto* ctx = e->Ctx();
+    fz_buffer* buf = nullptr;
+    fz_output* out = nullptr;
+    bool ok = false;
+    fz_var(buf);
+    fz_var(out);
+    {
+        ScopedRecursiveMutex scope(&e->docLock);
+        fz_try(ctx) {
+            buf = fz_new_buffer(ctx, 64 * 1024);
+            out = fz_new_output_with_buffer(ctx, buf);
+            // a local copy of MuPDF's defaults: its own is data the DLL build doesn't export
+            pdf_write_options opts = pdf_default_write_options2;
+            pdf_write_document(ctx, e->pdfdoc, out, &opts);
+            fz_close_output(ctx, out);
+            ok = true;
+        }
+        fz_always(ctx) {
+            fz_drop_output(ctx, out);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+        }
+    }
+    if (ok) {
+        TempStr tmpPath = str::JoinTemp(path, StrL(".tmp"));
+        unsigned char* data = nullptr;
+        size_t size = fz_buffer_storage(ctx, buf, &data);
+        ok = file::WriteFile(tmpPath, Str((char*)data, (int)size));
+        if (ok) {
+            ok = MoveFileExW(CWStrTemp(ToWStrTemp(tmpPath)), CWStrTemp(ToWStrTemp(path)), MOVEFILE_REPLACE_EXISTING) !=
+                 0;
+        }
+        if (!ok) {
+            file::Delete(tmpPath);
+        }
+    }
+    fz_drop_buffer(ctx, buf);
+    return ok;
+}
+
+bool EngineMupdfWasRestoredFromRecovery(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    return e && e->restoredFromRecovery;
 }
 
 bool EngineMupdf::FinishLoading() {
@@ -5870,6 +5968,11 @@ bool EngineMupdfSaveUpdated(EngineBase* engine, Str path, const ShowErrorCb& sho
     // TODO: if saving to a new file, don't do incremental and linearlize?
     // save_opts.do_linear = 1;
     save_opts.do_incremental = pdf_can_be_saved_incrementally(ctx, epdf->pdfdoc);
+    if (epdf->restoredFromRecovery) {
+        // the document came from a recovery copy, not from the file: appending
+        // to the file would leave out the restored changes, so write it whole
+        save_opts.do_incremental = 0;
+    }
     save_opts.do_compress = 1;
     save_opts.do_compress_images = 1;
     save_opts.do_compress_fonts = 1;
@@ -6336,6 +6439,11 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
     e->modifiedAnnotations = true;
     if (!e->pdfdoc) {
         return;
+    }
+    if (gOnAnnotationsModified) {
+        // the app refreshes the unsaved-changes badge and schedules a
+        // recovery copy; it only posts work, so calling it first is fine
+        gOnAnnotationsModified(e);
     }
     int pageNo = annot->pageNo;
     ReportIf(pageNo < 1 || pageNo > e->pageCount);

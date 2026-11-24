@@ -37,6 +37,7 @@
 #include "Tabs.h"
 #include "Favorites.h"
 #include "DrawMode.h"
+#include "Recovery.h"
 #include "TopBar.h"
 #include "Theme.h"
 #include "Translations.h"
@@ -145,6 +146,10 @@ enum class TopBarItem {
     Overflow,  // decorative 44px more button
     PageBox,   // "1 / 613": current page bold, the total muted
     ZoomLabel, // "88%"
+    // only while the document has unsaved changes: a dot and "Unsaved
+    // changes", then Save / Save as... text pills
+    UnsavedLabel,
+    TextButton,
 };
 
 struct TopBarSlot {
@@ -175,6 +180,11 @@ static TopBarSlot gTopBarSlots[] = {
     {TopBarItem::Button, TbIcon::SearchNext, CmdGoToNextPage, 1, false, false},
     {TopBarItem::Bookmark, TbIcon::Bookmark, kTopBarBookmark, 2, false, false},
 
+    // the unsaved-changes badge leads the right-hand cluster
+    {TopBarItem::UnsavedLabel, TbIcon::None, 0, 9, true, false},
+    {TopBarItem::TextButton, TbIcon::None, CmdSaveAnnotations, 9, true, false},
+    {TopBarItem::TextButton, TbIcon::None, CmdSaveAnnotationsNewFile, 9, true, false},
+
     {TopBarItem::Button, TbIcon::ZoomOut, CmdZoomOut, 3, true, false},
     {TopBarItem::ZoomLabel, TbIcon::None, kTopBarZoomEdit, 3, true, false},
     {TopBarItem::Button, TbIcon::ZoomIn, CmdZoomIn, 3, true, false},
@@ -204,6 +214,7 @@ static bool SlotHasWash(const TopBarSlot& slot) {
         case TopBarItem::Preview:
         case TopBarItem::Overflow:
         case TopBarItem::Button:
+        case TopBarItem::TextButton:
             return true;
         default:
             return false;
@@ -740,6 +751,31 @@ static TempStr PageTextTemp(MainWindow* win) {
     return fmt("%s / %d", cur, ctrl->PageCount());
 }
 
+// the document has changes (drawings, highlights, form edits...) that are not
+// in the file yet
+static bool HasUnsavedChanges(MainWindow* win) {
+    DisplayModel* dm = (win && win->IsDocLoaded()) ? win->AsFixed() : nullptr;
+    return dm && EngineHasUnsavedAnnotations(dm->GetEngine());
+}
+
+// Save writes into the file itself; a browser download in the temp folder
+// or a read-only file has to be saved under a new name instead
+static bool CanSaveInPlace(MainWindow* win) {
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    return dm && !IsPathSaveAsOnly(dm->GetFilePath());
+}
+
+static Str UnsavedLabelText(MainWindow* win) {
+    if (!CanSaveInPlace(win)) {
+        return _TRA("Unsaved - save a copy to keep");
+    }
+    return _TRA("Unsaved changes");
+}
+
+static Str TextButtonLabel(int cmdId) {
+    return cmdId == CmdSaveAnnotations ? _TRA("Save") : _TRA("Save as...");
+}
+
 static TempStr ZoomTextTemp(MainWindow* win) {
     DocController* ctrl = win ? win->ctrl : nullptr;
     if (!ctrl) {
@@ -843,6 +879,8 @@ bool TopBarWnd::Layout(HDC hdc, Rect* rects) {
     bool hasDoc = win && win->IsDocLoaded();
 
     bool railMode = IsRailVisible(win);
+    bool unsaved = hasDoc && HasUnsavedChanges(win);
+    HFONT badgeFont = TopBarFontWeighted(hdc, kFontSizeLabel, kFontWeightStrong);
 
     bool visible[kTopBarSlotCount]{};
     for (int i = 0; i < kTopBarSlotCount; i++) {
@@ -857,12 +895,25 @@ bool TopBarWnd::Layout(HDC hdc, Rect* rects) {
         } else if (slot.cmdId == CmdToggleDrawMode) {
             DisplayModel* dm = hasDoc ? win->AsFixed() : nullptr;
             visible[i] = dm && EngineSupportsAnnotations(dm->GetEngine());
+        } else if (slot.item == TopBarItem::UnsavedLabel || slot.item == TopBarItem::TextButton) {
+            visible[i] = unsaved;
+            if (slot.cmdId == CmdSaveAnnotations) {
+                visible[i] = unsaved && CanSaveInPlace(win);
+            }
         }
     }
 
     auto slotDx = [&](const TopBarSlot& s) {
         if (s.item == TopBarItem::PageBox) {
             return pageBoxDx;
+        }
+        if (s.item == TopBarItem::UnsavedLabel) {
+            Size sz = HdcGetTextExtentPoint32Font(hdc, UnsavedLabelText(win), badgeFont);
+            return sz.dx + DpiScale(hwnd, 22); // dot + gap + text + a little air
+        }
+        if (s.item == TopBarItem::TextButton) {
+            Size sz = HdcGetTextExtentPoint32Font(hdc, TextButtonLabel(s.cmdId), badgeFont);
+            return sz.dx + DpiScale(hwnd, 28);
         }
         if (s.item == TopBarItem::ZoomLabel) {
             return zoomDx;
@@ -877,12 +928,18 @@ bool TopBarWnd::Layout(HDC hdc, Rect* rects) {
         if (s.item == TopBarItem::Preview || s.item == TopBarItem::Bookmark) {
             return DpiScale(hwnd, 40);
         }
+        if (s.item == TopBarItem::TextButton) {
+            return DpiScale(hwnd, 36);
+        }
         return btn;
     };
 
     auto runPad = [&](int group) { return (group == 1) ? DpiScale(hwnd, 3) : ((group == 3) ? DpiScale(hwnd, 4) : 0); };
 
     auto runInnerGap = [&](int group) {
+        if (group == 9) {
+            return DpiScale(hwnd, 6); // the unsaved badge's pills
+        }
         return (group == 1) ? DpiScale(hwnd, 2) : ((group == 3) ? DpiScale(hwnd, 4) : 0);
     };
 
@@ -2306,6 +2363,36 @@ void TopBarWnd::OnPaint(HDC hdc, PAINTSTRUCT*) {
                 rTot.dx = szTot.dx;
                 SetTextColor(hdc, mutedCol);
                 HdcDrawTextTabular(hdc, total, rTot, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX, fTot);
+                break;
+            }
+            case TopBarItem::UnsavedLabel: {
+                // an amber dot, like the tab strip's dot for unsaved documents
+                int d = DpiScale(hwnd, 8);
+                Rect dot{r.x + DpiScale(hwnd, 4), r.y + (r.dy - d) / 2, d, d};
+                FillTrack(hdc, dot, d / 2, RGB(0xe0, 0x8a, 0x00));
+                Rect text = r;
+                text.x = dot.x + d + DpiScale(hwnd, 8);
+                text.dx = r.x + r.dx - text.x;
+                SetTextColor(hdc, textCol);
+                HdcDrawText(hdc, UnsavedLabelText(win), text, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX,
+                            TopBarFontWeighted(hdc, kFontSizeLabel, kFontWeightStrong));
+                break;
+            }
+            case TopBarItem::TextButton: {
+                // Save is the accent pill (the thing to do); Save as... is quieter
+                bool primary = slot.cmdId == CmdSaveAnnotations;
+                COLORREF fill = groupCol;
+                COLORREF fg = textCol;
+                if (primary) {
+                    ThemeAccentSurfaceColors(&fill, &fg);
+                }
+                FillTrack(hdc, r, r.dy / 2, fill);
+                if (emphasis > 0.0f) {
+                    FillTrack(hdc, washRect, washRect.dy / 2, AnimLerpColor(fill, AccentColor(fill, 14), emphasis));
+                }
+                SetTextColor(hdc, fg);
+                HdcDrawText(hdc, TextButtonLabel(slot.cmdId), r, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
+                            TopBarFontWeighted(hdc, kFontSizeLabel, kFontWeightStrong));
                 break;
             }
             case TopBarItem::ZoomLabel: {
