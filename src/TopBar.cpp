@@ -36,6 +36,7 @@
 #include "Rail.h"
 #include "Tabs.h"
 #include "Favorites.h"
+#include "DrawMode.h"
 #include "TopBar.h"
 #include "Theme.h"
 #include "Translations.h"
@@ -179,6 +180,8 @@ static TopBarSlot gTopBarSlots[] = {
     {TopBarItem::Button, TbIcon::ZoomIn, CmdZoomIn, 3, true, false},
     {TopBarItem::Button, TbIcon::SmartWidth, kTopBarSmartWidth, 4, true, false},
     {TopBarItem::Button, TbIcon::RotateRight, CmdRotateRight, 4, true, false},
+    // draw on the page (DrawMode.cpp); only for documents that take annotations
+    {TopBarItem::Button, TbIcon::Pen, CmdToggleDrawMode, 4, true, false},
     // dark-mode toggles: Contrast = dark mode on the document pages,
     // Moon = light/dark theme for the app chrome (kept in both 2a and 4a)
     {TopBarItem::Button, TbIcon::Contrast, CmdInvertColors, 5, true, false},
@@ -778,6 +781,8 @@ static bool IsSlotActive(MainWindow* win, const TopBarSlot& slot) {
             return !IsLightColor(ThemeWindowBackgroundColor());
         case CmdInvertColors:
             return GetInvertPageColors();
+        case CmdToggleDrawMode:
+            return IsDrawModeOn(win);
     }
     DocController* ctrl = win ? win->ctrl : nullptr;
     if (!ctrl) {
@@ -849,6 +854,9 @@ bool TopBarWnd::Layout(HDC hdc, Rect* rects) {
             visible[i] = hasDoc && pageEditing;
         } else if (slot.cmdId == CmdZoomOut || slot.cmdId == CmdZoomIn) {
             visible[i] = hasDoc && zoomEditing;
+        } else if (slot.cmdId == CmdToggleDrawMode) {
+            DisplayModel* dm = hasDoc ? win->AsFixed() : nullptr;
+            visible[i] = dm && EngineSupportsAnnotations(dm->GetEngine());
         }
     }
 

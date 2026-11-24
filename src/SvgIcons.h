@@ -47,6 +47,8 @@ enum class TbIcon {
     Web,
     Moon,
     Contrast,
+    // pencil: turns draw mode on/off
+    Pen,
     // Smart Width's two margins, drawn on its button while it is on
     SmartWidthMargin,
     SmartWidthTight,

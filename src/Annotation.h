@@ -92,6 +92,17 @@ struct AnnotCreateArgs {
     Pixmap* stampImage = nullptr;
 };
 
+// a mark made in draw mode; points are in page coordinates
+struct DrawnAnnotArgs {
+    AnnotationType annotType = AnnotationType::Ink;
+    // Ink: the stroke; Line: start, end; Square/Circle: two corners; Polygon: vertices
+    Vec<PointF> points;
+    bool arrowEnd = false;
+    PdfColor col = 0;
+    float borderWidth = 2;
+    int opacity = 100;
+};
+
 int PageNo(Annotation*);
 RectF GetBounds(Annotation*);
 RectF GetRect(Annotation*);

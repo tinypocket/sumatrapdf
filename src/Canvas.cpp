@@ -55,6 +55,7 @@
 #include "LinkFollow.h"
 #include "SelectTextKeyboard.h"
 #include "SelectionToolbar.h"
+#include "DrawMode.h"
 #include "ReadAloudHighlight.h"
 #include "ReadAloudPlaybackBar.h"
 #include "TextToSpeech.h"
@@ -1331,6 +1332,9 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
     DisplayModel* dm = win->AsFixed();
     // ReportIf(!dm); // can happen if reload fails, we delete DisplayModel
     if (!dm) return;
+    if (DrawModeOnMouseMove(win, x, y)) {
+        return;
+    }
 
     if (win->InPresentation()) {
         if (PM_BLACK_SCREEN == win->presentation || PM_WHITE_SCREEN == win->presentation) {
@@ -1843,6 +1847,10 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
     if (IsRightDragging(win)) {
         return;
     }
+    // in draw mode the mouse and the pen draw (a finger still scrolls)
+    if (DrawModeOnMouseDown(win, x, y)) {
+        return;
+    }
     if (ToggleSmartMarginAtPoint(win, x, y)) {
         return;
     }
@@ -2008,6 +2016,9 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
 }
 
 static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
+    if (DrawModeOnMouseUp(win, x, y)) {
+        return;
+    }
     DisplayModel* dm = win->AsFixed();
     ReportIf(!dm);
 
@@ -2171,6 +2182,10 @@ bool gDisableInteractiveInverseSearch = false;
 
 static void OnMouseLeftButtonDblClk(MainWindow* win, int x, int y, WPARAM key) {
     // lf("Left button clicked on %d %d", x, y);
+    // two quick taps while drawing are two dots, not a double-click
+    if (DrawModeOnMouseDown(win, x, y)) {
+        return;
+    }
     auto isLeft = bit::IsMaskSet(key, (WPARAM)MK_LBUTTON);
     if (gGlobalPrefs->enableTeXEnhancements && !gDisableInteractiveInverseSearch && isLeft) {
         bool dontSelect = OnInverseSearch(win, x, y);
@@ -2883,6 +2898,7 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
 
     PaintKeyboardLinkTargets(win, hdc);
     PaintKeyboardTextCaret(win, hdc);
+    PaintDrawModeOverlay(win, hdc);
 
     if (!rendering) {
         DebugShowLinks(dm, hdc);
@@ -3042,6 +3058,13 @@ static LRESULT OnSetCursorMouseNone(MainWindow* win, HWND hwnd) {
 
 static LRESULT OnSetCursor(MainWindow* win, HWND hwnd) {
     ReportIf(win->hwndCanvas != hwnd);
+    if (IsDrawModeOn(win)) {
+        Point pt = HwndGetCursorPos(hwnd);
+        if (DrawModeSetCursor(win, pt.x, pt.y)) {
+            win->DeleteToolTip();
+            return TRUE;
+        }
+    }
     if (win->mouseAction != MouseAction::None) {
         win->DeleteToolTip();
     }
@@ -4079,6 +4102,11 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
         case kSelectionToolbarShowTimerID:
             // the selection settled: pop up the floating selection toolbar
             SelectionToolbarOnShowTimer(win);
+            break;
+
+        case kDrawHoldTimerID:
+        case kDrawPendingTimerID:
+            DrawModeOnTimer(win, timerId);
             break;
 
         case kLibraryScrollTimerID:

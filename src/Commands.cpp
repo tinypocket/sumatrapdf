@@ -284,6 +284,8 @@ static SeqStrings gCommandNames =
     "CmdTouchSidebarDensityCondensed\0"
     "CmdTouchSidebarDensityNormal\0"
     "CmdTouchSidebarDensityExpanded\0"
+    "CmdToggleDrawMode\0"
+    "CmdDrawUndo\0"
     "CmdNone\0"
     "\0";
 
@@ -557,6 +559,8 @@ static i32 gCommandIds[] = {
     CmdTouchSidebarDensityCondensed,
     CmdTouchSidebarDensityNormal,
     CmdTouchSidebarDensityExpanded,
+    CmdToggleDrawMode,
+    CmdDrawUndo,
     CmdNone,
 };
 
@@ -830,6 +834,8 @@ SeqStrings gCommandDescriptions =
     "Sidebar Rows: Condensed\0"
     "Sidebar Rows: Normal\0"
     "Sidebar Rows: Expanded\0"
+    "Draw on Document\0"
+    "Undo Last Drawing\0"
     "Do nothing\0"
     "\0";
 // clang-format on

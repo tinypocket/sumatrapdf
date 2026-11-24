@@ -144,6 +144,7 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - a small floating toolbar pops up after selecting text, with the most common selection actions: **Copy**, **Read Aloud**, **Highlight**, **Underline**, **Squiggly**, **Strike Out** (annotation buttons only for documents that support annotations). It appears half a second after the selection settles, so it does not flash in and out while you are still selecting. Disable it with the new `SelectionToolbar` advanced setting. Ported from the [SumatraPDF Plus](https://github.com/dengxibo/sumatrapdf-plus) fork
 - add `Annotations.FreeTextAlignment` advanced setting (`left`, `center`, `right`): how text is aligned in newly created free text annotations, so the **Text Alignment** you want no longer has to be set by hand on every annotation. Right-to-left scripts (Arabic, Hebrew, Persian) want `right`. `CmdCreateAnnotFreeText` and the other `CmdCreateAnnot*` commands take a matching `alignment` argument (issue #4799)
 - clearer rendering of CAD / engineering-drawing PDFs: hairline strokes get a zoom-aware minimum width and typical CAD-export grays are darkened toward Acrobat-like contrast, so drawings stay readable when zoomed out. Applied automatically when a drawing is detected (PDF/E marker, CAD authoring tool in the metadata, or content heuristics; screenshot/raster and WPS-style hairline exports are handled too); control it with the `EngineeringDrawingEnhance` advanced setting (`off` / `auto` / `on`) or per document with **Toggle Engineering Drawing Enhancement** (`Ctrl + K` command palette). Ported from the [SumatraPDF Plus](https://github.com/dengxibo/sumatrapdf-plus) fork
+- draw on PDFs with the mouse or a pen: **Draw on Document** (the pen button in the top bar) shows a drawing toolbar with a pen, line, arrow, rectangle and ellipse, a few colors and three thicknesses. Hold the pen still at the end of a freehand stroke and a rough line, rectangle, circle, ellipse or triangle snaps to the clean shape. Finger touch keeps scrolling the page while drawing, so only the mouse and pen draw. Each mark is a standard PDF annotation (ink, line, square, circle or polygon), saved with the other annotations; **Undo Last Drawing** (`Ctrl + Z` while drawing) removes marks one at a time, and `Esc` leaves draw mode
 
 **New commands:**
 
@@ -155,8 +156,10 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - `CmdCommandPalette $` : command palette favorites mode (`CmdCommandPaletteFavorites`)
 - `CmdCommandPaletteFavorites` : "Command Palette: Favorites"
 - `CmdContinueReadAloud` : "Continue Reading"
+- `CmdDrawUndo` : "Undo Last Drawing" — removes the most recent mark made in draw mode
 - `CmdDeleteFileAndOpenNext` : "Delete File And Open Next" — opens the next file in the folder, then moves the previous file to the Recycle Bin (discussion #5845)
 - `CmdFavoriteShowInTab` : "Show Favorites in Tab" — full-window Favorites tab (sidebar Favorites still works)
+- `CmdToggleDrawMode` : "Draw on Document" — turns draw mode (pen, shapes, draw-and-hold snapping) on or off
 - `CmdToggleFavoritesSort` : "Sort Favorites By Name" — Favorites tree context menu checkbox; toggles `SortFavoritesByName` (fixes #2277)
 - `CmdZoomFitHeight` : "Zoom: Fit Height" — scale page height to the window (fixes #1714)
 - `CmdSelectTextViaKeyboard` : "Select Text With Keyboard" (`F7`) — caret browsing: move a text caret with the arrows and select without the mouse (fixes #4684, #4116)

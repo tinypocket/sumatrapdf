@@ -7,6 +7,7 @@ enum class AnnotationType;
 struct PasswordUI;
 struct FileArgs;
 struct AnnotCreateArgs;
+struct DrawnAnnotArgs;
 struct PropValue;
 
 /* EngineDjvuDec.cpp: DjVu engine built on ext/djvudec */
@@ -64,6 +65,8 @@ EngineBase* CreateEngineMupdfFromData(Str data, Str nameHint, PasswordUI* pwdUI)
 Str LoadEmbeddedPDFFile(Str path);
 TempStr ParseEmbeddedStreamNumber(Str path, int* streamNoOut);
 Annotation* EngineMupdfCreateAnnotation(EngineBase*, int pageNo, PointF pos, AnnotCreateArgs* args);
+Annotation* EngineMupdfCreateDrawnAnnotation(EngineBase*, int pageNo, const DrawnAnnotArgs&);
+bool EngineHasAnnotation(EngineBase*, Annotation*);
 void EngineMupdfGetAnnotations(EngineBase*, Vec<Annotation*>&);
 bool EngineMupdfHasUnsavedAnnotations(EngineBase*);
 bool EngineMupdfSupportsAnnotations(EngineBase*);

@@ -221,6 +221,8 @@ static UINT_PTR removeIfAnnotsNotSupported[] = {
     // added past the CmdCreateAnnotFirst..CmdCreateAnnotLast range, so the
     // range check doesn't catch it
     CmdCreateAnnotImageFromClipboard,
+    CmdToggleDrawMode,
+    CmdDrawUndo,
     0,
 };
 

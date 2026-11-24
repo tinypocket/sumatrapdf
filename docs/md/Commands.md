@@ -106,6 +106,8 @@ CmdToggleEngineeringDrawingEnhance,,Toggle Engineering Drawing Enhancement,"ver 
 CmdSetDocumentColorsFollowTheme,,Set Document Colors Follow Theme,"ver 3.7+, opens a dialog to pick how MuPDF-rendered documents follow the UI theme (`DocumentColorsFollowTheme`: off, smart, legacy)"
 CmdTogglePreservePdfImages,,Toggle Preserve PDF Image Colors in Dark Mode,"ver 3.7+, session-only toggle of image preservation on inverted pages"
 CmdToggleLinks,,Toggle Show Links,"Toggle drawing blue rectangle around links, ver 3.6+"
+CmdToggleDrawMode,,Draw on Document,"ver 3.7+, turns draw mode on or off: draw ink, lines, arrows, rectangles and ellipses on PDF pages with the mouse or a pen"
+CmdDrawUndo,Ctrl + Z (in draw mode),Undo Last Drawing,"ver 3.7+, removes the most recent mark made in draw mode"
 ```
 
 ## Tabs

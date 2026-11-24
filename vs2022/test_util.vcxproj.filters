@@ -21,6 +21,7 @@
     <ClInclude Include="..\src\DisplayMode.h" />
     <ClInclude Include="..\src\DocProperties.h" />
     <ClInclude Include="..\src\Flags.h" />
+    <ClInclude Include="..\src\InkShapes.h" />
     <ClInclude Include="..\src\PdfDarkMode.h" />
     <ClInclude Include="..\src\RefHoverDetect.h" />
     <ClInclude Include="..\src\RefHoverTextDetect.h" />
@@ -140,6 +141,8 @@
     <ClCompile Include="..\src\DisplayMode.cpp" />
     <ClCompile Include="..\src\DocProperties.cpp" />
     <ClCompile Include="..\src\Flags.cpp" />
+    <ClCompile Include="..\src\InkShapes.cpp" />
+    <ClCompile Include="..\src\InkShapes_ut.cpp" />
     <ClCompile Include="..\src\KineticScroll.cpp" />
     <ClCompile Include="..\src\KineticScroll_ut.cpp" />
     <ClCompile Include="..\src\PdfDarkModeImageClassifier_ut.cpp" />

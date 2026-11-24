@@ -5,6 +5,7 @@
 #include "KineticScroll.h"
 
 struct DoubleBuffer;
+struct DrawModeState;
 struct Edit;
 struct WebviewWnd;
 struct LinkHandler;
@@ -746,6 +747,8 @@ struct MainWindow {
     SelectionToolbar* selectionToolbar = nullptr;
     // a debounced show of the selection toolbar is waiting on its timer
     bool selectionToolbarShowPending = false;
+    // draw mode (DrawMode.cpp): tools, the stroke in progress, undo
+    DrawModeState* drawMode = nullptr;
 
     // set at the beginning of CloseWindow() to prevent
     // processing commands while closing (e.g. reentrancy

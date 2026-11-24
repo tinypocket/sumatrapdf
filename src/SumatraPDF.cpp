@@ -83,6 +83,7 @@
 #include "LinkFollow.h"
 #include "SelectTextKeyboard.h"
 #include "SelectionToolbar.h"
+#include "DrawMode.h"
 #include "ScreenshotCapture.h"
 #include "Screenshot.h"
 #include "ImageSaveCropResize.h"
@@ -6607,6 +6608,9 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
 
     dh.End();
 
+    // the draw-mode toolbar floats at the top of the canvas
+    LayoutDrawModeToolbar(win, rc);
+
     // Keep the redesigned toolbar above the canvas on every architecture.
     // Their rectangles do not overlap in a healthy layout, but promoting the
     // bar also prevents a stale canvas rectangle from obscuring it while a DPI
@@ -7926,12 +7930,24 @@ static bool FrameOnKeydown(MainWindow* win, WPARAM key, LPARAM lp) {
     }
 
     if (VK_ESCAPE == key) {
+        // Esc drops the stroke being drawn, or else leaves draw mode
+        if (DrawModeCancelStroke(win)) {
+            return true;
+        }
+        if (IsDrawModeOn(win)) {
+            ExitDrawMode(win);
+            return true;
+        }
         CancelDrag(win);
         return true;
     }
 
     bool isCtrl = IsCtrlPressed();
     bool isShift = IsShiftPressed();
+    if (isCtrl && !isShift && 'Z' == key && IsDrawModeOn(win)) {
+        DrawModeUndo(win);
+        return true;
+    }
     if (!win->IsDocLoaded()) {
         return false;
     }
@@ -11048,6 +11064,14 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
         case CmdToggleLightDarkTheme:
             ToggleLightDarkTheme();
             SaveSettings();
+            break;
+
+        case CmdToggleDrawMode:
+            ToggleDrawMode(win);
+            break;
+
+        case CmdDrawUndo:
+            DrawModeUndo(win);
             break;
 
         case CmdToggleInverseSearch:

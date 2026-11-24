@@ -1676,6 +1676,131 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
     return res;
 }
 
+// Creates the annotation for one mark made in draw mode: a freehand stroke
+// (Ink), a line or arrow (Line), a rectangle (Square), an ellipse (Circle) or a
+// snapped polygon (Polygon). All geometry is in page coordinates; MuPDF's
+// appearance synthesis computes the annotation rect from the ink list, line or
+// vertices, so only Square/Circle set a rect.
+Annotation* EngineMupdfCreateDrawnAnnotation(EngineBase* engine, int pageNo, const DrawnAnnotArgs& args) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf) {
+        return nullptr;
+    }
+    int n = len(args.points);
+    auto typ = args.annotType;
+    bool ok = (typ == AnnotationType::Ink && n >= 1) || (typ == AnnotationType::Line && n == 2) ||
+              ((typ == AnnotationType::Square || typ == AnnotationType::Circle) && n == 2) ||
+              (typ == AnnotationType::Polygon && n >= 3);
+    if (!ok) {
+        return nullptr;
+    }
+    fz_context* ctx = epdf->Ctx();
+    auto* pageInfo = epdf->GetFzPageInfo(pageNo, true);
+    if (!pageInfo) {
+        return nullptr;
+    }
+    pdf_annot* annot = nullptr;
+    pdf_page* page = nullptr;
+    {
+        ScopedRecursiveMutex cs(&epdf->docLock);
+        fz_try(ctx) {
+            page = pdf_page_from_fz_page(ctx, pageInfo->page);
+            annot = pdf_create_annot(ctx, page, (enum pdf_annot_type)typ);
+            pdf_set_annot_modification_date(ctx, annot, time(nullptr));
+            if (pdf_annot_has_author(ctx, annot)) {
+                Str defAuthor = gGlobalPrefs->annotations.defaultAuthor;
+                if (!str::Eq(defAuthor, StrL("(none)"))) {
+                    Str author = GetUserTemp();
+                    if (!str::IsEmptyOrWhiteSpace(defAuthor)) {
+                        author = defAuthor;
+                    }
+                    pdf_set_annot_author(ctx, annot, CStrTemp(author));
+                }
+            }
+            fz_point* pts = (fz_point*)fz_malloc(ctx, sizeof(fz_point) * n);
+            for (int i = 0; i < n; i++) {
+                pts[i] = fz_make_point(args.points[i].x, args.points[i].y);
+            }
+            fz_try(ctx) {
+                switch (typ) {
+                    case AnnotationType::Ink: {
+                        int count = n;
+                        pdf_set_annot_ink_list(ctx, annot, 1, &count, pts);
+                    } break;
+                    case AnnotationType::Line:
+                        pdf_set_annot_line(ctx, annot, pts[0], pts[1]);
+                        if (args.arrowEnd) {
+                            pdf_set_annot_line_end_style(ctx, annot, PDF_ANNOT_LE_OPEN_ARROW);
+                        }
+                        break;
+                    case AnnotationType::Polygon:
+                        pdf_set_annot_vertices(ctx, annot, n, pts);
+                        break;
+                    default: {
+                        // the shape's outline is centred on the rect's edge, so grow
+                        // the rect by half the width to keep it where it was drawn
+                        float half = args.borderWidth / 2;
+                        fz_rect r;
+                        r.x0 = std::min(pts[0].x, pts[1].x) - half;
+                        r.y0 = std::min(pts[0].y, pts[1].y) - half;
+                        r.x1 = std::max(pts[0].x, pts[1].x) + half;
+                        r.y1 = std::max(pts[0].y, pts[1].y) + half;
+                        pdf_set_annot_rect(ctx, annot, r);
+                    } break;
+                }
+            }
+            fz_always(ctx) {
+                fz_free(ctx, pts);
+            }
+            fz_catch(ctx) {
+                fz_rethrow(ctx);
+            }
+            float rgb[3]{};
+            PdfColorToFloat(args.col, rgb);
+            pdf_set_annot_color(ctx, annot, 3, rgb);
+            pdf_set_annot_border_width(ctx, annot, args.borderWidth);
+            if (args.opacity < 100) {
+                pdf_set_annot_opacity(ctx, annot, (float)args.opacity / 100.0f);
+            }
+            pdf_update_annot(ctx, annot);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            if (annot) {
+                if (page) {
+                    pdf_delete_annot(ctx, page, annot);
+                }
+                pdf_drop_annot(ctx, annot);
+                annot = nullptr;
+            }
+        }
+        if (!annot) {
+            return nullptr;
+        }
+    }
+    auto* res = MakeAnnotationWrapper(epdf, annot, pageNo);
+    MarkNotificationAsModified(epdf, res, AnnotationChange::Add);
+    pdf_drop_annot(ctx, annot);
+    return res;
+}
+
+// True when annot is one of engine's current annotations. Unlike
+// AnnotationIsLive it compares pointers only and never reads *annot, so it is
+// safe to call with a pointer kept from before the document was reloaded.
+bool EngineHasAnnotation(EngineBase* engine, Annotation* annot) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !annot) {
+        return false;
+    }
+    ScopedRecursiveMutex scope(&e->pagesLock);
+    for (FzPageInfo* pageInfo : e->pages) {
+        if (pageInfo && pageInfo->annotations.Contains(annot)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 AnnotationType CmdIdToAnnotationType(int cmdId) {
     // clang-format off
     switch (cmdId) {

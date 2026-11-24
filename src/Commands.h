@@ -278,7 +278,9 @@ enum {
     CmdTouchSidebarDensityCondensed = 467,
     CmdTouchSidebarDensityNormal = 468,
     CmdTouchSidebarDensityExpanded = 469,
-    CmdNone = 470,
+    CmdToggleDrawMode = 470,
+    CmdDrawUndo = 471,
+    CmdNone = 472,
 
     /* range for file history */
     CmdFileHistoryFirst,

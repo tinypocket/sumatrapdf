@@ -278,6 +278,8 @@ export const commands = [
     "CmdTouchSidebarDensityCondensed", "Sidebar Rows: Condensed",
     "CmdTouchSidebarDensityNormal", "Sidebar Rows: Normal",
     "CmdTouchSidebarDensityExpanded", "Sidebar Rows: Expanded",
+    "CmdToggleDrawMode", "Draw on Document",
+    "CmdDrawUndo", "Undo Last Drawing",
     "CmdNone", "Do nothing",
 ];
 

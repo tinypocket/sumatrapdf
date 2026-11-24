@@ -372,6 +372,14 @@ static const char* gIconContrast =
   <path d="M12 3 a 9 9 0 0 1 0 18 z" fill="currentColor" stroke="none" />
 </svg>)";
 
+// pencil: draw on the document (draw mode)
+static const char* gIconPen =
+    R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="1.7" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="0" y="0" width="24" height="24" stroke="none"></rect>
+  <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+  <path d="M13.5 6.5l4 4" />
+</svg>)";
+
 // Smart Width's two margins. Both draw the page's edges as two bars; the
 // arrows stop well short of them for the roomier margin and run up against them
 // for the tight one, so the button itself says which is on.
@@ -442,6 +450,7 @@ static const char* gIcons[] = {
     gIconWeb,
     gIconMoon,
     gIconContrast,
+    gIconPen,
     gIconSmartWidthMargin,
     gIconSmartWidthTight,
 };

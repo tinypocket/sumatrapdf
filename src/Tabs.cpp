@@ -28,6 +28,7 @@
 #include "CommandAvailability.h"
 #include "FindBar.h"
 #include "SelectionToolbar.h"
+#include "DrawMode.h"
 #include "Menu.h"
 #include "TableOfContents.h"
 #include "Tabs.h"
@@ -832,6 +833,7 @@ void SaveCurrentWindowTab(MainWindow* win) {
     // document's matches.
     HideFindBarForDocumentChange(win);
     HideSelectionToolbar(win);
+    ExitDrawMode(win);
 
     int current = win->tabsCtrl->GetSelected();
     if (-1 == current) {

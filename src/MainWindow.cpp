@@ -37,6 +37,7 @@
 #include "Rail.h"
 #include "TopBar.h"
 #include "SelectionToolbar.h"
+#include "DrawMode.h"
 #include "FindBar.h"
 #include "FindWindow.h"
 #include "SearchAndDDE.h"
@@ -182,6 +183,7 @@ MainWindow::~MainWindow() {
     ClearFindMatches(this);
 
     DeleteSelectionToolbar(this);
+    DeleteDrawMode(this);
 
     delete linkHandler;
     delete buffer;

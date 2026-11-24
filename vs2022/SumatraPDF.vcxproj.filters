@@ -168,6 +168,9 @@
     <ClInclude Include="..\src\DocumentLayout.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\DrawMode.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\EbookDoc.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -238,6 +241,9 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\ImageSaveCropResize.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\InkShapes.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\Installer.h">
@@ -650,6 +656,9 @@
     <ClCompile Include="..\src\DocumentLayout.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\DrawMode.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\EbookDoc.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -744,6 +753,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\ImageSaveCropResize.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\InkShapes.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Installer.cpp">
