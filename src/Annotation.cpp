@@ -1676,6 +1676,346 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
     return res;
 }
 
+// Creates the annotation for one mark made in draw mode: a freehand stroke
+// (Ink), a line or arrow (Line), a rectangle (Square), an ellipse (Circle) or a
+// snapped polygon (Polygon). All geometry is in page coordinates; MuPDF's
+// appearance synthesis computes the annotation rect from the ink list, line or
+// vertices, so only Square/Circle set a rect.
+Annotation* EngineMupdfCreateDrawnAnnotation(EngineBase* engine, int pageNo, const DrawnAnnotArgs& args) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf) {
+        return nullptr;
+    }
+    int n = len(args.points);
+    auto typ = args.annotType;
+    bool ok = (typ == AnnotationType::Ink && n >= 1) || (typ == AnnotationType::Line && n == 2) ||
+              ((typ == AnnotationType::Square || typ == AnnotationType::Circle) && n == 2) ||
+              (typ == AnnotationType::Polygon && n >= 3);
+    if (!ok) {
+        return nullptr;
+    }
+    fz_context* ctx = epdf->Ctx();
+    auto* pageInfo = epdf->GetFzPageInfo(pageNo, true);
+    if (!pageInfo) {
+        return nullptr;
+    }
+    pdf_annot* annot = nullptr;
+    pdf_page* page = nullptr;
+    {
+        ScopedRecursiveMutex cs(&epdf->docLock);
+        fz_try(ctx) {
+            page = pdf_page_from_fz_page(ctx, pageInfo->page);
+            annot = pdf_create_annot(ctx, page, (enum pdf_annot_type)typ);
+            pdf_set_annot_modification_date(ctx, annot, time(nullptr));
+            if (pdf_annot_has_author(ctx, annot)) {
+                Str defAuthor = gGlobalPrefs->annotations.defaultAuthor;
+                if (!str::Eq(defAuthor, StrL("(none)"))) {
+                    Str author = GetUserTemp();
+                    if (!str::IsEmptyOrWhiteSpace(defAuthor)) {
+                        author = defAuthor;
+                    }
+                    pdf_set_annot_author(ctx, annot, CStrTemp(author));
+                }
+            }
+            fz_point* pts = (fz_point*)fz_malloc(ctx, sizeof(fz_point) * n);
+            for (int i = 0; i < n; i++) {
+                pts[i] = fz_make_point(args.points[i].x, args.points[i].y);
+            }
+            fz_try(ctx) {
+                switch (typ) {
+                    case AnnotationType::Ink: {
+                        int nStrokes = len(args.strokeCounts);
+                        int total = 0;
+                        for (int c : args.strokeCounts) {
+                            total += c;
+                        }
+                        if (nStrokes > 0 && total == n) {
+                            pdf_set_annot_ink_list(ctx, annot, nStrokes, args.strokeCounts.LendData(), pts);
+                        } else {
+                            int count = n;
+                            pdf_set_annot_ink_list(ctx, annot, 1, &count, pts);
+                        }
+                    } break;
+                    case AnnotationType::Line:
+                        pdf_set_annot_line(ctx, annot, pts[0], pts[1]);
+                        if (args.arrowEnd) {
+                            pdf_set_annot_line_end_style(ctx, annot, PDF_ANNOT_LE_OPEN_ARROW);
+                        }
+                        break;
+                    case AnnotationType::Polygon:
+                        pdf_set_annot_vertices(ctx, annot, n, pts);
+                        break;
+                    default: {
+                        // the shape's outline is centred on the rect's edge, so grow
+                        // the rect by half the width to keep it where it was drawn
+                        float half = args.borderWidth / 2;
+                        fz_rect r;
+                        r.x0 = std::min(pts[0].x, pts[1].x) - half;
+                        r.y0 = std::min(pts[0].y, pts[1].y) - half;
+                        r.x1 = std::max(pts[0].x, pts[1].x) + half;
+                        r.y1 = std::max(pts[0].y, pts[1].y) + half;
+                        pdf_set_annot_rect(ctx, annot, r);
+                    } break;
+                }
+            }
+            fz_always(ctx) {
+                fz_free(ctx, pts);
+            }
+            fz_catch(ctx) {
+                fz_rethrow(ctx);
+            }
+            float rgb[3]{};
+            PdfColorToFloat(args.col, rgb);
+            pdf_set_annot_color(ctx, annot, 3, rgb);
+            pdf_set_annot_border_width(ctx, annot, args.borderWidth);
+            if (args.opacity < 100) {
+                pdf_set_annot_opacity(ctx, annot, (float)args.opacity / 100.0f);
+            }
+            pdf_update_annot(ctx, annot);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            if (annot) {
+                if (page) {
+                    pdf_delete_annot(ctx, page, annot);
+                }
+                pdf_drop_annot(ctx, annot);
+                annot = nullptr;
+            }
+        }
+        if (!annot) {
+            return nullptr;
+        }
+    }
+    auto* res = MakeAnnotationWrapper(epdf, annot, pageNo);
+    MarkNotificationAsModified(epdf, res, AnnotationChange::Add);
+    pdf_drop_annot(ctx, annot);
+    return res;
+}
+
+static bool IsDrawnType(AnnotationType t) {
+    switch (t) {
+        case AnnotationType::Ink:
+        case AnnotationType::Line:
+        case AnnotationType::Square:
+        case AnnotationType::Circle:
+        case AnnotationType::Polygon:
+        case AnnotationType::PolyLine:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static float DistToSeg(fz_point p, fz_point a, fz_point b) {
+    float dx = b.x - a.x;
+    float dy = b.y - a.y;
+    float len2 = dx * dx + dy * dy;
+    float t = len2 > 0 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2 : 0;
+    t = std::clamp(t, 0.0f, 1.0f);
+    float ex = a.x + t * dx - p.x;
+    float ey = a.y + t * dy - p.y;
+    return sqrtf(ex * ex + ey * ey);
+}
+
+// How far p is from the drawn outline of a (page units), for the eraser.
+// Called with docLock held.
+static float DistToDrawnOutline(fz_context* ctx, pdf_annot* a, AnnotationType t, fz_point p) {
+    float best = FLT_MAX;
+    switch (t) {
+        case AnnotationType::Ink: {
+            int nStrokes = pdf_annot_ink_list_count(ctx, a);
+            for (int i = 0; i < nStrokes; i++) {
+                int n = pdf_annot_ink_list_stroke_count(ctx, a, i);
+                if (n <= 0) {
+                    continue;
+                }
+                fz_point prev = pdf_annot_ink_list_stroke_vertex(ctx, a, i, 0);
+                best = std::min(best, DistToSeg(p, prev, prev));
+                for (int k = 1; k < n; k++) {
+                    fz_point cur = pdf_annot_ink_list_stroke_vertex(ctx, a, i, k);
+                    best = std::min(best, DistToSeg(p, prev, cur));
+                    prev = cur;
+                }
+            }
+        } break;
+        case AnnotationType::Line: {
+            fz_point la, lb;
+            pdf_annot_line(ctx, a, &la, &lb);
+            best = DistToSeg(p, la, lb);
+        } break;
+        case AnnotationType::Polygon:
+        case AnnotationType::PolyLine: {
+            int n = pdf_annot_vertex_count(ctx, a);
+            for (int i = 0; i + 1 < n; i++) {
+                best = std::min(best, DistToSeg(p, pdf_annot_vertex(ctx, a, i), pdf_annot_vertex(ctx, a, i + 1)));
+            }
+            if (t == AnnotationType::Polygon && n > 2) {
+                best = std::min(best, DistToSeg(p, pdf_annot_vertex(ctx, a, n - 1), pdf_annot_vertex(ctx, a, 0)));
+            }
+        } break;
+        case AnnotationType::Square:
+        case AnnotationType::Circle: {
+            fz_rect r = pdf_annot_rect(ctx, a);
+            float half = pdf_annot_border_width(ctx, a) / 2;
+            r.x0 += half;
+            r.y0 += half;
+            r.x1 -= half;
+            r.y1 -= half;
+            if (t == AnnotationType::Square) {
+                fz_point c00{r.x0, r.y0};
+                fz_point c10{r.x1, r.y0};
+                fz_point c11{r.x1, r.y1};
+                fz_point c01{r.x0, r.y1};
+                best = std::min(std::min(DistToSeg(p, c00, c10), DistToSeg(p, c10, c11)),
+                                std::min(DistToSeg(p, c11, c01), DistToSeg(p, c01, c00)));
+            } else {
+                float rx = std::max(0.5f, (r.x1 - r.x0) / 2);
+                float ry = std::max(0.5f, (r.y1 - r.y0) / 2);
+                float nx = (p.x - (r.x0 + rx)) / rx;
+                float ny = (p.y - (r.y0 + ry)) / ry;
+                best = fabsf(sqrtf(nx * nx + ny * ny) - 1) * std::min(rx, ry);
+            }
+        } break;
+        default:
+            break;
+    }
+    return best;
+}
+
+// The topmost drawing-type annotation (ink, line, shape) whose outline passes
+// within tolerance of pt, for the draw-mode eraser. Highlights, notes and
+// other annotations are never hit.
+Annotation* EngineFindDrawnAnnotationAt(EngineBase* engine, int pageNo, PointF pt, float tolerance) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || pageNo < 1 || pageNo > len(e->pages)) {
+        return nullptr;
+    }
+    Vec<Annotation*> candidates;
+    {
+        ScopedRecursiveMutex scope(&e->pagesLock);
+        FzPageInfo* pageInfo = e->pages[pageNo - 1];
+        if (!pageInfo) {
+            return nullptr;
+        }
+        for (Annotation* a : pageInfo->annotations) {
+            if (a && a->pdfannot && IsDrawnType(a->type)) {
+                candidates.Append(a);
+            }
+        }
+    }
+    auto* ctx = e->Ctx();
+    ScopedRecursiveMutex cs(&e->docLock);
+    fz_point p{pt.x, pt.y};
+    for (int i = len(candidates) - 1; i >= 0; i--) {
+        Annotation* a = candidates[i];
+        float dist = FLT_MAX;
+        float width = 1;
+        fz_try(ctx) {
+            width = pdf_annot_border_width(ctx, a->pdfannot);
+            dist = DistToDrawnOutline(ctx, a->pdfannot, a->type, p);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+        }
+        if (dist <= tolerance + width / 2) {
+            return a;
+        }
+    }
+    return nullptr;
+}
+
+// Reads back what EngineMupdfCreateDrawnAnnotation needs to re-create annot,
+// so erasing a mark can be undone.
+bool GetDrawnAnnotArgs(Annotation* annot, DrawnAnnotArgs& args) {
+    if (!AnnotationIsLive(annot) || !IsDrawnType(annot->type) || annot->type == AnnotationType::PolyLine) {
+        return false;
+    }
+    EngineMupdf* e = annot->engine;
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
+    args.annotType = annot->type;
+    args.points.Reset();
+    args.strokeCounts.Reset();
+    args.arrowEnd = false;
+    bool ok = true;
+    ScopedRecursiveMutex cs(&e->docLock);
+    fz_try(ctx) {
+        args.borderWidth = pdf_annot_border_width(ctx, a);
+        args.opacity = (int)lroundf(pdf_annot_opacity(ctx, a) * 100);
+        int n = 0;
+        float c[4]{};
+        pdf_annot_color(ctx, a, &n, c);
+        if (n == 1) {
+            c[1] = c[0];
+            c[2] = c[0];
+        }
+        u8 rgb[3];
+        for (int i = 0; i < 3; i++) {
+            rgb[i] = (u8)std::clamp((int)lroundf(c[i] * 255), 0, 255);
+        }
+        args.col = MkPdfColor(rgb[0], rgb[1], rgb[2]);
+        switch (annot->type) {
+            case AnnotationType::Ink: {
+                int nStrokes = pdf_annot_ink_list_count(ctx, a);
+                for (int i = 0; i < nStrokes; i++) {
+                    int cnt = pdf_annot_ink_list_stroke_count(ctx, a, i);
+                    args.strokeCounts.Append(cnt);
+                    for (int k = 0; k < cnt; k++) {
+                        fz_point v = pdf_annot_ink_list_stroke_vertex(ctx, a, i, k);
+                        args.points.Append(PointF(v.x, v.y));
+                    }
+                }
+            } break;
+            case AnnotationType::Line: {
+                fz_point la, lb;
+                pdf_annot_line(ctx, a, &la, &lb);
+                args.points.Append(PointF(la.x, la.y));
+                args.points.Append(PointF(lb.x, lb.y));
+                pdf_line_ending ls = PDF_ANNOT_LE_NONE;
+                pdf_line_ending le = PDF_ANNOT_LE_NONE;
+                pdf_annot_line_ending_styles(ctx, a, &ls, &le);
+                args.arrowEnd = le != PDF_ANNOT_LE_NONE;
+            } break;
+            case AnnotationType::Polygon: {
+                int nv = pdf_annot_vertex_count(ctx, a);
+                for (int i = 0; i < nv; i++) {
+                    fz_point v = pdf_annot_vertex(ctx, a, i);
+                    args.points.Append(PointF(v.x, v.y));
+                }
+            } break;
+            default: {
+                fz_rect r = pdf_annot_rect(ctx, a);
+                float half = args.borderWidth / 2;
+                args.points.Append(PointF(r.x0 + half, r.y0 + half));
+                args.points.Append(PointF(r.x1 - half, r.y1 - half));
+            } break;
+        }
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        ok = false;
+    }
+    return ok && len(args.points) > 0;
+}
+
+// True when annot is one of engine's current annotations. Unlike
+// AnnotationIsLive it compares pointers only and never reads *annot, so it is
+// safe to call with a pointer kept from before the document was reloaded.
+bool EngineHasAnnotation(EngineBase* engine, Annotation* annot) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !annot) {
+        return false;
+    }
+    ScopedRecursiveMutex scope(&e->pagesLock);
+    for (FzPageInfo* pageInfo : e->pages) {
+        if (pageInfo && pageInfo->annotations.Contains(annot)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 AnnotationType CmdIdToAnnotationType(int cmdId) {
     // clang-format off
     switch (cmdId) {

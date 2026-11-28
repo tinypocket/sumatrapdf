@@ -77,6 +77,10 @@ CmdFindPrevSel,Shift + Ctrl + F3,Find Previous Selection,
 
 ```commands
 Command IDs,Keyboard shortcuts,Command Palette,Notes
+CmdToggleTabs,,Show Tabs,"Show document tabs in the title bar; available in the View menu, ver 3.7+"
+CmdTouchSidebarDensityCondensed,,Sidebar Rows: Condensed,"Use 34px rows in touch sidebars, ver 3.8+"
+CmdTouchSidebarDensityNormal,,Sidebar Rows: Normal,"Use 40px rows in touch sidebars, ver 3.8+"
+CmdTouchSidebarDensityExpanded,,Sidebar Rows: Expanded,"Use 52px rows in touch sidebars, ver 3.8+"
 CmdBookView,Ctrl + 8,Book View,
 CmdFacingView,Ctrl + 7,Facing View,
 CmdInvertColors,Shift + I,Invert Colors,was `i` before 3.6
@@ -102,6 +106,8 @@ CmdToggleEngineeringDrawingEnhance,,Toggle Engineering Drawing Enhancement,"ver 
 CmdSetDocumentColorsFollowTheme,,Set Document Colors Follow Theme,"ver 3.7+, opens a dialog to pick how MuPDF-rendered documents follow the UI theme (`DocumentColorsFollowTheme`: off, smart, legacy)"
 CmdTogglePreservePdfImages,,Toggle Preserve PDF Image Colors in Dark Mode,"ver 3.7+, session-only toggle of image preservation on inverted pages"
 CmdToggleLinks,,Toggle Show Links,"Toggle drawing blue rectangle around links, ver 3.6+"
+CmdToggleDrawMode,,Draw on Document,"ver 3.7+, turns draw mode on or off: draw ink, lines, arrows, rectangles and ellipses on PDF pages with the mouse or a pen"
+CmdDrawUndo,Ctrl + Z (in draw mode),Undo Last Drawing,"ver 3.7+, removes the most recent mark made in draw mode"
 ```
 
 ## Tabs

@@ -4,6 +4,11 @@
 
 Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 
+- The touch-friendly interface can show or hide browser-style document tabs from **View / Show Tabs**.
+- SumatraPDF checks for updates once at startup and, when one is available, shows a compact **Update** button beside the document tabs. The download starts only after the button is clicked. Private deployments can set `UpdateFeedURL` to use a same-origin, same-signer installer feed from an internal HTTPS or Tailscale server.
+- This fork installs as **SumatraPDF+** under its own application directory and Windows registration, allowing it to coexist with an official SumatraPDF installation.
+- SumatraPDF+ starts with a clean workspace instead of reopening the previous session. Opened documents remain available in **Recent**, and session restoration can still be explicitly enabled with `RestoreSession = true`; when enabled it restores both document tabs and in-product browser tabs, including the selected browser page.
+
 - Navigate Files in Folder is a normal modeless window that stays open (no longer a popup that closes when it loses focus or after opening a file); Esc or the close button dismisses it, and Enter / double-click replaces the document in the current tab, while `Ctrl + Enter` / `Ctrl + double-click` switches to the tab already showing that file, or opens it in a new tab. `Alt + Up` goes to the parent directory (like Explorer), as does the `..` entry. `Del` moves the selected file to the recycle bin without asking (directories are not deleted); if that file is open in a tab, the tab closes first. The window uses the app icon and the regular UI font (fixes #5877). The listing re-reads the directory whenever the window is activated or the command is invoked again, so files renamed (`F2`), added or removed meanwhile show up; `F5` refreshes on demand (fixes #5878). It also works on the home page — there's a **Navigate Files in Folder** link next to **Open a document...** — starting in the folder of the most recently opened document
 - Renamed the companion engine DLL from `libmupdf.dll` to `libsumatrapdf.dll` (through 3.6 the name was `libmupdf.dll`; 3.7 and later use `libsumatrapdf.dll`). Installer upgrades move the old name aside; see [Portable vs installer](SumatraPDF-portable.md) and [Failed to load libsumatrapdf.dll](Failed-to-load-libmupdf.md)
 - Themes can set optional UI colors (`DisabledTextColor`, `DarkerTextColor`, `HotBackgroundColor`, `EdgeColor`, `HotEdgeColor`, `DisabledEdgeColor`, `ErrorBackgroundColor`, and notification highlight colors) so disabled and hover states are not derived only from `TextColor` / backgrounds; built-in themes (including Dracula) set them so tinted foregrounds no longer look muddy yellow (issue #4721)
@@ -139,6 +144,9 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - a small floating toolbar pops up after selecting text, with the most common selection actions: **Copy**, **Read Aloud**, **Highlight**, **Underline**, **Squiggly**, **Strike Out** (annotation buttons only for documents that support annotations). It appears half a second after the selection settles, so it does not flash in and out while you are still selecting. Disable it with the new `SelectionToolbar` advanced setting. Ported from the [SumatraPDF Plus](https://github.com/dengxibo/sumatrapdf-plus) fork
 - add `Annotations.FreeTextAlignment` advanced setting (`left`, `center`, `right`): how text is aligned in newly created free text annotations, so the **Text Alignment** you want no longer has to be set by hand on every annotation. Right-to-left scripts (Arabic, Hebrew, Persian) want `right`. `CmdCreateAnnotFreeText` and the other `CmdCreateAnnot*` commands take a matching `alignment` argument (issue #4799)
 - clearer rendering of CAD / engineering-drawing PDFs: hairline strokes get a zoom-aware minimum width and typical CAD-export grays are darkened toward Acrobat-like contrast, so drawings stay readable when zoomed out. Applied automatically when a drawing is detected (PDF/E marker, CAD authoring tool in the metadata, or content heuristics; screenshot/raster and WPS-style hairline exports are handled too); control it with the `EngineeringDrawingEnhance` advanced setting (`off` / `auto` / `on`) or per document with **Toggle Engineering Drawing Enhancement** (`Ctrl + K` command palette). Ported from the [SumatraPDF Plus](https://github.com/dengxibo/sumatrapdf-plus) fork
+- draw on PDFs with the mouse or a pen: **Draw on Document** (the pen button in the top bar) shows a drawing toolbar with a pen, line, arrow, rectangle and ellipse, a few colors and three thicknesses. Hold the pen still at the end of a freehand stroke and a rough line, rectangle, circle, ellipse or triangle snaps to the clean shape. Finger touch keeps scrolling the page while drawing, so only the mouse and pen draw. Each mark is a standard PDF annotation (ink, line, square, circle or polygon), saved with the other annotations; **Undo Last Drawing** (`Ctrl + Z` while drawing) removes marks one at a time, and `Esc` leaves draw mode. The toolbar's eraser (or the pen's eraser end) removes drawn marks it passes over, leaving highlights and other annotations alone; erasing can be undone too
+- while a document has unsaved changes (drawings, highlights, notes, form edits) the top bar shows **Unsaved changes** with **Save** and **Save as...** buttons. A PDF that cannot be saved in place (a browser download in the temp folder, or a read-only file) offers only **Save as...**
+- unsaved annotation changes survive a crash: shortly after each change a copy of the edited PDF is kept in the `recovery` folder of the app data directory. If SumatraPDF closes without saving, it offers to restore those changes at the next start and whenever the PDF is opened; saving or discarding the changes removes the copy
 
 **New commands:**
 
@@ -150,12 +158,18 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - `CmdCommandPalette $` : command palette favorites mode (`CmdCommandPaletteFavorites`)
 - `CmdCommandPaletteFavorites` : "Command Palette: Favorites"
 - `CmdContinueReadAloud` : "Continue Reading"
+- `CmdDrawUndo` : "Undo Last Drawing" — removes the most recent mark made in draw mode
 - `CmdDeleteFileAndOpenNext` : "Delete File And Open Next" — opens the next file in the folder, then moves the previous file to the Recycle Bin (discussion #5845)
 - `CmdFavoriteShowInTab` : "Show Favorites in Tab" — full-window Favorites tab (sidebar Favorites still works)
+- `CmdToggleDrawMode` : "Draw on Document" — turns draw mode (pen, shapes, draw-and-hold snapping) on or off
 - `CmdToggleFavoritesSort` : "Sort Favorites By Name" — Favorites tree context menu checkbox; toggles `SortFavoritesByName` (fixes #2277)
 - `CmdZoomFitHeight` : "Zoom: Fit Height" — scale page height to the window (fixes #1714)
 - `CmdSelectTextViaKeyboard` : "Select Text With Keyboard" (`F7`) — caret browsing: move a text caret with the arrows and select without the mouse (fixes #4684, #4116)
 - `CmdToggleKeyboardLinkFollowing` : "Follow Link With Keyboard" (`Shift + F`) — numbers the links on screen 1..9, a digit follows one (fixes #2629)
+- `CmdToggleTabs` : "Show Tabs" — show or hide document tabs in the title bar
+- `CmdTouchSidebarDensityCondensed` : "Sidebar Rows: Condensed"
+- `CmdTouchSidebarDensityNormal` : "Sidebar Rows: Normal"
+- `CmdTouchSidebarDensityExpanded` : "Sidebar Rows: Expanded"
 - `CmdFindToggleMatchWholeWord` : "Find: Toggle Match Whole Word" — Find bar toggle button
 - `CmdGoToNextFavorite` : "Go to Next Favorite"
 - `CmdNavigateFilesInFolder` : "Navigate Files in Folder" (`Ctrl + Shift + Up`) — directory browser for openable files (stays open; Enter/double-click replaces the current tab or enters a directory, `Ctrl + Enter`/`Ctrl + double-click` uses an existing or new tab, `..` goes up, `Del` deletes the selected file, `F5` refreshes, Esc closes)

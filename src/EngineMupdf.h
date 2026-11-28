@@ -79,6 +79,7 @@ class EngineMupdf : public EngineBase {
 
     RectF PageMediabox(int pageNo) override;
     RectF PageContentBox(int pageNo, RenderTarget target = RenderTarget::View) override;
+    RectF PageContentBoxWithin(int pageNo, RectF region) override;
 
     Pixmap* RenderPage(RenderPageArgs& args) override;
 
@@ -170,6 +171,8 @@ class EngineMupdf : public EngineBase {
     // used to track "dirty" state of annotations. not perfect because if we add and delete
     // the same annotation, we should be back to 0
     bool modifiedAnnotations = false;
+    // loaded from a crash-recovery copy: the file lacks the changes
+    bool restoredFromRecovery = false;
 
     // smart dark mode: engine-level image feature/processed caches
     DarkModeEngineCache* darkModeEngineCache = nullptr;

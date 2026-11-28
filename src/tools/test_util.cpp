@@ -29,6 +29,10 @@ extern void VecTest();
 extern void StrVecTest();
 extern void PdfDarkModeOklab_UnitTests();
 extern void PdfDarkModeImageClassifier_UnitTests();
+extern void BrowserUrl_UnitTests();
+extern void InkShapes_UnitTests();
+extern void BrowserLogins_UnitTests();
+extern void KineticScroll_UnitTests();
 #if OS_WIN
 extern void WinUtilTest();
 #endif
@@ -124,6 +128,10 @@ int main(int argc, char** argv) {
     VecTest();
     PdfDarkModeOklab_UnitTests();
     PdfDarkModeImageClassifier_UnitTests();
+    BrowserUrl_UnitTests();
+    InkShapes_UnitTests();
+    BrowserLogins_UnitTests();
+    KineticScroll_UnitTests();
 #if OS_WIN
     WinUtilTest();
 #endif

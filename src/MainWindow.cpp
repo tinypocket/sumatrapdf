@@ -34,7 +34,10 @@
 #include "AIChatCommon.h"
 #include "AIChatPanel.h"
 #include "MainWindow.h"
+#include "Rail.h"
+#include "TopBar.h"
 #include "SelectionToolbar.h"
+#include "DrawMode.h"
 #include "FindBar.h"
 #include "FindWindow.h"
 #include "SearchAndDDE.h"
@@ -123,6 +126,15 @@ MainWindow::~MainWindow() {
     ReportIf(linkOnLastButtonDown);
     str::Free(urlOnLastButtonDown);
     str::Free(homeSearchQuery);
+    str::Free(librarySearchQuery);
+    str::Free(librarySelectedFolderPath);
+    str::Free(libraryRowMenuPath);
+    str::Free(tocStickyText);
+    FreeTouchThumbnails(this);
+    FreeTouchWordIndex(this);
+    str::FreePtr(&touchSearchPending);
+    str::Free(touchBookmarkSearchQuery);
+    str::Free(touchDocumentSearchQuery);
 
     UnsubclassToc(this);
 
@@ -132,6 +144,7 @@ MainWindow::~MainWindow() {
     DeleteObject(brMovePattern);
     DeleteObject(bmpMovePattern);
     DeleteObject(brControlBgColor);
+    DeleteObject(brHomeSearchBg);
 
     // Disconnect UIA clients and release our provider. Clients that still hold
     // refs get UIA_E_ELEMENTNOTAVAILABLE after FreeDocument.
@@ -170,6 +183,7 @@ MainWindow::~MainWindow() {
     ClearFindMatches(this);
 
     DeleteSelectionToolbar(this);
+    DeleteDrawMode(this);
 
     delete linkHandler;
     delete buffer;
@@ -210,6 +224,9 @@ MainWindow::~MainWindow() {
 
     delete sidebarSplitter;
     delete favSplitter;
+    DestroyRail(this);
+    DestroyTopBar(this);
+    DestroyTouchWebView(this);
 }
 
 void ClearMouseState(MainWindow* win) {
@@ -927,6 +944,11 @@ bool HasOpenedDocuments(MainWindow* win) {
 void UpdateControlsColors(MainWindow* win) {
     COLORREF bgCol = ThemeControlBackgroundColor();
     COLORREF txtCol = ThemeWindowTextColor();
+    if (IsTouchChrome(win)) {
+        // the redesign sets the rail and the panel a step back from the top
+        // bar (#f3f0eb against #faf8f5) so they read as their own surface
+        bgCol = ThemeHotBackgroundColor();
+    }
 
     // logfa("retrieved doc colors in tree control: 0x%x 0x%x\n", treeTxtCol, treeBgCol);
 
@@ -938,7 +960,10 @@ void UpdateControlsColors(MainWindow* win) {
 
         win->tocLabelWithClose->SetColors(txtCol, bgCol);
         if (win->tocFilterEdit) {
-            win->tocFilterEdit->SetColors(txtCol, bgCol);
+            // the filter edit sits inside the pill the panel draws behind it, so
+            // it has to match that raised surface, not the panel underneath
+            COLORREF editBg = IsTouchChrome(win) ? ThemeTouchSurfaceColor() : bgCol;
+            win->tocFilterEdit->SetColors(txtCol, editBg);
         }
         win->sidebarSplitter->SetColors(kColorNoChange, splitterCol);
     }

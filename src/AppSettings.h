@@ -35,6 +35,7 @@ HFONT GetAppMenuFontForDpi(int dpi);
 HFONT GetAppBiggerFont(HWND hwnd);
 HFONT GetAppBiggerFontForDpi(int dpi);
 HFONT GetAppTreeFont(HWND hwnd);
+HFONT GetAppTreeFontWeight(HWND hwnd, int weight);
 HFONT GetAppTreeFontForDpi(int dpi);
 HFONT GetAppTreeFontEx(HWND hwnd, bool bold, bool italic);
 HFONT GetAppTreeFontExForDpi(int dpi, bool bold, bool italic);

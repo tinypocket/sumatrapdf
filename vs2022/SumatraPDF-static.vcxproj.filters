@@ -114,6 +114,12 @@
     <ClInclude Include="..\src\AvifReader.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\BrowserLogins.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\BrowserUrlUtil.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\BuildConfig.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -160,6 +166,9 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\DocumentLayout.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\DrawMode.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\EbookDoc.h">
@@ -234,10 +243,16 @@
     <ClInclude Include="..\src\ImageSaveCropResize.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\InkShapes.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\Installer.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\JxlReader.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\KineticScroll.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\LinkFollow.h">
@@ -300,10 +315,16 @@
     <ClInclude Include="..\src\ProgressUpdateUI.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\Rail.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\ReadAloudHighlight.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\ReadAloudPlaybackBar.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\Recovery.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\RefHover.h">
@@ -417,10 +438,16 @@
     <ClInclude Include="..\src\Toolbar.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\TopBar.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\Translations.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\TreeModel.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\TrimDialog.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\UpdateCheck.h">
@@ -467,6 +494,9 @@
     </ClInclude>
     <ClInclude Include="..\src\uia\TextRange.h">
       <Filter>src\uia</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\wingui\Anim.h">
+      <Filter>src\wingui</Filter>
     </ClInclude>
     <ClInclude Include="..\src\wingui\BrowserDocView.h">
       <Filter>src\wingui</Filter>
@@ -563,6 +593,12 @@
     <ClCompile Include="..\src\BasePch.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\BrowserLogins.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\BrowserUrlUtil.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\Canvas.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -621,6 +657,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\DocumentLayout.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\DrawMode.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\EbookDoc.cpp">
@@ -719,6 +758,9 @@
     <ClCompile Include="..\src\ImageSaveCropResize.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\InkShapes.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\Installer.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -726,6 +768,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\JxlReader.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\KineticScroll.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\LinkFollow.cpp">
@@ -815,10 +860,16 @@
     <ClCompile Include="..\src\Print.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\Rail.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\ReadAloudHighlight.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\ReadAloudPlaybackBar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Recovery.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\RefHover.cpp">
@@ -965,6 +1016,9 @@
     <ClCompile Include="..\src\Toolbar.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\TopBar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\TranslationLangs.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -972,6 +1026,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\TreeModel.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TrimDialog.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Uninstaller.cpp">
@@ -1072,6 +1129,9 @@
     </ClCompile>
     <ClCompile Include="..\src\uia\TextRange.cpp">
       <Filter>src\uia</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\wingui\Anim.cpp">
+      <Filter>src\wingui</Filter>
     </ClCompile>
     <ClCompile Include="..\src\wingui\BrowserDocView.cpp">
       <Filter>src\wingui</Filter>

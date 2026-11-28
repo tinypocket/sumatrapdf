@@ -2896,6 +2896,9 @@ static Str PalmDocToHTML(Str path) {
     return html;
 }
 
+extern Str gRecoveryCopyToLoad;
+extern Str gRecoveryCopyForFile;
+
 bool EngineMupdf::Load(Str path, PasswordUI* pwdUI) {
     bool ok;
     auto* ctx = Ctx();
@@ -2946,6 +2949,35 @@ bool EngineMupdf::Load(Str path, PasswordUI* pwdUI) {
             return false;
         }
         return FinishLoading();
+    }
+
+    // restoring changes a crash left unsaved: read the recovery copy instead of
+    // the file (into memory, so the copy can be deleted once saved)
+    bool restoring = streamNo < 0 && len(gRecoveryCopyToLoad) > 0 && path::IsSame(path, gRecoveryCopyForFile);
+    if (restoring) {
+        TempStr copyPath = str::DupTemp(gRecoveryCopyToLoad);
+        str::FreePtr(&gRecoveryCopyToLoad);
+        str::FreePtr(&gRecoveryCopyForFile);
+        Str d = file::ReadFile(copyPath);
+        bool loaded = false;
+        if (len(d) > 0) {
+            fz_buffer* buf = fz_new_buffer_from_copied_data(ctx, (const u8*)d.s, (size_t)d.len);
+            fz_stream* copy = fz_open_buffer(ctx, buf);
+            fz_drop_buffer(ctx, buf);
+            loaded = LoadFromStream(copy, FilePath(), pwdUI) && FinishLoading();
+            if (!loaded && _doc) {
+                fz_drop_document(ctx, _doc);
+                _doc = nullptr;
+            }
+        }
+        str::Free(d);
+        logf("EngineMupdf::Load: restoring unsaved changes to '%s' from '%s': %s\n", path, copyPath,
+             loaded ? StrL("restored") : StrL("failed, opening the file as it is"));
+        if (loaded) {
+            restoredFromRecovery = true;
+            modifiedAnnotations = true; // the changes are not in the file yet
+            return true;
+        }
     }
 
     fz_stream* file = FzOpenOrReadFile(ctx, fnCopy);
@@ -3418,6 +3450,72 @@ static fz_buffer* EngineMupdfLoadExternalStream(fz_context* ctx, const char* fil
     }
     str::Free(data);
     return buf;
+}
+
+// Crash recovery (Recovery.cpp). The app (not the previewer / search filter,
+// which also compile this file) installs the change callback. A recovery copy
+// is the whole document as currently edited; restoring loads that copy in
+// place of the file at gRecoveryCopyForFile, keeping the file's own path.
+Str gRecoveryCopyToLoad;
+Str gRecoveryCopyForFile;
+void (*gOnAnnotationsModified)(EngineMupdf*) = nullptr;
+
+// Writes the document, unsaved changes included, to path as a complete PDF.
+// Serialised into memory under the document lock, then written to disk
+// atomically, so a crash mid-write never destroys the previous good copy.
+// The document itself is not changed: this is a plain (non-incremental) write
+// to another output.
+extern const pdf_write_options pdf_default_write_options2;
+
+bool EngineMupdfSaveRecoveryCopy(EngineBase* engine, Str path) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        return false;
+    }
+    auto* ctx = e->Ctx();
+    fz_buffer* buf = nullptr;
+    fz_output* out = nullptr;
+    bool ok = false;
+    fz_var(buf);
+    fz_var(out);
+    {
+        ScopedRecursiveMutex scope(&e->docLock);
+        fz_try(ctx) {
+            buf = fz_new_buffer(ctx, 64 * 1024);
+            out = fz_new_output_with_buffer(ctx, buf);
+            // a local copy of MuPDF's defaults: its own is data the DLL build doesn't export
+            pdf_write_options opts = pdf_default_write_options2;
+            pdf_write_document(ctx, e->pdfdoc, out, &opts);
+            fz_close_output(ctx, out);
+            ok = true;
+        }
+        fz_always(ctx) {
+            fz_drop_output(ctx, out);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+        }
+    }
+    if (ok) {
+        TempStr tmpPath = str::JoinTemp(path, StrL(".tmp"));
+        unsigned char* data = nullptr;
+        size_t size = fz_buffer_storage(ctx, buf, &data);
+        ok = file::WriteFile(tmpPath, Str((char*)data, (int)size));
+        if (ok) {
+            ok = MoveFileExW(CWStrTemp(ToWStrTemp(tmpPath)), CWStrTemp(ToWStrTemp(path)), MOVEFILE_REPLACE_EXISTING) !=
+                 0;
+        }
+        if (!ok) {
+            file::Delete(tmpPath);
+        }
+    }
+    fz_drop_buffer(ctx, buf);
+    return ok;
+}
+
+bool EngineMupdfWasRestoredFromRecovery(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    return e && e->restoredFromRecovery;
 }
 
 bool EngineMupdf::FinishLoading() {
@@ -4181,10 +4279,160 @@ static fz_display_list* GetOrBuildPageDisplayList(FzPageInfo* pi, fz_context* ct
     return fz_keep_display_list(ctx, pi->displayList);
 }
 
-RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget /*target*/) {
-    auto* ctx = Ctx();
+// Measuring content with MuPDF's bbox device counts everything painted,
+// including the white rectangle many generators fill the whole page with first
+// - which made every page's content the whole page, so smart margins had
+// nothing to trim. This pass-through drops fills in white (or fully
+// transparent) on their way to the bbox device; everything else, clips
+// included, goes through unchanged.
+struct InkBboxDevice {
+    fz_device super;
+    fz_device* inner;
+};
 
-    FzPageInfo* pageInfo = GetFzPageInfo(pageNo, false);
+static bool IsBlankFill(fz_context* ctx, fz_colorspace* cs, const float* color, float alpha, fz_color_params cp) {
+    if (alpha <= 0.0f) {
+        return true;
+    }
+    if (!cs || !color) {
+        return false;
+    }
+    float rgb[3] = {0, 0, 0};
+    fz_try(ctx) {
+        fz_convert_color(ctx, cs, color, fz_device_rgb(ctx), rgb, nullptr, cp);
+    }
+    fz_catch(ctx) {
+        return false;
+    }
+    return rgb[0] >= 0.99f && rgb[1] >= 0.99f && rgb[2] >= 0.99f;
+}
+
+#define INK_INNER(dev) (((InkBboxDevice*)(dev))->inner)
+
+static void ink_fill_path(fz_context* ctx, fz_device* dev, const fz_path* path, int even_odd, fz_matrix ctm,
+                          fz_colorspace* cs, const float* color, float alpha, fz_color_params cp) {
+    if (!IsBlankFill(ctx, cs, color, alpha, cp)) {
+        fz_fill_path(ctx, INK_INNER(dev), path, even_odd, ctm, cs, color, alpha, cp);
+    }
+}
+static void ink_stroke_path(fz_context* ctx, fz_device* dev, const fz_path* path, const fz_stroke_state* stroke,
+                            fz_matrix ctm, fz_colorspace* cs, const float* color, float alpha, fz_color_params cp) {
+    fz_stroke_path(ctx, INK_INNER(dev), path, stroke, ctm, cs, color, alpha, cp);
+}
+static void ink_fill_text(fz_context* ctx, fz_device* dev, const fz_text* text, fz_matrix ctm, fz_colorspace* cs,
+                          const float* color, float alpha, fz_color_params cp) {
+    fz_fill_text(ctx, INK_INNER(dev), text, ctm, cs, color, alpha, cp);
+}
+static void ink_stroke_text(fz_context* ctx, fz_device* dev, const fz_text* text, const fz_stroke_state* stroke,
+                            fz_matrix ctm, fz_colorspace* cs, const float* color, float alpha, fz_color_params cp) {
+    fz_stroke_text(ctx, INK_INNER(dev), text, stroke, ctm, cs, color, alpha, cp);
+}
+static void ink_fill_shade(fz_context* ctx, fz_device* dev, fz_shade* shade, fz_matrix ctm, float alpha,
+                           fz_color_params cp) {
+    fz_fill_shade(ctx, INK_INNER(dev), shade, ctm, alpha, cp);
+}
+static void ink_fill_image(fz_context* ctx, fz_device* dev, fz_image* image, fz_matrix ctm, float alpha,
+                           fz_color_params cp) {
+    fz_fill_image(ctx, INK_INNER(dev), image, ctm, alpha, cp);
+}
+static void ink_fill_image_mask(fz_context* ctx, fz_device* dev, fz_image* image, fz_matrix ctm, fz_colorspace* cs,
+                                const float* color, float alpha, fz_color_params cp) {
+    fz_fill_image_mask(ctx, INK_INNER(dev), image, ctm, cs, color, alpha, cp);
+}
+static void ink_clip_path(fz_context* ctx, fz_device* dev, const fz_path* path, int even_odd, fz_matrix ctm,
+                          fz_rect scissor) {
+    fz_clip_path(ctx, INK_INNER(dev), path, even_odd, ctm, scissor);
+}
+static void ink_clip_stroke_path(fz_context* ctx, fz_device* dev, const fz_path* path, const fz_stroke_state* stroke,
+                                 fz_matrix ctm, fz_rect scissor) {
+    fz_clip_stroke_path(ctx, INK_INNER(dev), path, stroke, ctm, scissor);
+}
+static void ink_clip_text(fz_context* ctx, fz_device* dev, const fz_text* text, fz_matrix ctm, fz_rect scissor) {
+    fz_clip_text(ctx, INK_INNER(dev), text, ctm, scissor);
+}
+static void ink_clip_stroke_text(fz_context* ctx, fz_device* dev, const fz_text* text, const fz_stroke_state* stroke,
+                                 fz_matrix ctm, fz_rect scissor) {
+    fz_clip_stroke_text(ctx, INK_INNER(dev), text, stroke, ctm, scissor);
+}
+static void ink_clip_image_mask(fz_context* ctx, fz_device* dev, fz_image* image, fz_matrix ctm, fz_rect scissor) {
+    fz_clip_image_mask(ctx, INK_INNER(dev), image, ctm, scissor);
+}
+static void ink_pop_clip(fz_context* ctx, fz_device* dev) {
+    fz_pop_clip(ctx, INK_INNER(dev));
+}
+static void ink_begin_mask(fz_context* ctx, fz_device* dev, fz_rect area, int luminosity, fz_colorspace* cs,
+                           const float* bc, fz_color_params cp) {
+    fz_begin_mask(ctx, INK_INNER(dev), area, luminosity, cs, bc, cp);
+}
+static void ink_end_mask(fz_context* ctx, fz_device* dev, fz_function* tr) {
+    fz_end_mask_tr(ctx, INK_INNER(dev), tr);
+}
+static void ink_begin_group(fz_context* ctx, fz_device* dev, fz_rect area, fz_colorspace* cs, int isolated,
+                            int knockout, int blendmode, float alpha) {
+    fz_begin_group(ctx, INK_INNER(dev), area, cs, isolated, knockout, blendmode, alpha);
+}
+static void ink_end_group(fz_context* ctx, fz_device* dev) {
+    fz_end_group(ctx, INK_INNER(dev));
+}
+static int ink_begin_tile(fz_context* ctx, fz_device* dev, fz_rect area, fz_rect view, float xstep, float ystep,
+                          fz_matrix ctm, int id, int doc_id) {
+    return fz_begin_tile_tid(ctx, INK_INNER(dev), area, view, xstep, ystep, ctm, id, doc_id);
+}
+static void ink_end_tile(fz_context* ctx, fz_device* dev) {
+    fz_end_tile(ctx, INK_INNER(dev));
+}
+static void ink_close(fz_context* ctx, fz_device* dev) {
+    fz_close_device(ctx, INK_INNER(dev));
+}
+static void ink_drop(fz_context* ctx, fz_device* dev) {
+    fz_drop_device(ctx, INK_INNER(dev));
+}
+
+// a bbox device (into *result) that leaves white fills out
+static fz_device* NewInkBboxDevice(fz_context* ctx, fz_rect* result) {
+    fz_device* inner = fz_new_bbox_device(ctx, result);
+    InkBboxDevice* d = nullptr;
+    fz_try(ctx) {
+        d = fz_new_derived_device(ctx, InkBboxDevice);
+    }
+    fz_catch(ctx) {
+        fz_drop_device(ctx, inner);
+        fz_rethrow(ctx);
+    }
+    d->inner = inner;
+    d->super.close_device = ink_close;
+    d->super.drop_device = ink_drop;
+    d->super.fill_path = ink_fill_path;
+    d->super.stroke_path = ink_stroke_path;
+    d->super.fill_text = ink_fill_text;
+    d->super.stroke_text = ink_stroke_text;
+    d->super.fill_shade = ink_fill_shade;
+    d->super.fill_image = ink_fill_image;
+    d->super.fill_image_mask = ink_fill_image_mask;
+    d->super.clip_path = ink_clip_path;
+    d->super.clip_stroke_path = ink_clip_stroke_path;
+    d->super.clip_text = ink_clip_text;
+    d->super.clip_stroke_text = ink_clip_stroke_text;
+    d->super.clip_image_mask = ink_clip_image_mask;
+    d->super.pop_clip = ink_pop_clip;
+    d->super.begin_mask = ink_begin_mask;
+    d->super.end_mask = ink_end_mask;
+    d->super.begin_group = ink_begin_group;
+    d->super.end_group = ink_end_group;
+    d->super.begin_tile = ink_begin_tile;
+    d->super.end_tile = ink_end_tile;
+    return &d->super;
+}
+
+// The bounding box of what the page draws, optionally of only what falls in
+// `region`: the display list is run with the region as its scissor, so objects
+// wholly outside it (a running header, a footer line) are skipped, and the
+// result is clipped to the region (a full-page background would otherwise
+// cover it all).
+static RectF PageContentBoxIn(EngineMupdf* e, int pageNo, const RectF* region) {
+    auto* ctx = e->Ctx();
+
+    FzPageInfo* pageInfo = e->GetFzPageInfo(pageNo, false);
     if (!pageInfo) {
         // maybe should return a dummy size. not sure how this
         // will play with layout. The page should fail to render
@@ -4193,17 +4441,25 @@ RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget /*target*/) {
     }
 
     RectF mediabox = pageInfo->mediabox;
+    RectF limit = region ? region->Intersect(mediabox) : mediabox;
+    if (limit.IsEmpty()) {
+        return RectF();
+    }
 
     fz_rect pagerect;
     fz_display_list* keptList = nullptr;
     {
         // Hold per-page lock briefly: page bounds + (re-)acquire cached display list.
-        ScopedMutex scope(&renderLock);
+        ScopedMutex scope(&e->renderLock);
         pagerect = fz_bound_page(ctx, pageInfo->page);
         keptList = GetOrBuildPageDisplayList(pageInfo, ctx);
     }
     if (!keptList) {
-        return mediabox;
+        return limit;
+    }
+    fz_rect scissor = pagerect;
+    if (region) {
+        scissor = fz_intersect_rect(pagerect, ToFzRect(limit));
     }
 
     // Lock-free: bbox-device run on a display list is concurrency-safe.
@@ -4212,8 +4468,8 @@ RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget /*target*/) {
     fz_device* dev = nullptr;
     fz_var(dev);
     fz_try(ctx) {
-        dev = fz_new_bbox_device(ctx, &rect);
-        fz_run_display_list(ctx, keptList, dev, fz_identity, pagerect, &fzcookie);
+        dev = NewInkBboxDevice(ctx, &rect);
+        fz_run_display_list(ctx, keptList, dev, fz_identity, scissor, &fzcookie);
         fz_close_device(ctx, dev);
     }
     fz_always(ctx) {
@@ -4222,15 +4478,24 @@ RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget /*target*/) {
     }
     fz_catch(ctx) {
         fz_report_error(ctx);
-        return mediabox;
+        return limit;
     }
 
     if (fz_is_infinite_rect(rect)) {
-        return mediabox;
+        return limit;
     }
 
+    // (an empty rect - a blank page, or nothing in the region - stays empty)
     RectF rect2 = ToRectF(rect);
-    return rect2.Intersect(mediabox);
+    return rect2.Intersect(limit);
+}
+
+RectF EngineMupdf::PageContentBox(int pageNo, RenderTarget /*target*/) {
+    return PageContentBoxIn(this, pageNo, nullptr);
+}
+
+RectF EngineMupdf::PageContentBoxWithin(int pageNo, RectF region) {
+    return PageContentBoxIn(this, pageNo, &region);
 }
 
 RectF EngineMupdf::Transform(const RectF& rect, int pageNo, float zoom, int rotation, bool inverse) {
@@ -5703,6 +5968,11 @@ bool EngineMupdfSaveUpdated(EngineBase* engine, Str path, const ShowErrorCb& sho
     // TODO: if saving to a new file, don't do incremental and linearlize?
     // save_opts.do_linear = 1;
     save_opts.do_incremental = pdf_can_be_saved_incrementally(ctx, epdf->pdfdoc);
+    if (epdf->restoredFromRecovery) {
+        // the document came from a recovery copy, not from the file: appending
+        // to the file would leave out the restored changes, so write it whole
+        save_opts.do_incremental = 0;
+    }
     save_opts.do_compress = 1;
     save_opts.do_compress_images = 1;
     save_opts.do_compress_fonts = 1;
@@ -5896,21 +6166,42 @@ EngineBase* CreateEngineMupdfFromData(Str data, Str nameHint, PasswordUI* pwdUI)
 }
 
 // it's fast because we only collect pointers from FzPageInfo
+void EngineMupdfGetAnnotationsInRange(EngineBase* engine, int fromPage, int toPage, Vec<Annotation*>& annotsOut);
+
 void EngineMupdfGetAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut) {
     annotsOut.Clear();
-
     EngineMupdf* e = AsEngineMupdf(engine);
     if (!e->pdfdoc) {
         return;
     }
+    EngineMupdfGetAnnotationsInRange(engine, 1, e->pageCount, annotsOut);
+}
+
+// Annotations on pages [fromPage, toPage], appended to annotsOut. Gathering
+// them loads every page in the range, so a caller sweeping a long document
+// from a worker thread asks for it a chunk at a time: the pages lock is taken
+// per call, and holding it across the whole document would stall every page
+// the UI thread wants to render meanwhile.
+void EngineMupdfGetAnnotationsInRange(EngineBase* engine, int fromPage, int toPage, Vec<Annotation*>& annotsOut) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        return;
+    }
+    fromPage = std::max(fromPage, 1);
+    toPage = std::min(toPage, e->pageCount);
     ScopedRecursiveMutex scope(&e->pagesLock);
-    for (int i = 1; i <= e->pageCount; i++) {
+    for (int i = fromPage; i <= toPage; i++) {
         FzPageInfo* pi = e->GetFzPageInfo(i, false);
         if (!pi) {
             continue;
         }
         annotsOut.Append(pi->annotations);
     }
+}
+
+int EngineMupdfPageCount(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    return e && e->pdfdoc ? e->pageCount : 0;
 }
 
 bool EngineMupdfHasUnsavedAnnotations(EngineBase* engine) {
@@ -6148,6 +6439,11 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
     e->modifiedAnnotations = true;
     if (!e->pdfdoc) {
         return;
+    }
+    if (gOnAnnotationsModified) {
+        // the app refreshes the unsaved-changes badge and schedules a
+        // recovery copy; it only posts work, so calling it first is fine
+        gOnAnnotationsModified(e);
     }
     int pageNo = annot->pageNo;
     ReportIf(pageNo < 1 || pageNo > e->pageCount);

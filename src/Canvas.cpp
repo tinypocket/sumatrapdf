@@ -9,6 +9,7 @@
 #include "base/Timer.h"
 #include "base/UITask.h"
 #include "base/Win.h"
+#include "base/Pixmap.h"
 #include "base/ScopedWin.h"
 #include "base/Http.h"
 #include "base/GdiPlusUtil.h"
@@ -45,6 +46,7 @@
 #include "EditAnnotations.h"
 #include "Notifications.h"
 #include "MainWindow.h"
+#include "TableOfContents.h"
 #include "Canvas.h"
 #include "Menu.h"
 #include "uia/Provider.h"
@@ -53,11 +55,13 @@
 #include "LinkFollow.h"
 #include "SelectTextKeyboard.h"
 #include "SelectionToolbar.h"
+#include "DrawMode.h"
 #include "ReadAloudHighlight.h"
 #include "ReadAloudPlaybackBar.h"
 #include "TextToSpeech.h"
 #include "HomePage.h"
 #include "Toolbar.h"
+#include "TopBar.h"
 #include "Translations.h"
 
 #include "RefHover.h"
@@ -1269,6 +1273,7 @@ static bool StopDraggingAnnotation(MainWindow* win, int x, int y, bool aborted) 
         // logf(" new rect: x=%.2f, y=%.2f, dx=%.2f, dy=%.2f\n", r.x, r.y, r.dx, r.dy);
         SetRect(annot, r);
         NotifyAnnotationsChanged(win->CurrentTab()->editAnnotsWindow);
+        InvalidateTouchAnnotations(win);
         MainWindowRerender(win);
         ToolbarUpdateStateForWindow(win, true);
     }
@@ -1327,6 +1332,9 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
     DisplayModel* dm = win->AsFixed();
     // ReportIf(!dm); // can happen if reload fails, we delete DisplayModel
     if (!dm) return;
+    if (DrawModeOnMouseMove(win, x, y)) {
+        return;
+    }
 
     if (win->InPresentation()) {
         if (PM_BLACK_SCREEN == win->presentation || PM_WHITE_SCREEN == win->presentation) {
@@ -1617,6 +1625,7 @@ static bool StopAnnotationResize(MainWindow* win, bool aborted) {
     // The annotation has already been updated during mouse move,
     // just notify and update toolbar
     NotifyAnnotationsChanged(win->CurrentTab()->editAnnotsWindow);
+    InvalidateTouchAnnotations(win);
     MainWindowRerender(win);
     ToolbarUpdateStateForWindow(win, true);
 
@@ -1660,9 +1669,189 @@ static bool IsFullPageImage(DisplayModel* dm, IPageElement* el, int pageNo) {
     return imgArea >= 0.8f * pageArea;
 }
 
+// --- smart-margin gaps ------------------------------------------------------
+// Smart margins trim a page's top and bottom separately, and the two trims that
+// meet between one page and the next are one gap on screen: the footer of the
+// page above and the header of the page below. A small tab sits in that gap and
+// opens or closes both - opening only the page above left the header below it
+// still cut, which is half of what the reader was after. A page with nothing
+// laid out above it (the first page, or any page in the one-at-a-time modes)
+// gets a tab on its top edge too, so its header can be had back as well.
+// Only the gap that was tapped changes: the point is to rescue the odd page the
+// trim got wrong without giving up the setting everywhere.
+
+struct MarginGap {
+    int above = 0; // page whose bottom edge is at this gap, 0 for none
+    int below = 0; // page whose top edge is at this gap, 0 for none
+    Rect badge;
+    // The tab is small and off to one side, so the middle of the gap toggles
+    // as well - it is the gutter between pages, so there is nothing there to
+    // hit by accident.
+    Rect strip;
+};
+
+// The page-space edges of a page that face the bottom (or top) of the screen.
+// Upside down a page's header is at the bottom; turned on its side both
+// trimmed edges face left and right, so a gap above or below it stands for
+// the whole page.
+static int PageEdgesFacing(int rotation, bool screenBottom) {
+    if (rotation == 0) {
+        return screenBottom ? kPageEdgeBottom : kPageEdgeTop;
+    }
+    if (rotation == 180) {
+        return screenBottom ? kPageEdgeTop : kPageEdgeBottom;
+    }
+    return kPageEdgesAll;
+}
+
+// The shown page laid out directly under (or over) pageNo - the next one in a
+// single column, two on in a facing layout - or 0. Read from the layout rather
+// than from page numbers, so it holds for every display mode; in the
+// one-page-at-a-time modes no other page is shown and there is none.
+static int AdjacentPage(DisplayModel* dm, int pageNo, bool below) {
+    PageInfo* pi = dm->GetPageInfo(pageNo);
+    if (!pi || !pi->isShown) {
+        return 0;
+    }
+    Rect r = pi->pos;
+    // a row holds at most two pages, so the neighbor is a page number or two away
+    constexpr int kSearch = 3;
+    int best = 0;
+    int bestDist = INT_MAX;
+    int from = std::max(1, pageNo - kSearch);
+    int to = std::min(dm->PageCount(), pageNo + kSearch);
+    for (int p = from; p <= to; p++) {
+        PageInfo* q = (p == pageNo) ? nullptr : dm->GetPageInfo(p);
+        if (!q || !q->isShown) {
+            continue;
+        }
+        Rect o = q->pos;
+        bool sameColumn = o.x < r.x + r.dx && r.x < o.x + o.dx;
+        int dist = below ? o.y - (r.y + r.dy) : r.y - (o.y + o.dy);
+        if (sameColumn && dist >= 0 && dist < bestDist) {
+            bestDist = dist;
+            best = p;
+        }
+    }
+    return best;
+}
+
+static bool MarginGapOpen(DisplayModel* dm, const MarginGap& g) {
+    int rotation = dm->GetRotation();
+    bool aboveOpen = g.above && (dm->PageMarginExpandedEdges(g.above) & PageEdgesFacing(rotation, true));
+    bool belowOpen = g.below && (dm->PageMarginExpandedEdges(g.below) & PageEdgesFacing(rotation, false));
+    return aboveOpen || belowOpen;
+}
+
+static bool MarginGapTrimmed(DisplayModel* dm, const MarginGap& g) {
+    int rotation = dm->GetRotation();
+    bool aboveCut = g.above && (dm->PageMarginTrimmedEdges(g.above) & PageEdgesFacing(rotation, true));
+    bool belowCut = g.below && (dm->PageMarginTrimmedEdges(g.below) & PageEdgesFacing(rotation, false));
+    return aboveCut || belowCut;
+}
+
+static void SetMarginGapOpen(DisplayModel* dm, const MarginGap& g, bool open) {
+    int rotation = dm->GetRotation();
+    if (g.above) {
+        dm->SetPageMarginExpanded(g.above, PageEdgesFacing(rotation, true), open);
+    }
+    if (g.below) {
+        dm->SetPageMarginExpanded(g.below, PageEdgesFacing(rotation, false), open);
+    }
+}
+
+// the gaps in view that have something to say: a trim to give back, or one
+// already given back that can be taken away again
+static void CollectMarginGaps(HWND hwnd, DisplayModel* dm, Vec<MarginGap>& gaps) {
+    int dx = DpiScale(hwnd, 64);
+    int dy = DpiScale(hwnd, 18);
+    int inset = DpiScale(hwnd, 12);
+    auto add = [&](int above, int below, const Rect& page, int centerY) {
+        MarginGap g;
+        g.above = above;
+        g.below = below;
+        if (!MarginGapTrimmed(dm, g) && !MarginGapOpen(dm, g)) {
+            return;
+        }
+        // held to the right, out of the way of drop caps and initials, which
+        // sit at the left of the text block
+        g.badge = Rect{page.x + page.dx - dx - inset, centerY - dy / 2, dx, dy};
+        int stripDx = page.dx / 2;
+        g.strip = Rect{page.x + (page.dx - stripDx) / 2, g.badge.y, stripDx, dy};
+        gaps.Append(g);
+    };
+    for (int pageNo = 1; pageNo <= dm->PageCount(); pageNo++) {
+        PageInfo* pi = dm->GetPageInfo(pageNo);
+        if (!pi || !pi->isShown || pi->visibleRatio <= 0.0f) {
+            continue;
+        }
+        Rect r = pi->pageOnScreen;
+        int pageBottom = r.y + r.dy;
+        int below = AdjacentPage(dm, pageNo, true);
+        if (below) {
+            // centred in the gutter, so it reads as belonging to both pages
+            add(pageNo, below, r, (pageBottom + dm->GetPageInfo(below)->pageOnScreen.y) / 2);
+        } else {
+            add(pageNo, 0, r, pageBottom);
+        }
+        int above = AdjacentPage(dm, pageNo, false);
+        if (!above) {
+            add(0, pageNo, r, r.y);
+        } else if (dm->GetPageInfo(above)->visibleRatio <= 0.0f) {
+            // the page above is scrolled away, so the loop does not reach it,
+            // but the gap between the two can still be in view
+            Rect ra = dm->GetPageInfo(above)->pageOnScreen;
+            add(above, pageNo, r, (ra.y + ra.dy + r.y) / 2);
+        }
+    }
+}
+
+// A page that changed height at an unchanged zoom still has tiles in the render
+// cache that look current. They were rendered for the old crop, and blitted
+// into the new slot they came out scaled up and clipped at the right. Drop
+// them, and any render of them still queued or in flight.
+static void DropPageRenders(DisplayModel* dm, int pageNo) {
+    if (pageNo <= 0) {
+        return;
+    }
+    gRenderCache->Invalidate(dm, pageNo, dm->GetEngine()->PageMediabox(pageNo));
+    gRenderCache->FreePage(dm, pageNo);
+}
+
+static bool ToggleSmartMarginAtPoint(MainWindow* win, int x, int y) {
+    DisplayModel* dm = win->AsFixed();
+    if (!dm || !gGlobalPrefs->smartMargins) {
+        return false;
+    }
+    Vec<MarginGap> gaps;
+    CollectMarginGaps(win->hwndCanvas, dm, gaps);
+    Point pt{x, y};
+    for (const MarginGap& g : gaps) {
+        if (!g.badge.Contains(pt) && !g.strip.Contains(pt)) {
+            continue;
+        }
+        SetMarginGapOpen(dm, g, !MarginGapOpen(dm, g));
+        DropPageRenders(dm, g.above);
+        DropPageRenders(dm, g.below);
+        ScrollState state = dm->GetScrollState();
+        dm->Relayout(dm->GetZoomVirtual(), dm->GetRotation());
+        dm->SetScrollState(state);
+        win->RedrawAll(true);
+        return true;
+    }
+    return false;
+}
+
 static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
     // lf("Left button clicked on %d %d", x, y);
     if (IsRightDragging(win)) {
+        return;
+    }
+    // in draw mode the mouse and the pen draw (a finger still scrolls)
+    if (DrawModeOnMouseDown(win, x, y)) {
+        return;
+    }
+    if (ToggleSmartMarginAtPoint(win, x, y)) {
         return;
     }
 
@@ -1827,6 +2016,9 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
 }
 
 static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
+    if (DrawModeOnMouseUp(win, x, y)) {
+        return;
+    }
     DisplayModel* dm = win->AsFixed();
     ReportIf(!dm);
 
@@ -1990,6 +2182,10 @@ bool gDisableInteractiveInverseSearch = false;
 
 static void OnMouseLeftButtonDblClk(MainWindow* win, int x, int y, WPARAM key) {
     // lf("Left button clicked on %d %d", x, y);
+    // two quick taps while drawing are two dots, not a double-click
+    if (DrawModeOnMouseDown(win, x, y)) {
+        return;
+    }
     auto isLeft = bit::IsMaskSet(key, (WPARAM)MK_LBUTTON);
     if (gGlobalPrefs->enableTeXEnhancements && !gDisableInteractiveInverseSearch && isLeft) {
         bool dontSelect = OnInverseSearch(win, x, y);
@@ -2205,7 +2401,23 @@ static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& pageRect, bool 
     Rectangle(hdc, frame.x, frame.y, frame.x + frame.dx, frame.y + frame.dy);
 }
 #else
-static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& /*pageRect*/, bool /*presentation*/, COLORREF bgCol) {
+static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& /*pageRect*/, bool presentation, COLORREF bgCol) {
+    // The redesign lifts the page off the canvas with a soft shadow. Stacked
+    // rects rather than a blur: this runs on every canvas repaint, and a few
+    // FillRects are far cheaper than compositing a blurred surface.
+    if (gGlobalPrefs->touchChrome && !presentation) {
+        COLORREF canvasCol = ThemeMainWindowBackgroundColor();
+        constexpr int kLayers = 4;
+        for (int i = kLayers; i >= 1; i--) {
+            int spread = DpiScale(hdc, i);
+            Rect sr = bounds;
+            sr.Inflate(spread, spread);
+            sr.y += DpiScale(hdc, 1); // cast downward
+            COLORREF col = AccentColor(canvasCol, 4 * (kLayers - i + 1));
+            AutoDeleteBrush shadowBr = CreateSolidBrush(col);
+            HdcFillRect(hdc, sr, shadowBr);
+        }
+    }
     AutoDeletePen pen(CreatePen(PS_NULL, 0, 0));
     AutoDeleteBrush brush(CreateSolidBrush(bgCol));
     ScopedSelectPen restorePen(hdc, pen);
@@ -2213,6 +2425,39 @@ static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& /*pageRect*/, b
     Rectangle(hdc, bounds.x, bounds.y, bounds.x + bounds.dx + 1, bounds.y + bounds.dy + 1);
 }
 #endif
+
+static void DrawSmartMarginBadge(HDC hdc, const Rect& r, bool expanded) {
+    Gdiplus::Graphics gfx(hdc);
+    gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    COLORREF bg = ThemeControlBackgroundColor();
+    COLORREF fg = ThemeWindowDarkerTextColor();
+    Gdiplus::Color bgc(210, GetRValue(bg), GetGValue(bg), GetBValue(bg));
+    Gdiplus::SolidBrush br(bgc);
+    int d = std::min(r.dy, r.dx);
+    Gdiplus::GraphicsPath path;
+    path.AddArc(r.x, r.y, d, d, 180.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y, d, d, 270.0f, 90.0f);
+    path.AddArc(r.x + r.dx - d, r.y + r.dy - d, d, d, 0.0f, 90.0f);
+    path.AddArc(r.x, r.y + r.dy - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+    gfx.FillPath(&br, &path);
+
+    // chevron: down = there is more page to show, up = collapse it again
+    Gdiplus::Pen pen(GdiRgbFromCOLORREF(fg), (Gdiplus::REAL)std::max(1, DpiScale(hdc, 2)));
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    int cx = r.x + r.dx / 2;
+    int cy = r.y + r.dy / 2;
+    int arm = DpiScale(hdc, 5);
+    int h = DpiScale(hdc, 3);
+    if (expanded) {
+        gfx.DrawLine(&pen, cx - arm, cy + h, cx, cy - h);
+        gfx.DrawLine(&pen, cx, cy - h, cx + arm, cy + h);
+    } else {
+        gfx.DrawLine(&pen, cx - arm, cy - h, cx, cy + h);
+        gfx.DrawLine(&pen, cx, cy + h, cx + arm, cy - h);
+    }
+}
 
 // CmdToggleImages. Like showLinks this is a debug aid (both live in the debug
 // menu, so both are debug / pre-release only), and like it the outlines are
@@ -2426,6 +2671,8 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
     // different color
     COLORREF colPlaceholder;
     ThemeDocumentColors(colPlaceholder);
+    // the page before its tiles arrive is as warm as they will be
+    colPlaceholder = WarmColor(colPlaceholder, gRenderCache->nightLight);
     // until the first page of this tab has been painted, use the theme's
     // window background instead: e.g. restoring a session into a maximized
     // window can take a while to render the first page and a white
@@ -2517,6 +2764,7 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
 
     bool isRtl = IsUIRtl();
     for (int pageNo = 1; pageNo <= dm->PageCount(); ++pageNo) {
+        // (smart-margins badge is drawn after the page content, below)
         PageInfo* pi = dm->GetPageInfo(pageNo);
         if (!pi || 0.0F == pi->visibleRatio) {
             continue;
@@ -2604,6 +2852,19 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
         DeleteDC(bmpDC);
     }
 
+    // Tell the reader when a page is showing less than its whole self, and
+    // give them a way to get it back: the engine's content box is not always
+    // right, and a silently clipped page is worse than a taller one. The tabs
+    // sit in the gaps, over the edges of the pages on both sides, so they go on
+    // after every page is painted or the page below paints over half of each.
+    if (gGlobalPrefs->smartMargins) {
+        Vec<MarginGap> gaps;
+        CollectMarginGaps(win->hwndCanvas, dm, gaps);
+        for (const MarginGap& g : gaps) {
+            DrawSmartMarginBadge(hdc, g.badge, MarginGapOpen(dm, g));
+        }
+    }
+
     WindowTab* tab = win->CurrentTab();
     PaintCurrentEditAnnotationMark(tab, hdc, dm);
 
@@ -2637,6 +2898,7 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
 
     PaintKeyboardLinkTargets(win, hdc);
     PaintKeyboardTextCaret(win, hdc);
+    PaintDrawModeOverlay(win, hdc);
 
     if (!rendering) {
         DebugShowLinks(dm, hdc);
@@ -2796,6 +3058,13 @@ static LRESULT OnSetCursorMouseNone(MainWindow* win, HWND hwnd) {
 
 static LRESULT OnSetCursor(MainWindow* win, HWND hwnd) {
     ReportIf(win->hwndCanvas != hwnd);
+    if (IsDrawModeOn(win)) {
+        Point pt = HwndGetCursorPos(hwnd);
+        if (DrawModeSetCursor(win, pt.x, pt.y)) {
+            win->DeleteToolTip();
+            return TRUE;
+        }
+    }
     if (win->mouseAction != MouseAction::None) {
         win->DeleteToolTip();
     }
@@ -3441,6 +3710,41 @@ typedef BOOL(WINAPI* Sig_GetPointerType)(UINT32 pointerId, DWORD* pointerType);
 static Sig_GetPointerType DynGetPointerType = nullptr;
 static bool triedLoadPointerApi = false;
 
+// POINTER_INFO / POINTER_PEN_INFO, declared here because the SDK only exposes
+// them for WINVER >= 0x0602 and we target 0x0601
+struct SumatraPointerInfo {
+    UINT32 pointerType;
+    UINT32 pointerId;
+    UINT32 frameId;
+    UINT32 pointerFlags;
+    HANDLE sourceDevice;
+    HWND hwndTarget;
+    POINT ptPixelLocation;
+    POINT ptHimetricLocation;
+    POINT ptPixelLocationRaw;
+    POINT ptHimetricLocationRaw;
+    DWORD dwTime;
+    UINT32 historyCount;
+    INT32 inputData;
+    DWORD dwKeyStates;
+    UINT64 performanceCount;
+    INT32 buttonChangeType;
+};
+struct SumatraPointerPenInfo {
+    SumatraPointerInfo pointerInfo;
+    UINT32 penFlags;
+    UINT32 penMask;
+    UINT32 pressure;
+    UINT32 rotation;
+    INT32 tiltX;
+    INT32 tiltY;
+};
+// PEN_FLAG_INVERTED: the pen is turned around; PEN_FLAG_ERASER: its eraser end is pressed
+#define SUMATRA_PEN_FLAG_INVERTED 0x00000002
+#define SUMATRA_PEN_FLAG_ERASER 0x00000004
+typedef BOOL(WINAPI* Sig_GetPointerPenInfo)(UINT32 pointerId, SumatraPointerPenInfo* penInfo);
+static Sig_GetPointerPenInfo DynGetPointerPenInfo = nullptr;
+
 static void EnsurePointerApiLoaded() {
     if (triedLoadPointerApi) {
         return;
@@ -3449,6 +3753,7 @@ static void EnsurePointerApiLoaded() {
     HMODULE h = GetModuleHandleW(L"user32.dll");
     if (h) {
         DynGetPointerType = (Sig_GetPointerType)GetProcAddress(h, "GetPointerType");
+        DynGetPointerPenInfo = (Sig_GetPointerPenInfo)GetProcAddress(h, "GetPointerPenInfo");
     }
 }
 
@@ -3482,6 +3787,13 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
 
     if (msg == WM_POINTERDOWN) {
         mouseWp = MK_LBUTTON;
+        // in draw mode the pen's eraser end erases
+        bool eraserEnd = false;
+        SumatraPointerPenInfo penInfo{};
+        if (DynGetPointerPenInfo && DynGetPointerPenInfo(pointerId, &penInfo)) {
+            eraserEnd = (penInfo.penFlags & (SUMATRA_PEN_FLAG_INVERTED | SUMATRA_PEN_FLAG_ERASER)) != 0;
+        }
+        DrawModeSetPenEraser(win, eraserEnd);
         OnMouseLeftButtonDown(win, x, y, mouseWp);
         return true;
     }
@@ -3533,6 +3845,7 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
             return 0;
 
         case WM_LBUTTONDOWN:
+            CloseTouchDocumentOverlays(win);
             OnMouseLeftButtonDown(win, x, y, wp);
             return 0;
 
@@ -3832,6 +4145,24 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
         case kSelectionToolbarShowTimerID:
             // the selection settled: pop up the floating selection toolbar
             SelectionToolbarOnShowTimer(win);
+            break;
+
+        case kDrawHoldTimerID:
+        case kDrawPendingTimerID:
+            DrawModeOnTimer(win, timerId);
+            break;
+
+        case kLibraryScrollTimerID:
+            // Library scroll easing / fling; stops itself when it settles
+            HomePageKineticTick(win);
+            break;
+
+        case kAboutHoldTimerID:
+            HomePageOnHoldTimer(win);
+            break;
+
+        case kLibraryFeedbackTimerID:
+            HomePageFeedbackTick(win);
             break;
 
         case HIDE_FWDSRCHMARK_TIMER_ID:
